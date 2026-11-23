@@ -1917,6 +1917,19 @@ impl Em {
 
     // ---------------------------------------------------------------- images (MIMG)
 
+    /// SM 6.6 has no comparison sample with gradients. For each pixel in a quad, build a
+    /// footprint centered at its coordinate and let SampleCmp do its usual filtering.
+    /// Evaluate all four samples before selecting so the texture derivatives see the whole quad.
+    fn sample_cmp_grad(&mut self, t: &str, ty: &str, coord: &str, dx: &str, dy: &str, args: &str) -> String {
+        self.line(&format!("int2 {t}_xy = int2(xi.xcl_pos.x > QuadReadAcrossX(xi.xcl_pos.x), xi.xcl_pos.y > QuadReadAcrossY(xi.xcl_pos.y));"));
+        self.line(&format!("float4 {t}_values; [unroll] for (uint {t}_q = 0; {t}_q < 4; ++{t}_q) {{"));
+        self.line(&format!("    int2 {t}_delta = {t}_xy - int2({t}_q & 1u, {t}_q >> 1);"));
+        self.line(&format!("    {ty} {t}_p = QuadReadLaneAt({coord}, {t}_q) + {t}_delta.x * QuadReadLaneAt({dx}, {t}_q) + {t}_delta.y * QuadReadLaneAt({dy}, {t}_q);"));
+        self.line(&format!("    {t}_values[{t}_q] = {t}_T.SampleCmp({t}_S, {args});"));
+        self.line("}");
+        format!("{t}_values[{t}_xy.x + 2 * {t}_xy.y].xxxx")
+    }
+
     /// MIMG → SM 6.6 dynamic resources. XCL image descriptors (T#, 8 dwords) keep the GFX10
     /// layout, but BASE_ADDRESS (word 0) holds the index of the SRV in the CBV/SRV/UAV heap
     /// (UAV at +1); FORMAT (word 1 [28:20]) selects the typed view (float/uint/sint).
@@ -2200,6 +2213,21 @@ impl Em {
                     None => l,
                 };
                 match (&cmp, &grads, &lod, &bias) {
+                    (Some(z), Some((dx, dy)), _, _) if ps => {
+                        let ty = ["float", "float2", "float3"][dx.len() - 1];
+                        let vector = |v: &[String]| if v.len() == 1 { v[0].clone() } else { format!("{ty}({})", v.join(", ")) };
+                        // Array layers have no derivatives. Cube gradients are in face space:
+                        // project the footprint back to directions on the selected pixel's face.
+                        let location = match dim {
+                            3 => {
+                                let face = format!("QuadReadLaneAt({}, {t}_q)", coords[2]);
+                                format!("float4(cube_dir({t}_p.x, {t}_p.y, {face}), cube_slice({face}))")
+                            }
+                            4 | 5 => format!("float{}({t}_p, round({}))", dx.len() + 1, coords[dx.len()]),
+                            _ => format!("{t}_p"),
+                        };
+                        self.sample_cmp_grad(&t, ty, &vector(&coords[..dx.len()]), &vector(dx), &vector(dy), &tail(format!("{location}, {z}")))
+                    }
                     (Some(z), _, _, _) if has_lz || !ps => format!("float4({t}_T.SampleCmpLevelZero({t}_S, {coord}, {z}).xxxx)"),
                     (Some(z), _, _, _) => format!("float4({t}_T.SampleCmp({t}_S, {}).xxxx)", tail(format!("{coord}, {z}"))),
                     // cube maps: RDNA takes face-space 2D gradients, HLSL wants direction-space 3D
