@@ -166,11 +166,12 @@ const MEM_64K_PAGES: u32 = 0x2040_0000;
 /// Commit `[a, a + n)` of a sparse window (the title's reservations there) and give it video
 /// memory (`d3d12x::sparse`).
 unsafe fn commit_sparse(a: usize, n: usize, p: u32) -> *mut c_void {
-    let q = mem::VirtualAlloc(a as *const c_void, n, mem::MEM_COMMIT, sanitize_protect(p));
-    if !q.is_null() {
-        crate::hle::d3d12x::sparse::committed(q as usize, n);
-    }
-    q
+    crate::hle::d3d12x::sparse::commit(a, n, sanitize_protect(p))
+}
+
+fn intro_sparse_reservation(image: Option<&std::ffi::OsStr>, size: usize, flags: u32, protect: u32) -> bool {
+    size == 0x1_3800_0000 && flags == mem::MEM_RESERVE && protect == mem::PAGE_NOACCESS
+        && image.is_some_and(|name| name.eq_ignore_ascii_case("game_scarlett_master.exe"))
 }
 
 pub unsafe extern "system" fn VirtualAlloc(addr: *const c_void, size: usize, t: u32, p: u32) -> *mut c_void {
@@ -180,10 +181,15 @@ pub unsafe extern "system" fn VirtualAlloc(addr: *const c_void, size: usize, t: 
     }
     let uma = crate::gpu::uma::get();
     // committing inside one of the title's reservations in a sparse window
-    if !addr.is_null() && t & 0x1000 != 0 && uma.is_some_and(|u| u.is_sparse(addr as usize)) {
-        let q = commit_sparse(addr as usize, size, p);
-        trace_mem("VirtualAlloc (sparse commit)", addr as usize, size, t as u64, p, q as usize);
-        return q;
+    if !addr.is_null() && uma.is_some_and(|u| u.is_sparse(addr as usize)) {
+        if t & mem::MEM_COMMIT != 0 {
+            let q = crate::hle::d3d12x::sparse::commit_reserved(addr as usize, size, sanitize_protect(p));
+            trace_mem("VirtualAlloc (sparse commit)", addr as usize, size, t as u64, p, q as usize);
+            return q;
+        }
+        // inside sparse address space: reject invalid commit ranges / boundary crossings before falling through
+        fnd::SetLastError(fnd::ERROR_INVALID_ADDRESS);
+        return std::ptr::null_mut();
     }
     // the title's own reservations of 64 KiB pages: in a sparse window, so the GPU sees them
     if addr.is_null() && t & 0x2000 != 0 && t & MEM_64K_PAGES == MEM_64K_PAGES {
@@ -211,6 +217,14 @@ pub unsafe extern "system" fn VirtualAlloc(addr: *const c_void, size: usize, t: 
         }
         if let Some(q) = uma.and_then(|u| u.alloc(rounded, align)) {
             trace_mem("VirtualAlloc (graphics, UMA)", 0, rounded, t as u64, p, q as usize);
+            return q as *mut c_void;
+        }
+    }
+    // This title commits its streaming pool in steps without using MEM_GRAPHICS.
+    let image = crate::state::boot().and_then(|boot| boot.exe_path.file_name());
+    if addr.is_null() && intro_sparse_reservation(image, size, t, p) {
+        if let Some(q) = uma.and_then(|u| u.sparse_reserve(size)) {
+            trace_mem("VirtualAlloc (intro reserve, sparse)", 0, size, t as u64, p, q);
             return q as *mut c_void;
         }
     }
@@ -303,7 +317,7 @@ pub unsafe extern "system" fn VirtualFree(addr: *mut c_void, size: usize, t: u32
     }
     // the title's reservations in a sparse window: decommit (and on release give the address
     // space back); their video memory goes with it
-    if let Some(u) = crate::gpu::uma::get().filter(|u| u.is_sparse(addr as usize)) {
+    if crate::gpu::uma::get().is_some_and(|u| u.is_sparse(addr as usize)) {
         let a = addr as usize;
         let release = t & mem::MEM_RELEASE != 0;
         let decommit = t & mem::MEM_DECOMMIT != 0;
@@ -311,35 +325,7 @@ pub unsafe extern "system" fn VirtualFree(addr: *mut c_void, size: usize, t: u32
             fnd::SetLastError(fnd::ERROR_INVALID_PARAMETER);
             return 0;
         }
-        let n = if release || size == 0 {
-            match u.sparse_reservation(a) {
-                Some((start, len)) if start == a => len,
-                _ => {
-                    fnd::SetLastError(fnd::ERROR_INVALID_PARAMETER);
-                    return 0;
-                }
-            }
-        } else {
-            match u.sparse_reservation(a) {
-                Some((start, len)) if a.checked_add(size).is_some_and(|end| end <= start + len) => size,
-                _ => {
-                    fnd::SetLastError(fnd::ERROR_INVALID_PARAMETER);
-                    return 0;
-                }
-            }
-        };
-        if n > 0 {
-            // sparse first: under its lock, so no copy of CPU writes to video memory reads the
-            // pages while they go (the submit thread's copy faulted on them)
-            crate::hle::d3d12x::sparse::decommitted(a, n);
-            if mem::VirtualFree(addr, n, mem::MEM_DECOMMIT) == 0 {
-                return 0;
-            }
-        }
-        if release {
-            u.sparse_release(a);
-        }
-        return 1;
+        return crate::hle::d3d12x::sparse::free_reserved(a, size, release) as BOOL;
     }
     if let Some(u) = crate::gpu::uma::get().filter(|u| u.contains(addr as usize)) {
         if t & 0x8000 != 0 {
@@ -467,8 +453,13 @@ pub unsafe extern "system" fn XMemFreeDefault(p: *mut c_void, attrs: u64) {
     }
     if XAllocAttrs::decode(attrs).memory_type == 0 {
         aligned_heap_free(p);
-    } else if !crate::hle::d3d12x::sparse::free(p as usize) && !crate::gpu::uma::get().is_some_and(|u| u.free(p as usize)) {
-        mem::VirtualFree(p, 0, mem::MEM_RELEASE);
+    } else {
+        let uma = crate::gpu::uma::get();
+        if uma.is_some_and(|u| u.is_sparse(p as usize)) {
+            crate::hle::d3d12x::sparse::free(p as usize);
+        } else if !uma.is_some_and(|u| u.free(p as usize)) {
+            mem::VirtualFree(p, 0, mem::MEM_RELEASE);
+        }
     }
 }
 
@@ -835,21 +826,24 @@ unsafe fn give_back_homes(away: &mut Away) {
             i += 1;
         }
         if crate::gpu::uma::get().is_some_and(|u| u.is_sparse(start)) {
-            crate::hle::d3d12x::sparse::decommitted(start, end - start);
+            crate::hle::d3d12x::sparse::decommit(start, end - start);
+        } else {
+            mem::VirtualFree(start as *mut c_void, end - start, mem::MEM_DECOMMIT);
         }
-        mem::VirtualFree(start as *mut c_void, end - start, mem::MEM_DECOMMIT);
     }
 }
 
 /// The page's home, committed again if `move_home_away` gave it back (None: it could not be).
 unsafe fn home_again(home: usize) -> Option<usize> {
     if lazy_home(home) && !committed_page(home) {
-        if mem::VirtualAlloc(home as *const c_void, PHYS_PAGE, mem::MEM_COMMIT, mem::PAGE_READWRITE).is_null() {
+        let committed = if crate::gpu::uma::get().is_some_and(|u| u.is_sparse(home)) {
+            commit_sparse(home, PHYS_PAGE, mem::PAGE_READWRITE)
+        } else {
+            mem::VirtualAlloc(home as *const c_void, PHYS_PAGE, mem::MEM_COMMIT, mem::PAGE_READWRITE)
+        };
+        if committed.is_null() {
             crate::xlog_warn!("physical page: its home {home:#x} could not be committed again");
             return None;
-        }
-        if crate::gpu::uma::get().is_some_and(|u| u.is_sparse(home)) {
-            crate::hle::d3d12x::sparse::committed(home, PHYS_PAGE);
         }
     }
     Some(home)
@@ -865,12 +859,14 @@ unsafe fn commit_homes(home: usize, n: usize) -> bool {
     if (0..n).all(|i| committed_page(home + i * PHYS_PAGE)) {
         return true;
     }
-    if mem::VirtualAlloc(home as *const c_void, len, mem::MEM_COMMIT, mem::PAGE_READWRITE).is_null() {
+    let committed = if u.is_sparse(home) {
+        commit_sparse(home, len, mem::PAGE_READWRITE)
+    } else {
+        mem::VirtualAlloc(home as *const c_void, len, mem::MEM_COMMIT, mem::PAGE_READWRITE)
+    };
+    if committed.is_null() {
         crate::xlog_warn!("physical pages: {n} at their home {home:#x} could not be committed");
         return false;
-    }
-    if u.is_sparse(home) {
-        crate::hle::d3d12x::sparse::committed(home, len);
     }
     true
 }
@@ -897,9 +893,10 @@ unsafe fn unmap_away(away: &mut Away, at: usize) {
         }
         if !crate::gpu::uma::get().is_some_and(|u| u.is_committed(at)) {
             if crate::gpu::uma::get().is_some_and(|u| u.is_sparse(at)) {
-                crate::hle::d3d12x::sparse::decommitted(at, PHYS_PAGE);
+                crate::hle::d3d12x::sparse::decommit(at, PHYS_PAGE);
+            } else {
+                mem::VirtualFree(at as *mut c_void, PHYS_PAGE, mem::MEM_DECOMMIT);
             }
-            mem::VirtualFree(at as *mut c_void, PHYS_PAGE, mem::MEM_DECOMMIT);
         }
     }
 }
@@ -1045,18 +1042,29 @@ unsafe fn map_pages(away: &mut Away, va: *mut c_void, n: usize, arr: *mut usize)
             away.page.insert(p, at);
             continue;
         }
-        if !in_uma(at) && mem::VirtualAlloc(at as *const c_void, PHYS_PAGE, mem::MEM_COMMIT, mem::PAGE_READWRITE).is_null() {
+        let mut copied_home = false;
+        let mut initialize = || {
+            if committed_page(home) {
+                std::ptr::copy_nonoverlapping(home as *const u8, at as *mut u8, PHYS_PAGE);
+                copied_home = true;
+            } else if !fresh {
+                std::ptr::write_bytes(at as *mut u8, 0, PHYS_PAGE); // a page never used: zeros
+            }
+        };
+        let mapped = if crate::gpu::uma::get().is_some_and(|u| u.is_sparse(at)) {
+            !crate::hle::d3d12x::sparse::commit_initialized(at, PHYS_PAGE, mem::PAGE_READWRITE, initialize).is_null()
+        } else if in_uma(at) || !mem::VirtualAlloc(at as *const c_void, PHYS_PAGE, mem::MEM_COMMIT, mem::PAGE_READWRITE).is_null() {
+            initialize();
+            true
+        } else {
+            false
+        };
+        if !mapped {
             fnd::SetLastError(fnd::ERROR_INVALID_ADDRESS);
             return std::ptr::null_mut();
         }
-        if committed_page(home) {
-            std::ptr::copy_nonoverlapping(home as *const u8, at as *mut u8, PHYS_PAGE);
+        if copied_home {
             move_home_away(away, home);
-        } else if !fresh {
-            std::ptr::write_bytes(at as *mut u8, 0, PHYS_PAGE); // a page never used: zeros
-        }
-        if crate::gpu::uma::get().is_some_and(|u| u.is_sparse(at)) {
-            crate::hle::d3d12x::sparse::committed(at, PHYS_PAGE);
         }
         away.at.insert(at, p);
         away.page.insert(p, at);
@@ -1716,6 +1724,37 @@ mod tests {
             let q = VirtualAlloc(std::ptr::null(), 0x10000, 0x3000, 0x04); // ordinary memory: Windows
             assert!(crate::gpu::uma::get().is_none_or(|u| !u.contains(q as usize)));
             assert_eq!(VirtualFree(q, 0, mem::MEM_RELEASE), 1);
+        }
+    }
+
+    #[test]
+    fn intro_sparse_reservation_matches_the_observed_request() {
+        let title = Some(std::ffi::OsStr::new("GAME_SCARLETT_MASTER.EXE"));
+        let other = Some(std::ffi::OsStr::new("other.exe"));
+        let size = 0x1_3800_0000;
+        let mem_top_down = 0x0010_0000;
+        assert!(intro_sparse_reservation(title, size, mem::MEM_RESERVE, mem::PAGE_NOACCESS));
+        assert!(!intro_sparse_reservation(other, size, mem::MEM_RESERVE, mem::PAGE_NOACCESS));
+        assert!(!intro_sparse_reservation(title, 512 << 20, mem::MEM_RESERVE, mem::PAGE_NOACCESS));
+        assert!(!intro_sparse_reservation(title, size, mem::MEM_RESERVE | mem_top_down, mem::PAGE_NOACCESS));
+        assert!(!intro_sparse_reservation(title, size, mem::MEM_RESERVE | mem::MEM_COMMIT, mem::PAGE_NOACCESS));
+        assert!(!intro_sparse_reservation(title, size, mem::MEM_RESERVE, mem::PAGE_READWRITE));
+    }
+
+    #[test]
+    fn sparse_commit_rejects_invalid_ranges() {
+        let u = crate::gpu::uma::get().filter(|u| u.has_sparse()).expect("sparse UMA");
+        let size = crate::gpu::uma::GRAIN;
+        let base = u.sparse_reserve(size).expect("sparse reservation");
+        unsafe {
+            // The starting address belongs to this allocation regardless of adjacent allocations.
+            for (at, len) in [(base, 0), (base + size - 1, 2)] {
+                fnd::SetLastError(0);
+                let q = VirtualAlloc(at as *const c_void, len, mem::MEM_COMMIT, mem::PAGE_READWRITE);
+                assert!(q.is_null());
+                assert_eq!(fnd::GetLastError(), fnd::ERROR_INVALID_ADDRESS);
+            }
+            assert_eq!(VirtualFree(base as *mut c_void, 0, mem::MEM_RELEASE), 1);
         }
     }
 

@@ -993,6 +993,8 @@ fn console_slots(kind: Kind) -> Vec<(usize, usize)> {
                 (90, l::write32_bottom_of_shader_x as usize),
                 (93, l::kickoff_x as usize),
                 (94, l::set_depth_bias_x as usize),
+                (131, l::cmd_list_131_x as usize),
+                (132, l::cmd_list_132_x as usize),
                 // console compute/BVH builder extensions (`XboxBvhBuilder.dll`)
                 (146, l::uav_barrier_x as usize),
                 (148, b::allocate_upload_memory as usize),
@@ -5256,6 +5258,13 @@ mod srv_tests {
         let mut d2 = cube;
         d2.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
         assert!(cube_as_cube_array(&d2).is_none());
+    }
+
+    #[test]
+    fn command_list_slots_include_131_and_132() {
+        let slots = console_slots(Kind::CommandList);
+        assert!(slots.iter().any(|&(s, _)| s == 131), "slot 131 must be present");
+        assert!(slots.iter().any(|&(s, _)| s == 132), "slot 132 must be present");
     }
 }
 

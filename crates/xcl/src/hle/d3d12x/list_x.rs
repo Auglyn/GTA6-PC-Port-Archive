@@ -1255,6 +1255,20 @@ pub(super) unsafe extern "system" fn uav_barrier_x(this: *mut c_void, _n: u32, _
     pc::<unsafe extern "system" fn(*mut c_void, u32, *const D3D12_RESOURCE_BARRIER)>(this, PC_RESOURCE_BARRIER)(this, 1, &b);
 }
 
+/// command list #131 console extension (called during early boot sequence)
+pub(super) unsafe extern "system" fn cmd_list_131_x(this: *mut c_void, a1: usize, a2: usize, a3: usize) -> i32 {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| crate::xlog_info!("D3D12.X: ID3D12GraphicsCommandList #131 ({this:p}, {a1:#x}, {a2:#x}, {a3:#x})"));
+    0
+}
+
+/// command list #132 console extension (called during early boot sequence)
+pub(super) unsafe extern "system" fn cmd_list_132_x(this: *mut c_void, a1: usize, a2: usize, a3: usize) -> i32 {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| crate::xlog_info!("D3D12.X: ID3D12GraphicsCommandList #132 ({this:p}, {a1:#x}, {a2:#x}, {a3:#x})"));
+    0
+}
+
 /// command list #84 CopyResourceX(destination, source, flags); in place (the console's
 /// compression operations) there is nothing to do on PC
 pub(super) unsafe extern "system" fn copy_resource_flags_x(this: *mut c_void, dst: usize, src: usize, _flags: u32) {
@@ -3567,5 +3581,13 @@ mod tests {
         on_release(list_key);
         assert!(!has_list_state(list_key));
         assert_eq!(fake_res.refs.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn cmd_list_131_and_132_return_success() {
+        unsafe {
+            assert_eq!(cmd_list_131_x(std::ptr::null_mut(), 0, 0, 0), 0);
+            assert_eq!(cmd_list_132_x(std::ptr::null_mut(), 0, 0, 0), 0);
+        }
     }
 }

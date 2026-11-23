@@ -26,6 +26,7 @@ use windows::core::Interface;
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::Graphics::Direct3D12::*;
 use windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC;
+use windows_sys::Win32::Foundation::{SetLastError, ERROR_INVALID_ADDRESS, ERROR_INVALID_PARAMETER};
 use windows_sys::Win32::System::Memory::{
     VirtualAlloc, VirtualFree, VirtualQuery, MEMORY_BASIC_INFORMATION, MEM_COMMIT, MEM_DECOMMIT, PAGE_GUARD,
     PAGE_NOACCESS, PAGE_READWRITE,
@@ -398,13 +399,17 @@ pub fn pool_bytes() -> (usize, usize) {
 }
 /// commits before the device existed: the pages committed, as disjoint page ranges (start →
 /// end) merged with their neighbours, so a commit or decommit costs O(log n) and not a scan of
-/// every page committed so far. Like `committed` / `decommitted` with a state, a range counts
+/// every page committed so far. Like `commit` / `decommit` with a state, a range counts
 /// every page it touches; `init` commits them once the windows exist.
 static EARLY: Mutex<BTreeMap<usize, usize>> = Mutex::new(BTreeMap::new());
 
-/// The pages `[a, a + n)` touches, as `[start, end)`.
-fn page_span(a: usize, n: usize) -> (usize, usize) {
-    (a & !(PAGE - 1), a.saturating_add(n).saturating_add(PAGE - 1) & !(PAGE - 1))
+/// The pages touched by a nonempty byte range, as `[start, end)`.
+fn page_span(a: usize, n: usize) -> Option<(usize, usize)> {
+    if n == 0 {
+        return None;
+    }
+    let end = a.checked_add(n)?.checked_next_multiple_of(PAGE)?;
+    Some((a & !(PAGE - 1), end))
 }
 
 /// Add the pages `[a, b)` to `early`, merged with the ranges they overlap or touch.
@@ -544,12 +549,13 @@ pub unsafe fn init(dev: &ID3D12Device) -> Vec<(usize, usize, u64)> {
         })
     })();
     match made {
-        Ok(s) => {
+        Ok(mut s) => {
             crate::xlog_info!("D3D12.X: {} sparse window(s) for the title's own memory (tiled buffers on video memory)", out.len());
-            *STATE.lock().unwrap() = Some(s);
+            let mut state = STATE.lock().unwrap();
             for (a, b) in std::mem::take(&mut *EARLY.lock().unwrap()) {
-                committed(a, b - a);
+                s.mark_committed(a, b - a);
             }
+            *state = Some(s);
             out
         }
         Err(e) => {
@@ -1126,11 +1132,10 @@ impl State {
 pub unsafe fn alloc(size: usize, align: usize) -> Option<(usize, usize)> {
     let u = crate::gpu::uma::get()?;
     let (addr, rounded) = u.sparse_alloc(size, align)?;
-    if VirtualAlloc(addr as *const c_void, rounded, MEM_COMMIT, PAGE_READWRITE).is_null() {
+    if commit(addr, rounded, PAGE_READWRITE).is_null() {
         u.sparse_release(addr);
         return None;
     }
-    committed(addr, rounded);
     Some((addr, rounded))
 }
 
@@ -1139,24 +1144,16 @@ pub unsafe fn alloc(size: usize, align: usize) -> Option<(usize, usize)> {
 pub unsafe fn alloc_in(window: usize, size: usize, align: usize) -> Option<(usize, usize)> {
     let u = crate::gpu::uma::get()?;
     let (addr, rounded) = u.sparse_alloc_in(window, size, align)?;
-    if VirtualAlloc(addr as *const c_void, rounded, MEM_COMMIT, PAGE_READWRITE).is_null() {
+    if commit(addr, rounded, PAGE_READWRITE).is_null() {
         u.sparse_release(addr);
         return None;
     }
-    committed(addr, rounded);
     Some((addr, rounded))
 }
 
-/// Release a sparse allocation from `alloc` / `alloc_in` (false: not a sparse allocation).
+/// Release a sparse allocation from `alloc` / `alloc_in`.
 pub unsafe fn free(p: usize) -> bool {
-    let Some(u) = crate::gpu::uma::get() else { return false };
-    if !u.is_sparse(p) {
-        return false;
-    }
-    let Some(len) = u.sparse_release(p) else { return false };
-    decommitted(p, len);
-    VirtualFree(p as *mut c_void, len, MEM_DECOMMIT);
-    true
+    crate::gpu::uma::get().is_some_and(|u| u.is_sparse(p)) && free_reserved(p, 0, true)
 }
 
 /// After `queue.ExecuteCommandLists`: copy GPU-written sparse ranges (e.g. `Write32/64`,
@@ -1237,69 +1234,140 @@ pub unsafe fn readback_now(va: usize, len: usize) {
     s.readback_ranges(&[(va, len)]);
 }
 
-/// The title committed `[a, a + n)` in a sparse window. The pages of tiles mapped for it that
-/// lie outside the range are not committed (holes); the range's pages are.
-pub unsafe fn committed(a: usize, n: usize) {
-    if n == 0 {
-        return;
-    }
-    let mut g = STATE.lock().unwrap();
-    let Some(s) = g.as_mut() else {
-        let (start, end) = page_span(a, n);
-        early_add(&mut EARLY.lock().unwrap(), start, end);
-        return;
+/// Commit CPU pages and publish their GPU mappings as one operation.
+pub unsafe fn commit(a: usize, n: usize, protect: u32) -> *mut c_void {
+    commit_initialized(a, n, protect, || {})
+}
+
+/// Copy or initialize a physical mapping before making its pages available to the upload scan.
+/// The initializer runs under STATE and must not call back into sparse memory operations.
+pub unsafe fn commit_initialized(a: usize, n: usize, protect: u32, initialize: impl FnOnce()) -> *mut c_void {
+    let Some((start, end)) = page_span(a, n) else {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return std::ptr::null_mut();
     };
-    s.ensure_mapped(a, n, |_| 0xFFFF);
-    let mut pg = a & !(PAGE - 1);
-    let end = a.saturating_add(n);
-    while pg < end {
-        let t = pg & !(TILE - 1);
-        let tile_end = t.saturating_add(TILE).min(end);
-        if let Some(entry) = s.mapped.get_mut(&t) {
-            let mut p = pg;
-            while p < tile_end {
-                entry.holes &= !(1u16 << ((p - t) / PAGE));
-                p += PAGE;
+    let mut state = STATE.lock().unwrap();
+    commit_locked(&mut state, start, end, protect, initialize)
+}
+
+/// A title commit must fit a single live reservation. Hold STATE through the ownership check,
+/// host commit and bookkeeping so a simultaneous release cannot invalidate the check.
+pub unsafe fn commit_reserved(a: usize, n: usize, protect: u32) -> *mut c_void {
+    let mut state = STATE.lock().unwrap();
+    let Some((start, end)) = page_span(a, n).filter(|&(start, end)| {
+        crate::gpu::uma::get().and_then(|u| u.sparse_reservation(start))
+            .is_some_and(|(base, len)| end <= base + len)
+    }) else {
+        SetLastError(ERROR_INVALID_ADDRESS);
+        return std::ptr::null_mut();
+    };
+    commit_locked(&mut state, start, end, protect, || {})
+}
+
+unsafe fn commit_locked(
+    state: &mut Option<State>, start: usize, end: usize, protect: u32, initialize: impl FnOnce(),
+) -> *mut c_void {
+    let n = end - start;
+    let q = VirtualAlloc(start as *const c_void, n, MEM_COMMIT, protect);
+    if q.is_null() {
+        return q;
+    }
+    initialize();
+    if let Some(state) = state {
+        state.mark_committed(start, n);
+    } else {
+        early_add(&mut EARLY.lock().unwrap(), start, end);
+    }
+    q
+}
+
+impl State {
+    unsafe fn mark_committed(&mut self, a: usize, n: usize) {
+        self.ensure_mapped(a, n, |_| 0xFFFF);
+        let mut pg = a & !(PAGE - 1);
+        let end = a.saturating_add(n);
+        while pg < end {
+            let t = pg & !(TILE - 1);
+            let tile_end = t.saturating_add(TILE).min(end);
+            if let Some(entry) = self.mapped.get_mut(&t) {
+                let mut p = pg;
+                while p < tile_end {
+                    entry.holes &= !(1u16 << ((p - t) / PAGE));
+                    p += PAGE;
+                }
             }
+            if tile_end <= pg {
+                break;
+            }
+            pg = tile_end;
         }
-        if tile_end <= pg {
-            break;
-        }
-        pg = tile_end;
     }
 }
 
-/// The title decommitted `[a, a + n)`: tiles whose pages are all uncommitted (whether in one
-/// full-tile decommit or incrementally via sub-tile decommits) give their video memory back
-/// (unless a placed buffer still pins the pool tile).
-pub unsafe fn decommitted(a: usize, n: usize) {
+/// Decommit `[a, a + n)`: decommits host CPU pages under the sparse state lock (preventing races
+/// with the upload thread in `before_execute`), and on success updates GPU tile mappings / bookkeeping.
+pub unsafe fn decommit(a: usize, n: usize) -> bool {
+    let mut state = STATE.lock().unwrap();
+    decommit_locked(&mut state, a, n)
+}
+
+unsafe fn decommit_locked(state: &mut Option<State>, a: usize, n: usize) -> bool {
     if n == 0 {
-        return;
+        return true;
     }
-    let mut g = STATE.lock().unwrap();
-    let Some(s) = g.as_mut() else {
-        let (start, end) = page_span(a, n);
-        early_remove(&mut EARLY.lock().unwrap(), start, end);
-        return;
+    let Some((start, page_end)) = page_span(a, n) else {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return false;
     };
-    let tiles = decommit_tiles(&mut s.mapped, &s.pinned, &mut s.free, &mut s.to_zero, a, n);
-    if tiles.is_empty() {
-        return;
+    let n = page_end - start;
+    if VirtualFree(start as *mut c_void, n, MEM_DECOMMIT) == 0 {
+        return false;
     }
-    s.runs = None;
-    let mut by_window: FxHashMap<usize, Vec<usize>> = FxHashMap::default();
-    for &t in &tiles {
-        if let Some(wi) = s.window_index(t) {
-            by_window.entry(wi).or_default().push(t);
+    let Some(s) = state.as_mut() else {
+        early_remove(&mut EARLY.lock().unwrap(), start, page_end);
+        return true;
+    };
+    let tiles = decommit_tiles(&mut s.mapped, &s.pinned, &mut s.free, &mut s.to_zero, start, n);
+    if !tiles.is_empty() {
+        s.runs = None;
+        let mut by_window: FxHashMap<usize, Vec<usize>> = FxHashMap::default();
+        for &t in &tiles {
+            if let Some(wi) = s.window_index(t) {
+                by_window.entry(wi).or_default().push(t);
+            }
         }
+        for (wi, ts) in by_window {
+            let (b, r) = (s.windows[wi].0, s.windows[wi].1.clone());
+            s.unmap_tiles(&r, b, &ts);
+        }
+        MAPPED_GEN.fetch_add(1, Ordering::Release);
+        s.signal();
+        s.retire_free_pools();
     }
-    for (wi, ts) in by_window {
-        let (b, r) = (s.windows[wi].0, s.windows[wi].1.clone());
-        s.unmap_tiles(&r, b, &ts);
+    true
+}
+
+/// Decommit or release a live reservation. Ownership stays protected through the host call
+/// and, for release, until the range is available to the sparse allocator again.
+pub unsafe fn free_reserved(a: usize, n: usize, release: bool) -> bool {
+    let mut state = STATE.lock().unwrap();
+    let Some(u) = crate::gpu::uma::get() else { return false };
+    let Some((base, len)) = u.sparse_reservation(a) else {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return false;
+    };
+    let whole = release || n == 0;
+    if (whole && base != a) || (!whole && a.checked_add(n).is_none_or(|end| end > base + len)) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return false;
     }
-    MAPPED_GEN.fetch_add(1, Ordering::Release);
-    s.signal();
-    s.retire_free_pools();
+    if !decommit_locked(&mut state, a, if whole { len } else { n }) {
+        return false;
+    }
+    if release {
+        u.sparse_release(a);
+    }
+    true
 }
 
 impl State {
@@ -1808,7 +1876,7 @@ mod tests {
                     1 => 1 + (next(&mut x) % 64) as usize,
                     _ => 1 + (next(&mut x) % (24 * PAGE as u64)) as usize,
                 };
-                let (start, end) = page_span(a, n);
+                let (start, end) = page_span(a, n).unwrap();
                 let pages = (start..end).step_by(PAGE);
                 if next(&mut x) % 3 == 0 {
                     early_remove(&mut early, start, end);
@@ -1859,29 +1927,30 @@ mod tests {
         assert_eq!(early.into_iter().collect::<Vec<_>>(), vec![(a, a + TILE), (a + 2 * TILE, a + 4 * TILE)]);
     }
 
-    /// Time for n 64 KiB pages committed one at a time and decommitted one at a time in
-    /// reverse, before the device exists (`cargo test --release -p xcl --lib --
+    /// Time for the early bookkeeping of n 64 KiB pages added one at a time and removed
+    /// one at a time in reverse (`cargo test --release -p xcl --lib --
     /// --ignored --exact hle::d3d12x::sparse::tests::early_commit_timing --nocapture`,
-    /// `XCL_EARLY_PAGES=16384,32768`). Run it alone: a test that made the device keeps a state.
+    /// `XCL_EARLY_PAGES=16384,32768`).
     #[test]
     #[ignore]
     fn early_commit_timing() {
-        if STATE.lock().unwrap().is_some() {
-            return eprintln!("early_commit_timing: a sparse state exists – run it alone");
-        }
         let sizes: Vec<usize> = std::env::var("XCL_EARLY_PAGES").ok().map_or(vec![4096, 8192, 16384, 32768], |v| v.split(',').map(|s| s.trim().parse().unwrap()).collect());
         let base = 0x4_2000_0000usize;
         for n in sizes {
+            let mut early = BTreeMap::new();
             let t = std::time::Instant::now();
             for i in 0..n {
-                unsafe { committed(base + i * TILE, TILE) };
+                let start = base + i * TILE;
+                early_add(&mut early, start, start + TILE);
             }
             let commit = t.elapsed();
             let t = std::time::Instant::now();
             for i in (0..n).rev() {
-                unsafe { decommitted(base + i * TILE, TILE) };
+                let start = base + i * TILE;
+                early_remove(&mut early, start, start + TILE);
             }
             let decommit = t.elapsed();
+            assert!(early.is_empty());
             println!("early: {n} pages: commit {:.1} ms, decommit {:.1} ms", commit.as_secs_f64() * 1e3, decommit.as_secs_f64() * 1e3);
         }
     }
