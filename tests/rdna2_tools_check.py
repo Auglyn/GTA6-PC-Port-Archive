@@ -2418,6 +2418,39 @@ class TestRdna2Scanner(unittest.TestCase):
             self.assertTrue(is_instruction_supported(f"{base}_e64 s52, -s44, |v18|"))
             self.assertTrue(is_instruction_supported(f"{base}_sdwa vcc_lo, s44, v18 src0_sel:DWORD src1_sel:DWORD"))
 
+    def test_f16_unary_and_minmax_recognition(self):
+        """All 16 binary16 unary math, rounding, decomposition, and min/max opcodes must be recognized."""
+        ops = (
+            "floor", "ceil", "trunc", "rndne", "fract", "rcp", "rsq", "sqrt",
+            "exp", "log", "sin", "cos", "frexp_mant"
+        )
+        for op in ops:
+            base = f"v_{op}_f16"
+            self.assertTrue(is_opcode_recognized(base), f"Base opcode not recognized: {base}")
+            self.assertTrue(is_opcode_recognized(f"{base}_e32"), f"e32 not recognized: {base}_e32")
+            self.assertTrue(is_opcode_recognized(f"{base}_e64"), f"e64 not recognized: {base}_e64")
+            self.assertEqual(classify_isa_category(base), "VOP / VALU (Vector ALU - VOP1/VOP2/VOP3)")
+            self.assertTrue(is_instruction_supported(f"{base} v0, v1"))
+            self.assertTrue(is_instruction_supported(f"{base}_e32 v0, s0"))
+            self.assertTrue(is_instruction_supported(f"{base}_e64 v0, -|s0| clamp"))
+            self.assertTrue(is_instruction_supported(f"{base}_sdwa v0, v1 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_0"))
+
+        self.assertTrue(is_opcode_recognized("v_frexp_exp_i16_f16"))
+        self.assertTrue(is_instruction_supported("v_frexp_exp_i16_f16 v0, v1"))
+        self.assertTrue(is_instruction_supported("v_frexp_exp_i16_f16_e64 v0, -v1"))
+        self.assertTrue(is_instruction_supported("v_frexp_exp_i16_f16_sdwa v0, v1 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_0"))
+
+        for op in ("min", "max"):
+            base = f"v_{op}_f16"
+            self.assertTrue(is_opcode_recognized(base), f"Base opcode not recognized: {base}")
+            self.assertTrue(is_opcode_recognized(f"{base}_e32"), f"e32 not recognized: {base}_e32")
+            self.assertTrue(is_opcode_recognized(f"{base}_e64"), f"e64 not recognized: {base}_e64")
+            self.assertEqual(classify_isa_category(base), "VOP / VALU (Vector ALU - VOP1/VOP2/VOP3)")
+            self.assertTrue(is_instruction_supported(f"{base} v0, s0, v1"))
+            self.assertTrue(is_instruction_supported(f"{base}_e32 v0, 1.0, v1"))
+            self.assertTrue(is_instruction_supported(f"{base}_e64 v0, -|s0|, |v1| clamp"))
+            self.assertTrue(is_instruction_supported(f"{base}_sdwa v0, v1, v2 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_0 src1_sel:WORD_1"))
+
     def test_vop3p_classification(self):
         """Packed and mixed-precision opcodes must classify as VOP3P."""
         for opcode in (

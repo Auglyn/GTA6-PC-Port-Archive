@@ -555,6 +555,45 @@ def check_f16_round_forms():
         pixel.ACCEPTED.update(saved)
 
 
+def check_f16_unary_math_forms():
+    """The 36 binary16 unary math, decomposition, and min/max forms count as covered once their fixtures translate;
+    unsupported forms (e.g. f64 variants, clamp on e32) stay uncovered."""
+    import pixel_aot_check as pixel
+    saved = set(pixel.ACCEPTED)
+    pixel.ACCEPTED.clear()
+    try:
+        pixel.check_f16_unary_math_controls()
+        vop1_ops = (
+            "fract", "rcp", "rsq", "sqrt", "exp", "log",
+            "sin", "cos", "frexp_mant", "frexp_exp_i16",
+        )
+        forms = (
+            {("VOP1", f"v_{op}_f16") for op in vop1_ops}
+            | {("VOP2", "v_min_f16"), ("VOP2", "v_max_f16")}
+            | {("VOP3", f"v_{op}_f16_e64") for op in (*vop1_ops, "min", "max")}
+            | {("SDWA", f"v_{op}_f16_sdwa") for op in (*vop1_ops, "min", "max")}
+        )
+        assert len(forms) == 36
+        neighbours = {
+            ("VOP1", "v_floor_f64"), ("VOP1", "v_ceil_f64"),
+            ("VOP3", "v_floor_f64_e64"), ("VOP3", "v_ceil_f64_e64"),
+            ("VOP3", "v_min_f64"),
+        }
+        for name in ("gfx1013.tsv", "rdna2.tsv"):
+            reference = fc.load_reference(name)
+            assert forms <= reference, (name, forms - reference)
+            assert neighbours <= reference, (name, neighbours - reference)
+            covered = fc.gfx_forms(pixel.ACCEPTED, reference)
+            assert forms <= covered, (name, forms - covered)
+            assert not neighbours & covered, (name, neighbours & covered)
+        # Without the accepted forms none of the 36 forms is covered.
+        pixel.ACCEPTED.clear()
+        assert not forms & fc.gfx_forms(pixel.ACCEPTED, fc.load_reference("gfx1013.tsv"))
+    finally:
+        pixel.ACCEPTED.clear()
+        pixel.ACCEPTED.update(saved)
+
+
 def check_int16_ternary_forms():
     """The 8 three-operand 16-bit integer VOP3 forms count as covered once the translator accepts their fixtures; the
     nearby VOP3 forms that stay rejected (v_mad_u32_u16, v_mad_i32_i16, v_sad_u16, f16 ops) stay uncovered."""
@@ -1073,6 +1112,7 @@ if __name__ == "__main__":
     check_int16_ternary_forms()
     check_f16_arith_forms()
     check_f16_round_forms()
+    check_f16_unary_math_forms()
     check_swap_coverage()
     check_sopk_wait_forms()
     check_s_version_form()

@@ -1070,6 +1070,17 @@ VOP3P_F16 = {
     "max": (2, "max16_num({0}, {1})"),
     "fma": (3, "mad({0}, {1}, {2})"),
 }
+VOP1_F16_MATH = {
+    "fract": "fract32({0})",
+    "rcp": "(1.0f / {0})",
+    "rsq": "rsqrt({0})",
+    "sqrt": "sqrt({0})",
+    "exp": "exp2({0})",
+    "log": "log2({0})",
+    "sin": "sin32({0})",
+    "cos": "cos32({0})",
+    "frexp_mant": "frexp_mant32({0})",
+}
 INLINE_F16 = {
     "0.5": 0x3800, "-0.5": 0xb800, "1.0": 0x3c00, "-1.0": 0xbc00,
     "2.0": 0x4000, "-2.0": 0xc000, "4.0": 0x4400, "-4.0": 0xc400,
@@ -3196,6 +3207,94 @@ def lower(instructions, texture_sgpr, interp_sgpr, sampler, constant_descriptor=
                 expression = f"saturate({expression})"
             vector[dst] = f"alu{i}"
             lines.append(f"    precise float alu{i} = {expression};")
+        elif m := match(rf"v_({'|'.join(VOP1_F16_MATH)})_f16_sdwa (v\d+), (-?)(?:\|([vs]\d+)\||abs\(([vs]\d+)\)|([vs]\d+))( clamp)? dst_sel:(BYTE_[0-3]|WORD_[01]|DWORD) dst_unused:(UNUSED_PAD|UNUSED_PRESERVE) src0_sel:(BYTE_[0-3]|WORD_[01]|DWORD)"):
+            op, dst, negate, bars, call, plain, clamp, dst_sel, unused, src_sel = m.groups()
+            if mask != "entry":
+                raise ValueError(f"Invalid {op} operation")
+            if not 0 <= int(dst[1:]) <= 255:
+                raise ValueError(f"Register out of range: {dst}")
+            if dst in sample_dest:
+                raise ValueError("Write overlaps an outstanding sample")
+            source = bars or call or plain
+            if (half_name := half16_name(source, vector)) is not None:
+                if src_sel != "WORD_0":
+                    raise ValueError("Reads the undefined high half of a 16-bit result")
+                word = f"asuint({half_name})"
+            else:
+                word = f"asuint({fp_operand(source, scalar, vector, pending, sample_dest)})"
+            val = f"widen16({sdwa_source(word, src_sel, False)})"
+            if bars or call:
+                val = f"abs({val})"
+            if negate:
+                val = f"(-{val})"
+            expression = VOP1_F16_MATH[op].format(val)
+            if clamp:
+                expression = f"saturate({expression})"
+            old = vector.get(dst) if unused == "UNUSED_PRESERVE" else None
+            lines.append(f"    precise float hs{i} = {expression};")
+            lines.append(f"    uint hbits{i} = narrow16(hs{i});")
+            res = sdwa_dest(f"hbits{i}", dst_sel, unused, old)
+            vector[dst] = f"alu{i}"
+            lines.append(f"    precise float alu{i} = asfloat({res});")
+        elif m := match(r"v_frexp_exp_i16_f16_sdwa (v\d+), (-?)(?:\|([vs]\d+)\||abs\(([vs]\d+)\)|([vs]\d+)) dst_sel:(BYTE_[0-3]|WORD_[01]|DWORD) dst_unused:(UNUSED_PAD|UNUSED_PRESERVE) src0_sel:(BYTE_[0-3]|WORD_[01]|DWORD)"):
+            dst, negate, bars, call, plain, dst_sel, unused, src_sel = m.groups()
+            if mask != "entry":
+                raise ValueError("Invalid frexp_exp operation")
+            if not 0 <= int(dst[1:]) <= 255:
+                raise ValueError(f"Register out of range: {dst}")
+            if dst in sample_dest:
+                raise ValueError("Write overlaps an outstanding sample")
+            source = bars or call or plain
+            if (half_name := half16_name(source, vector)) is not None:
+                if src_sel != "WORD_0":
+                    raise ValueError("Reads the undefined high half of a 16-bit result")
+                word = f"asuint({half_name})"
+            else:
+                word = f"asuint({fp_operand(source, scalar, vector, pending, sample_dest)})"
+            val = f"widen16({sdwa_source(word, src_sel, False)})"
+            if bars or call:
+                val = f"abs({val})"
+            if negate:
+                val = f"(-{val})"
+            old = vector.get(dst) if unused == "UNUSED_PRESERVE" else None
+            lines.append(f"    int exp{i} = frexp_exp32({val});")
+            lines.append(f"    uint exp_bits{i} = asuint(exp{i}) & 0xffffu;")
+            res = sdwa_dest(f"exp_bits{i}", dst_sel, unused, old)
+            vector[dst] = f"alu{i}"
+            lines.append(f"    precise float alu{i} = asfloat({res});")
+        elif m := match(rf"v_(min|max)_f16_sdwa (v\d+), (-?)(?:\|([vs]\d+)\||abs\(([vs]\d+)\)|([vs]\d+)), (-?)(?:\|([vs]\d+)\||abs\(([vs]\d+)\)|([vs]\d+))( clamp)? dst_sel:(BYTE_[0-3]|WORD_[01]|DWORD) dst_unused:(UNUSED_PAD|UNUSED_PRESERVE) src0_sel:(BYTE_[0-3]|WORD_[01]|DWORD) src1_sel:(BYTE_[0-3]|WORD_[01]|DWORD)"):
+            op, dst, neg0, bars0, call0, plain0, neg1, bars1, call1, plain1, clamp, dst_sel, unused, src0_sel, src1_sel = m.groups()
+            if mask != "entry":
+                raise ValueError(f"Invalid {op} operation")
+            if not 0 <= int(dst[1:]) <= 255:
+                raise ValueError(f"Register out of range: {dst}")
+            if dst in sample_dest:
+                raise ValueError("Write overlaps an outstanding sample")
+            vals = []
+            for neg, bars, call, plain, sel in ((neg0, bars0, call0, plain0, src0_sel), (neg1, bars1, call1, plain1, src1_sel)):
+                source = bars or call or plain
+                if (half_name := half16_name(source, vector)) is not None:
+                    if sel != "WORD_0":
+                        raise ValueError("Reads the undefined high half of a 16-bit result")
+                    word = f"asuint({half_name})"
+                else:
+                    word = f"asuint({fp_operand(source, scalar, vector, pending, sample_dest)})"
+                v = f"widen16({sdwa_source(word, sel, False)})"
+                if bars or call:
+                    v = f"abs({v})"
+                if neg:
+                    v = f"(-{v})"
+                vals.append(v)
+            helpers.add(f"{op}16_num")
+            expression = f"{op}16_num({vals[0]}, {vals[1]})"
+            if clamp:
+                expression = f"saturate({expression})"
+            old = vector.get(dst) if unused == "UNUSED_PRESERVE" else None
+            lines.append(f"    precise float hs{i} = {expression};")
+            lines.append(f"    uint hbits{i} = narrow16(hs{i});")
+            res = sdwa_dest(f"hbits{i}", dst_sel, unused, old)
+            vector[dst] = f"alu{i}"
+            lines.append(f"    precise float alu{i} = asfloat({res});")
         elif m := match(rf"v_({'|'.join(SDWA_ALU)})_f32_sdwa (v\d+), (.+?)( clamp)? dst_sel:(BYTE_[0-3]|WORD_[01]|DWORD) dst_unused:(UNUSED_PAD|UNUSED_SEXT|UNUSED_PRESERVE) src0_sel:DWORD( src1_sel:DWORD)?"):
             # SDWA forms of binary32 arithmetic take whole-dword sources, so the binary32 denormal mode never
             # applies to a zero-extended field; the result is placed like an SDWA move.
@@ -3998,6 +4097,74 @@ def lower(instructions, texture_sgpr, interp_sgpr, sampler, constant_descriptor=
                 expression = f"saturate({expression})"
             vector[dst] = f"alu{i}"
             lines.append(f"    precise float alu{i} = {expression};")
+        elif m := match(rf"v_({'|'.join(VOP1_F16_MATH)})_f16(_e32|_e64)? (v\d+), (.+?)( clamp)?"):
+            op, enc, dst, src, clamp = m.groups()
+            if mask != "entry":
+                raise ValueError(f"Invalid {op} operation")
+            if not 0 <= int(dst[1:]) <= 255:
+                raise ValueError(f"Register out of range: {dst}")
+            if dst in sample_dest:
+                raise ValueError("Write overlaps an outstanding sample")
+            if clamp and enc != "_e64":
+                raise ValueError("Clamp requires VOP3 encoding")
+            operand = f16_cmp_operand(src, scalar, vector, pending, sample_dest, allow_mods=enc == "_e64", as_bits=False)
+            expression = VOP1_F16_MATH[op].format(operand)
+            if clamp:
+                expression = f"saturate({expression})"
+            old = half16_name(dst, vector) or vector.get(dst)
+            if old is not None and not (isinstance(old, str) and old.startswith(("sample", "alu", "params"))):
+                raise ValueError("Unsupported conversion destination")
+            high = f"(asuint({old}) & 0xffff0000u)" if old is not None else "0u"
+            lines.append(f"    precise float hs{i} = {expression};")
+            lines.append(f"    precise float alu{i} = asfloat({high} | narrow16(hs{i}));")
+            vector[dst] = f"alu{i}"
+        elif m := match(r"v_frexp_exp_i16_f16(_e32|_e64)? (v\d+), (.+?)( clamp)?"):
+            enc, dst, src, clamp = m.groups()
+            if mask != "entry":
+                raise ValueError("Invalid frexp_exp operation")
+            if not 0 <= int(dst[1:]) <= 255:
+                raise ValueError(f"Register out of range: {dst}")
+            if dst in sample_dest:
+                raise ValueError("Write overlaps an outstanding sample")
+            if clamp:
+                raise ValueError("Clamp is not supported on frexp_exp")
+            operand = f16_cmp_operand(src, scalar, vector, pending, sample_dest, allow_mods=enc == "_e64", as_bits=False)
+            old = half16_name(dst, vector) or vector.get(dst)
+            if old is not None and not (isinstance(old, str) and old.startswith(("sample", "alu", "params"))):
+                raise ValueError("Unsupported conversion destination")
+            high = f"(asuint({old}) & 0xffff0000u)" if old is not None else "0u"
+            lines.append(f"    int exp{i} = frexp_exp32({operand});")
+            lines.append(f"    precise float alu{i} = asfloat({high} | (asuint(exp{i}) & 0xffffu));")
+            vector[dst] = f"alu{i}"
+        elif m := match(rf"v_(min|max)_f16(_e32|_e64)? (v\d+), ([^,\s]+), (.+?)( clamp)?"):
+            op, enc, dst, src0, src1, clamp = m.groups()
+            if mask != "entry":
+                raise ValueError(f"Invalid {op} operation")
+            if not 0 <= int(dst[1:]) <= 255:
+                raise ValueError(f"Register out of range: {dst}")
+            if dst in sample_dest:
+                raise ValueError("Write overlaps an outstanding sample")
+            if enc != "_e64":
+                if clamp:
+                    raise ValueError("Clamp requires VOP3 encoding")
+                if not re.fullmatch(r"v\d+", src1):
+                    raise ValueError("Binary16 e32 src1 must be a VGPR")
+                allow_mods = False
+            else:
+                allow_mods = True
+            val0 = f16_cmp_operand(src0, scalar, vector, pending, sample_dest, allow_mods=allow_mods, as_bits=False)
+            val1 = f16_cmp_operand(src1, scalar, vector, pending, sample_dest, allow_mods=allow_mods, as_bits=False)
+            helpers.add(f"{op}16_num")
+            expression = f"{op}16_num({val0}, {val1})"
+            if clamp:
+                expression = f"saturate({expression})"
+            old = half16_name(dst, vector) or vector.get(dst)
+            if old is not None and not (isinstance(old, str) and old.startswith(("sample", "alu", "params"))):
+                raise ValueError("Unsupported conversion destination")
+            high = f"(asuint({old}) & 0xffff0000u)" if old is not None else "0u"
+            lines.append(f"    precise float hs{i} = {expression};")
+            lines.append(f"    precise float alu{i} = asfloat({high} | narrow16(hs{i}));")
+            vector[dst] = f"alu{i}"
         elif m := match(r"v_cvt_f16_f32(?:_e32|_e64)? (v\d+), ([^,\s]+)"):
             # GFX10 16-bit results replace only the low half; the high half of the destination is kept
             # (LLVM GCNSubtarget::zeroesHigh16BitsOfDest). A destination with no tracked value contributes zero.

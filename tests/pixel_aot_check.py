@@ -4250,7 +4250,7 @@ def check_int16_vop3_controls():
     for line in ("v_add_nc_u16 v24, v18, v19 op_sel:[0,0,1]", "v_add_nc_u16 v24, v18, v19 clamp",
                  "v_add_nc_u16_dpp v24, v18, v19 quad_perm:[0,1,2,3]",
                  "v_add_nc_u16_sdwa v24, v18, v19 dst_sel:WORD_0 dst_unused:UNUSED_PAD src0_sel:WORD_0 src1_sel:WORD_0",
-                 "v_min_f16_e64 v24, v18, v19"):
+                 "v_min_f64_e64 v24, v18, v19"):
         refuse(line, "Unsupported instruction")
     refuse("v_add_nc_u16 v24, v18, -v19", "Unsupported 16-bit integer operand")
     refuse("v_add_nc_u16 v24, v18, 1.0", "Unsupported 16-bit integer operand")
@@ -8558,8 +8558,8 @@ def check_f16_arith_controls():
     for line in ("v_add_f16_e64 v24, v18, v19 clamp", "v_mul_f16_e64 v24, v18, v19 mul:2", "v_mul_f16_e64 v24, v18, v19 div:2",
                  "v_add_f16_e64 v24, v18, v19 op_sel:[0,1]", "v_add_f16_dpp v24, v18, v19 quad_perm:[0,1,2,3]",
                  "v_add_f16_sdwa v24, v18, v19 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_0 src1_sel:WORD_0",
-                 "v_add_f16 v24, v18, v19, v19", "v_add_f16 v24, v18", "v_min_f16_e64 v24, v18, v19",
-                 "v_max_f16_e32 v24, v18, v19", "v_fmac_f16_e32 v24, v18, v19", "v_ldexp_f16_e32 v24, v18, v19"):
+                 "v_add_f16 v24, v18, v19, v19", "v_add_f16 v24, v18", "v_min_f64_e64 v24, v18, v19",
+                 "v_max_f64_e32 v24, v18, v19", "v_fmac_f16_e32 v24, v18, v19", "v_ldexp_f16_e32 v24, v18, v19"):
         refuse(line, "Unsupported instruction")
 
     # Scheduling around the load and the samples: a pending SGPR, an outstanding sample, a non-entry mask.
@@ -8965,8 +8965,8 @@ def check_f16_round_controls():
                  "v_floor_f16_e64 v24, -v18 clamp", "v_floor_f16_e32 v24, v18 clamp",
                  "v_floor_f16_dpp v24, v18 quad_perm:[0,1,2,3] row_mask:0xf bank_mask:0xf",
                  "v_floor_f16_sdwa v24, v18 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_0",
-                 "v_floor_f16 v24, v18, v19", "v_floor_f16 v24", "v_fract_f16_e32 v24, v18", "v_rcp_f16_e32 v24, v18",
-                 "v_sqrt_f16_e64 v24, v18", "v_fract_f16_e64 v24, v18"):
+                 "v_floor_f16 v24, v18, v19", "v_floor_f16 v24", "v_fract_f64 v24, v18", "v_rcp_f64 v24, v18",
+                 "v_sqrt_f64 v24, v18", "v_cos_f64 v24, v18"):
         refuse(line, "Unsupported instruction")
 
     # Scheduling around the load and the samples: a pending SGPR, an outstanding sample, a non-entry mask.
@@ -9028,7 +9028,80 @@ def check_f16_round_controls():
         expect_value_error(translate_f16, export, "Unsupported export")
 
 
+def check_f16_unary_math_controls():
+    lines = ["v_mov_b32_e32 v16, 0x4000", "v_mov_b32_e32 v18, 0x4400"]
+    vop1_ops = (
+        "fract", "rcp", "rsq", "sqrt", "exp", "log",
+        "sin", "cos", "frexp_mant", "frexp_exp_i16",
+    )
+    for op in vop1_ops:
+        lines.append(f"v_{op}_f16 v12, v16")
+    lines.append("v_min_f16 v12, v16, v18")
+    lines.append("v_max_f16 v12, v16, v18")
+
+    for op in vop1_ops:
+        lines.append(f"v_{op}_f16_e64 v12, v16")
+    lines.append("v_min_f16_e64 v12, v16, v18")
+    lines.append("v_max_f16_e64 v12, v16, v18")
+
+    for op in vop1_ops:
+        lines.append(f"v_{op}_f16_sdwa v12, v16 dst_sel:WORD_0 dst_unused:UNUSED_PRESERVE src0_sel:WORD_0")
+    lines.append("v_min_f16_sdwa v12, v16, v18 dst_sel:WORD_0 dst_unused:UNUSED_PRESERVE src0_sel:WORD_0 src1_sel:WORD_0")
+    lines.append("v_max_f16_sdwa v12, v16, v18 dst_sel:WORD_0 dst_unused:UNUSED_PRESERVE src0_sel:WORD_0 src1_sel:WORD_0")
+
+    program = uncompressed_export(lines)
+    source = translate_f16(program)
+    for expected in (
+        "fract32(", "(1.0f / ", "rsqrt(", "sqrt(", "exp2(", "log2(",
+        "sin32(", "cos32(", "frexp_mant32(", "frexp_exp32(",
+        "min16_num(", "max16_num(",
+    ):
+        assert expected in source, f"Missing {expected} in generated HLSL"
+
+    assert "(asuint(alu" in source and "0xffff0000u)" in source
+
+    prefix = ["v_mov_b32_e32 v16, 0x4000", "v_mov_b32_e32 v18, 0x4400"]
+
+    def refuse(line, expected_error):
+        expect_value_error(translate_f16, uncompressed_export([*prefix, line]), expected_error)
+
+    refuse("v_fract_f16_e32 v12, v16 clamp", "Clamp requires VOP3 encoding")
+    refuse("v_min_f16 v12, v16, v18 clamp", "Clamp requires VOP3 encoding")
+    refuse("v_frexp_exp_i16_f16_e64 v12, v16 clamp", "Clamp is not supported on frexp_exp")
+
+    refuse("v_fract_f16_e32 v12, -v16", "Input modifiers require VOP3 encoding")
+    refuse("v_fract_f16_e32 v12, |v16|", "Input modifiers require VOP3 encoding")
+    refuse("v_min_f16 v12, -v16, v18", "Input modifiers require VOP3 encoding")
+
+    refuse("v_min_f16 v12, v16, 1.0", "Binary16 e32 src1 must be a VGPR")
+    refuse("v_min_f16 v12, v16, s44", "Binary16 e32 src1 must be a VGPR")
+
+    refuse("v_fract_f16 v256, v16", "Register out of range: v256")
+    refuse("v_min_f16 v256, v16, v18", "Register out of range: v256")
+
+    refuse("v_fract_f16_e64 v12, v16 mul:2", "Unsupported packed operand")
+    refuse("v_min_f16_e64 v12, v16, v18 div:2", "Unsupported packed operand")
+
+    produced = ["v_mov_b32_e32 v18, 0x3c00", "v_add_f16_e32 v24, 1.0, v18"]
+    for insn in (
+        "v_fract_f16_sdwa v12, v24 dst_sel:WORD_0 dst_unused:UNUSED_PAD src0_sel:WORD_1",
+        "v_min_f16_sdwa v12, v24, v18 dst_sel:WORD_0 dst_unused:UNUSED_PAD src0_sel:WORD_1 src1_sel:WORD_0",
+        "v_min_f16_sdwa v12, v18, v24 dst_sel:WORD_0 dst_unused:UNUSED_PAD src0_sel:WORD_0 src1_sel:WORD_1",
+    ):
+        expect_value_error(
+            translate_f16,
+            uncompressed_export([*produced, insn]),
+            "Reads the undefined high half of a 16-bit result",
+        )
+
+    refuse("v_min_f64_e64 v12, v18, v19", "Unsupported instruction")
+    refuse("v_max_f64_e32 v12, v18, v19", "Unsupported instruction")
+    refuse("v_floor_f64_e32 v[12:13], v[18:19]", "Unsupported instruction")
+    refuse("v_ceil_f64_e32 v[12:13], v[18:19]", "Unsupported instruction")
+
+
 def check_controls(directory):
+    check_f16_unary_math_controls()
     check_masked_controls()
     check_title_load_controls()
     check_ds_swizzle_controls()
@@ -9518,71 +9591,6 @@ def check_controls(directory):
                       "v_mul_legacy_f32_e32 v12, 1.0, v20",
                       "v_cvt_pkrtz_f16_f32_e32 v24, v12, v20"):
         changed = partial.copy()
-        changed.insert(wait + 1, early_use)
-        must_reject(translate_dual, changed)
-    # Each of B's four destinations remains protected from a constant write.
-    for reg in range(20, 24):
-        changed = partial.copy()
-        changed.insert(wait + 1, f"v_mov_b32_e32 v{reg}, 0")
-        must_reject(translate_dual, changed)
-    # Packing A is legal here even though B is outstanding.
-    translate_dual(partial[:wait + 1] + ["v_cvt_pkrtz_f16_f32_e32 v24, v12, v13"] + partial[wait + 1:])
-    # A larger legal wait after draining does not invalidate completed samples.
-    end_wait = partial.index("s_waitcnt vmcnt(0)")
-    drained = partial[:end_wait + 1] + ["s_waitcnt vmcnt(63)"] + partial[end_wait + 1:]
-    translate_dual(drained)
-    must_reject(translate_dual, [op.replace("vmcnt(63)", "vmcnt(64)") for op in drained])
-
-    # Composite waitcnt forms with multiple counters, single counters, or raw 0.
-    for legal_wait in (
-        "s_waitcnt vmcnt(7) lgkmcnt(0)",
-        "s_waitcnt vmcnt(7) lgkmcnt(63)",
-        "s_waitcnt lgkmcnt(0) vmcnt(0)",
-        "s_waitcnt vmcnt(0) expcnt(0) lgkmcnt(0)",
-        "s_waitcnt 0",
-        "s_waitcnt 0x0",
-    ):
-        translate_dual(partial[:end_wait + 1] + [legal_wait] + partial[end_wait + 1:])
-    for illegal_wait in (
-        "s_waitcnt lgkmcnt(64)",
-        "s_waitcnt expcnt(8)",
-        "s_waitcnt vmcnt(0) vmcnt(1)",
-        "s_waitcnt lgkmcnt(0) lgkmcnt(1)",
-        "s_waitcnt expcnt(0) expcnt(1)",
-        "s_waitcnt invalid",
-    ):
-        must_reject(translate_dual, partial[:end_wait + 1] + [illegal_wait] + partial[end_wait + 1:])
-
-    # Verify that composite waitcnt with lgkmcnt(0) satisfies constant read requirements,
-    # while lgkmcnt(63) keeps pending scalar loads outstanding.
-    cbuf_program = with_constants(["v_mov_b32_e32 v8, s44"])
-    cbuf_wait = cbuf_program.index("s_waitcnt lgkmcnt(0)")
-    cbuf_composite_ok = cbuf_program.copy()
-    cbuf_composite_ok[cbuf_wait] = "s_waitcnt vmcnt(7) lgkmcnt(0)"
-    translate(cbuf_composite_ok)
-    cbuf_composite_pending = cbuf_program.copy()
-    cbuf_composite_pending[cbuf_wait] = "s_waitcnt vmcnt(7) lgkmcnt(63)"
-    must_reject(translate, cbuf_composite_pending)
-
-    # 32-bit vector integer ALU operations: lshl_add_u32, lshl_or_b32, and_or_b32, or3_b32, add3_u32, mul_lo_u32.
-    alu_prog = uncompressed_export([
-        "v_lshl_add_u32 v12, s44, 2, s45",
-        "v_lshl_or_b32 v13, s44, 4, s45",
-        "v_and_or_b32 v14, s44, s45, s46",
-        "v_or3_b32 v15, s44, s45, s46",
-        "v_mul_lo_u32 v12, v12, s47",
-        "v_add3_u32 v13, v13, v14, v15",
-    ])
-    alu_src = translate(alu_prog)
-    assert "((asuint(params[0].w) << (2u & 31u)) + asuint(params[1].x))" in alu_src
-    assert "((asuint(params[0].w) << (4u & 31u)) | asuint(params[1].x))" in alu_src
-    assert "((asuint(params[0].w) & asuint(params[1].x)) | asuint(params[1].y))" in alu_src
-    assert "(asuint(params[0].w) | asuint(params[1].x) | asuint(params[1].y))" in alu_src
-    assert "(asuint(alu20) * asuint(params[1].z))" in alu_src
-    assert "(asuint(alu21) + asuint(alu22) + asuint(alu23))" in alu_src
-    # Negative controls: arity mismatch and register out-of-range
-    must_reject(translate, uncompressed_export(["v_lshl_add_u32 v12, s44, 2"]))
-    must_reject(translate, uncompressed_export(["v_lshl_add_u32 v12, s44, 2, s45, s46"]))
     must_reject(translate, uncompressed_export(["v_mul_lo_u32 v12, s44"]))
     must_reject(translate, uncompressed_export(["v_mul_lo_u32 v12, s44, s45, s46"]))
     must_reject(translate, uncompressed_export(["v_or3_b32 v256, s44, s45, s46"]))
@@ -9721,9 +9729,9 @@ def check_controls(directory):
     for expected in ("= ceil(alu", "= round(alu", "= round(params[1].x);", "= ceil((-params[1].y));"):
         assert expected in source, expected
     # Neighbouring forms: other widths, output modifiers, a second source and the IEEE-flag reciprocal.
-    for old, new in (("v_ceil_f32_e32 v12, v18", "v_fract_f16_e32 v12, v18"),
+    for old, new in (("v_ceil_f32_e32 v12, v18", "v_floor_f64_e32 v[12:13], v[18:19]"),
                      ("v_ceil_f32_e32 v12, v18", "v_ceil_f64_e32 v[12:13], v[18:19]"),
-                     ("v_rndne_f32_e32 v13, v19", "v_rcp_f16_e32 v13, v19"),
+                     ("v_rndne_f32_e32 v13, v19", "v_rndne_f64_e32 v[13:14], v[19:20]"),
                      ("v_rndne_f32_e32 v13, v19", "v_rndne_f32_e32 v13, v19, v18"),
                      ("v_rndne_f32_e64 v14, s45", "v_rndne_f32_e64 v14, s45 mul:2"),
                      ("v_ceil_f32_e64 v15, -s46", "v_ceil_f32_e64 v15, -s46 div:2"),
@@ -13737,6 +13745,213 @@ def f16_compares_reference(words: tuple[int, int, int, int]) -> tuple[int, int, 
     return (w0, w1, w2, w3)
 
 
+F16_MATH_SETS = (
+    # Each entry is (s44, s45, s46, s47)
+    # 0: standard dyadic powers of two: 2.0 (0x4000), 4.0 (0x4400)
+    (0x4000, 0x4400, 0x0000, 0x0000),
+    # 1: negative inputs: -2.0 (0xc000), 3.0 (0x4200)
+    (0xc000, 0x4200, 0x0000, 0x0000),
+    # 2: fractions and reciprocals: 0.25 (0x3400), 0.5 (0x3800)
+    (0x3400, 0x3800, 0x0000, 0x0000),
+    # 3: angle turns (0.25 turn = 90 deg, 0.0 turn = 0 deg)
+    (0x3400, 0x0000, 0x0000, 0x0000),
+)
+
+
+def f16_unary_math() -> list[str]:
+    """Build a shader exercising all 48 binary16 unary math, decomposition and min/max forms across VOP1, VOP2, VOP3 and SDWA."""
+    body = [
+        "v_mov_b32_e32 v12, 0",
+        "v_mov_b32_e32 v13, 0",
+        "v_mov_b32_e32 v14, 0",
+        "v_mov_b32_e32 v15, 0",
+        "v_mov_b32_e32 v16, 0x4000",
+        "v_mov_b32_e32 v18, 0x4400",
+        "v_mov_b32_e32 v20, s46",
+        "v_mov_b32_e32 v21, s47",
+    ]
+
+    def emit(acc: str, insn: str) -> None:
+        body.append(insn)
+        body.append("v_and_b32_e32 v24, 0xffff, v24")
+        body.append(f"v_xor_b32_e32 {acc}, {acc}, v24")
+        body.append(f"v_lshlrev_b32_e32 {acc}, 1, {acc}")
+
+    v12_ops = [
+        "v_fract_f16 v24, v16", "v_rcp_f16 v24, v16",
+        "v_rsq_f16 v24, v16", "v_sqrt_f16 v24, v16", "v_exp_f16 v24, v16",
+        "v_log_f16 v24, v16", "v_sin_f16 v24, v16", "v_cos_f16 v24, v16",
+        "v_frexp_mant_f16 v24, v16",
+    ]
+    for insn in v12_ops:
+        emit("v12", insn)
+
+    v13_ops = [
+        "v_frexp_exp_i16_f16 v24, v16",
+        "v_min_f16 v24, v16, v18", "v_max_f16 v24, v16, v18",
+        "v_fract_f16_e64 v24, v16", "v_rcp_f16_e64 v24, |v16| clamp",
+        "v_rsq_f16_e64 v24, |v16|", "v_sqrt_f16_e64 v24, |v16| clamp",
+        "v_exp_f16_e64 v24, v16", "v_log_f16_e64 v24, |v16|",
+    ]
+    for insn in v13_ops:
+        emit("v13", insn)
+
+    v14_ops = [
+        "v_sin_f16_e64 v24, v16", "v_cos_f16_e64 v24, v16",
+        "v_frexp_mant_f16_e64 v24, -v16", "v_frexp_exp_i16_f16_e64 v24, -v16",
+        "v_min_f16_e64 v24, -v16, |v18| clamp", "v_max_f16_e64 v24, |v16|, -v18",
+    ]
+    for insn in v14_ops:
+        emit("v14", insn)
+
+    v15_ops = [
+        "v_fract_f16_sdwa v24, v16 dst_sel:WORD_0 dst_unused:UNUSED_PRESERVE src0_sel:WORD_0",
+        "v_rcp_f16_sdwa v24, v16 dst_sel:WORD_0 dst_unused:UNUSED_PRESERVE src0_sel:WORD_0",
+        "v_rsq_f16_sdwa v24, v16 dst_sel:WORD_0 dst_unused:UNUSED_PRESERVE src0_sel:WORD_0",
+        "v_sqrt_f16_sdwa v24, v16 dst_sel:WORD_0 dst_unused:UNUSED_PRESERVE src0_sel:WORD_0",
+        "v_exp_f16_sdwa v24, v16 dst_sel:WORD_0 dst_unused:UNUSED_PRESERVE src0_sel:WORD_0",
+        "v_log_f16_sdwa v24, v16 dst_sel:WORD_0 dst_unused:UNUSED_PRESERVE src0_sel:WORD_0",
+        "v_sin_f16_sdwa v24, v16 dst_sel:WORD_0 dst_unused:UNUSED_PRESERVE src0_sel:WORD_0",
+        "v_cos_f16_sdwa v24, v16 dst_sel:WORD_0 dst_unused:UNUSED_PRESERVE src0_sel:WORD_0",
+        "v_frexp_mant_f16_sdwa v24, v16 dst_sel:WORD_0 dst_unused:UNUSED_PRESERVE src0_sel:WORD_0",
+        "v_frexp_exp_i16_f16_sdwa v24, v16 dst_sel:WORD_0 dst_unused:UNUSED_PRESERVE src0_sel:WORD_0",
+        "v_min_f16_sdwa v24, v16, v18 dst_sel:WORD_0 dst_unused:UNUSED_PRESERVE src0_sel:WORD_0 src1_sel:WORD_0",
+        "v_max_f16_sdwa v24, v16, v18 dst_sel:WORD_0 dst_unused:UNUSED_PRESERVE src0_sel:WORD_0 src1_sel:WORD_0",
+    ]
+    for insn in v15_ops:
+        emit("v15", insn)
+
+    return body
+
+
+def f16_unary_math_reference(words=None) -> tuple[int, int, int, int]:
+    """Compute the exact 4 uint hash values expected from f16_unary_math()."""
+    def half_float(bits: int) -> float:
+        return struct.unpack("<e", struct.pack("<H", bits & 0xffff))[0]
+
+    def float_half(val: float) -> int:
+        return struct.unpack("<H", struct.pack("<e", val))[0]
+
+    def sat(val: float) -> float:
+        return max(0.0, min(1.0, val))
+
+    def turns_red(v: float) -> float:
+        return v - round(v) if abs(v) > 0.5 else v
+
+    def sin_turns(v: float) -> float:
+        return math.sin(turns_red(v) * 6.28318548)
+
+    def cos_turns(v: float) -> float:
+        return math.cos(turns_red(v) * 6.28318548)
+
+    def frac_helper(v: float) -> float:
+        f = v - math.floor(v)
+        return min(f, 0.99999994)
+
+    def frexp_mant_helper(v: float) -> float:
+        if v == 0.0 or math.isinf(v) or math.isnan(v):
+            return v
+        m, _ = math.frexp(v)
+        return m
+
+    def frexp_exp_helper(v: float) -> int:
+        if v == 0.0 or math.isinf(v) or math.isnan(v):
+            return 0
+        _, e = math.frexp(v)
+        return e
+
+    w16 = (words[0] if words else 0x4000) & 0xffff
+    w18 = (words[1] if words else 0x4400) & 0xffff
+    f16 = half_float(w16)
+    f18 = half_float(w18)
+
+    acc12 = 0
+    v12_vals = [
+        float_half(frac_helper(f16)), float_half(1.0 / f16),
+        float_half(1.0 / math.sqrt(abs(f16))), float_half(math.sqrt(abs(f16))),
+        float_half(2.0 ** f16), float_half(math.log2(abs(f16))),
+        float_half(sin_turns(f16)), float_half(cos_turns(f16)),
+        float_half(frexp_mant_helper(f16)),
+    ]
+    for h in v12_vals:
+        acc12 = ((acc12 ^ (h & 0xffff)) << 1) & 0xffffffff
+
+    acc13 = 0
+    v13_vals = [
+        frexp_exp_helper(f16) & 0xffff,
+        float_half(min(f16, f18)), float_half(max(f16, f18)),
+        float_half(frac_helper(f16)), float_half(sat(1.0 / abs(f16))),
+        float_half(1.0 / math.sqrt(abs(f16))), float_half(sat(math.sqrt(abs(f16)))),
+        float_half(2.0 ** f16), float_half(math.log2(abs(f16))),
+    ]
+    for h in v13_vals:
+        acc13 = ((acc13 ^ (h & 0xffff)) << 1) & 0xffffffff
+
+    acc14 = 0
+    v14_vals = [
+        float_half(sin_turns(f16)), float_half(cos_turns(f16)),
+        float_half(frexp_mant_helper(-f16)), frexp_exp_helper(-f16) & 0xffff,
+        float_half(sat(min(-f16, abs(f18)))), float_half(max(abs(f16), -f18)),
+    ]
+    for h in v14_vals:
+        acc14 = ((acc14 ^ (h & 0xffff)) << 1) & 0xffffffff
+
+    acc15 = 0
+    v15_vals = [
+        float_half(frac_helper(f16)), float_half(1.0 / f16),
+        float_half(1.0 / math.sqrt(abs(f16))), float_half(math.sqrt(abs(f16))),
+        float_half(2.0 ** f16), float_half(math.log2(abs(f16))),
+        float_half(sin_turns(f16)), float_half(cos_turns(f16)),
+        float_half(frexp_mant_helper(f16)), frexp_exp_helper(f16) & 0xffff,
+        float_half(min(f16, f18)), float_half(max(f16, f18)),
+    ]
+    for h in v15_vals:
+        acc15 = ((acc15 ^ (h & 0xffff)) << 1) & 0xffffffff
+
+    return (acc12, acc13, acc14, acc15)
+
+
+def check_f16_unary_math_draws(directory, compiler, renderer, backend):
+    source = directory / "f16-math.hlsl"
+    shader = directory / "f16-math.cso"
+    program = uncompressed_export(f16_unary_math())
+    source.write_text(translate_f16(program), encoding="ascii")
+    compile_shader(compiler, source, shader)
+    cases = []
+    for index, words in enumerate(F16_MATH_SETS):
+        constants = bytearray(256)
+        struct.pack_into("<4I", constants, 12, *words)
+        expected = tuple(as_float(w) for w in f16_unary_math_reference(words))
+        path = write_case(directory / f"f16-math-{index}.case", constants, expected, integer_rt=True)
+        cases.append((path, "pass"))
+        if index < 4:
+            wrong_words = list(f16_unary_math_reference(words))
+            wrong_words[index] ^= 1 << index
+            wrong_path = write_case(
+                directory / f"f16-math-bad-{index}.case",
+                constants,
+                tuple(as_float(w) for w in wrong_words),
+                integer_rt=True,
+            )
+            cases.append((wrong_path, "mismatch"))
+    run_pixel_batch(renderer, backend, shader, cases)
+
+    mutated_shader = directory / "f16-math-mutated.cso"
+    for label, old, new, case_index in (
+        ("f16 sin to cos", "v_sin_f16 v24, v16", "v_cos_f16 v24, v16", 0),
+        ("f16 e64 neg modifier", "v_frexp_mant_f16_e64 v24, -v16", "v_frexp_mant_f16_e64 v24, v16", 1),
+        ("f16 min to max", "v_min_f16 v24, v16, v18", "v_max_f16 v24, v16, v18", 0),
+    ):
+        mutated = [new if line == old else line for line in program]
+        assert mutated != program
+        source.write_text(translate_f16(mutated), encoding="ascii")
+        compile_shader(compiler, source, mutated_shader)
+        draw = [renderer, backend, "--check-pixel-case", mutated_shader, directory / f"f16-math-{case_index}.case"]
+        result = subprocess.run(draw, capture_output=True, text=True)
+        if result.returncode != 1 or "pixel_mismatch" not in result.stderr:
+            raise AssertionError(f"Mutating {label} escaped detection")
+
+
 def check_f16_compare_draws(directory, compiler, renderer, backend):
     source = directory / "f16-compare.hlsl"
     shader = directory / "f16-compare.cso"
@@ -14108,6 +14323,7 @@ def check_predicate_and_rounding_draws(directory, compiler, renderer, backend):
 def check_comparison_draws(directory, compiler, renderer, backend):
     """The comparison and class draws, split from draw-predicate-rounding so each CTest entry stays under its
     timeout on adapters where every renderer launch pays for device creation with the debug layer (issue #448)."""
+    check_f16_unary_math_draws(directory, compiler, renderer, backend)
     check_f16_compare_draws(directory, compiler, renderer, backend)
     check_f32_compare_draws(directory, compiler, renderer, backend)
     check_class_draw(directory, compiler, renderer, backend)

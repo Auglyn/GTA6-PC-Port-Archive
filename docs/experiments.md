@@ -4928,3 +4928,36 @@ and clamping with runtime inputs under the preserve denormal mode:
 Four negative controls verify that omitting the 2^32 scale, substituting unfused `mad`,
 omitting the 2Sum midpoint correction (double-rounding), or flushing intermediate
 subnormals (`ftz`) report pixel mismatches under `--check-pixel-case`.
+
+## Binary16 unary math, decomposition, and min/max lowering
+
+The offline pixel shader translator lowers 36 distinct RDNA 2 binary16 (`f16`) forms:
+10 unary math and decomposition operations across VOP1, 2 binary min/max operations across
+VOP2, 12 three-operand / modifier-bearing VOP3 forms (`_e64`), and 12 Sub-Dword Addressing
+(`_sdwa`) forms with sub-dword byte/word field extraction and destination placement.
+
+The lowered operations comprise:
+- Fractional part: `v_fract_f16` (`x - floor(x)` clamped below 1.0);
+- Powers and roots: `v_rcp_f16` (`1.0 / x`), `v_rsq_f16` (`1.0 / sqrt(x)`), `v_sqrt_f16`,
+  `v_exp_f16` (`exp2(x)`), and `v_log_f16` (`log2(x)`);
+- Trigonometry: `v_sin_f16` and `v_cos_f16` taking argument in revolutions (turns), reduced
+  to `[-0.5, 0.5]` through `turns(x)` and multiplied by `2 * pi` to bound floating-point error;
+- Decomposition: `v_frexp_mant_f16` extracting normalized significand in `(-1, -0.5] U [0.5, 1)`
+  and `v_frexp_exp_i16_f16` extracting signed 16-bit integer exponent;
+- Selection: `v_min_f16` and `v_max_f16` following IEEE 754-2008 minNum/maxNum semantics
+  (`min16_num`, `max16_num`).
+
+In VOP1 and VOP2 forms, the low 16 bits of the destination VGPR receive the binary16 result,
+while the destination's high 16 bits `[31:16]` are preserved from the prior value in that
+register (`asfloat((asuint(old) & 0xffff0000u) | narrow16(result))`). VOP3 (`_e64`) forms
+support input negation and absolute-value modifiers, as well as output clamping to `[0.0, 1.0]`.
+SDWA forms allow arbitrary source and destination byte/word selection and unused-field padding
+or preservation.
+
+Synthetic test fixtures in `tests/pixel_aot_check.py` (`check_f16_unary_math_controls` and
+`check_f16_unary_math_draws`) exercise all 36 forms across dyadic powers of two, non-integer ties,
+fractional tie midpoints, and cardinal angles, checking lossless 32-bit uint readbacks against
+an exact bit-accurate Python oracle. Negative controls verify refusal of clamp on e32 encodings,
+clamp on integer exponent decomposition (`frexp_exp`), input modifiers on e32, out-of-range
+registers, unsupported scale multipliers, and SDWA reads of the undefined high half of a
+16-bit arithmetic result.
