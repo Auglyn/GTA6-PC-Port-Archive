@@ -1337,6 +1337,11 @@ pub fn translate(code: &[u8], opt: &Options) -> Result<Translation, String> {
     } else if matches!(opt.mode, Mode::Pixel(_)) {
         em.mask_whole_live = x64_masks::by_pc(&insts, false);
     }
+    // pixel shaders: a mask written in a loop takes its helper lanes' bits from quad reads of
+    // the compare's vector operands (`quad_bits`, #134)
+    if matches!(opt.mode, Mode::Pixel(_)) {
+        em.loops = loop_ranges(&insts);
+    }
     // a wave64 VS / PS on a GPU with 32-lane waves only: what lanes 32..63 hold where the
     // program reads them (the driver may still pick 64 lanes: decided at run time); only a
     // program with a read to change gets the form

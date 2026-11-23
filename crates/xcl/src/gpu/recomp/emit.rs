@@ -44,6 +44,9 @@ pub(super) struct Em {
     /// instruction (`x64_masks`); a mask written to none of them is only read lane by lane
     /// (split: stays in its half, no exchange; pixel: no quad reads for the helper lanes)
     pub mask_whole_live: BTreeMap<u64, u128>,
+    /// pixel shaders: the program's loops (`loop_ranges`); a mask written in one takes its
+    /// helper lanes' bits from quad reads of its vector operands (`quad_bits`, #134)
+    pub loops: Vec<(u64, u64)>,
     /// wave64 VS / PS on a GPU with 32-lane waves only: what the console's lanes 32..63 hold
     /// where the program reads them (`upper_lanes`), used when the wave has 32 lanes
     pub upper: Option<super::upper_lanes::UpperLanes>,
@@ -159,6 +162,79 @@ fn float_compare(op: &str, a: &str, b: &str, isnan: &str) -> Option<String> {
             None => format!("and(!{nan}, {})", rel(op)?),
         },
     })
+}
+
+/// A pixel shader's mask written in a loop (#134): the quad's four bits (bit p: member p's
+/// `act` and `cond`) for `ballot_px_quad`, every lane evaluating each member's condition with
+/// that member's vector registers read through quad reads. `ballot_px` quad-reads the compare's
+/// result instead, and AMD's RDNA2 compiler crashed in `CreateGraphicsPipelineState` on quad
+/// reads of a value computed from a `WaveReadLaneAt` in a loop – the shape that gives every
+/// `v_cmp` of a waterfall loop over `v_readfirstlane` (WarmMilkCodes on an RX 6600 XT, driver
+/// 32.0.21045.29003: the loop's `ballot_px` replaced by `ballot` builds; `rla`'s quad reads of
+/// the loop's vector operand did not crash it). The same bits as `ballot_px` as long as the
+/// other terms are the same in every lane of a quad, which is all this accepts: scalar
+/// registers, constants, pure functions and `lane_id` (rewritten per member). Anything else (a
+/// temporary, a lane read, a derivative) gives `None`, and the mask keeps `ballot_px`. Returns
+/// the quad reads (one per vector register and member, into `{tmp}_vN_p`) and the bits.
+fn quad_bits(act: &str, cond: &str, tmp: &str) -> Option<(String, String)> {
+    let mut reads = std::collections::BTreeSet::new();
+    let mut terms = Vec::with_capacity(4);
+    for p in 0..4u32 {
+        // the wave64 EXEC bit (`lanebit` reads `lane_id` inside); the wave32 one names it
+        let a = if act == "lanebit(exec_lo, exec_hi)" { format!("lanebit_at(exec_lo, exec_hi, (lane_id & ~3u) | {p}u)") } else { quad_member(act, p, tmp, &mut reads)? };
+        let c = quad_member(cond, p, tmp, &mut reads)?;
+        terms.push(if p == 0 { format!("(uint)and({a}, ({c}))") } else { format!("((uint)and({a}, ({c})) << {p}u)") });
+    }
+    let reads: Vec<String> = reads.iter().map(|(v, p)| format!("uint {tmp}_{v}_{p} = QuadReadLaneAt({v}, {p}u);")).collect();
+    Some((reads.join(" "), terms.join(" | ")))
+}
+
+/// `expr` as member `p` of the lane's quad evaluates it (`quad_bits`): vector registers through
+/// `QuadReadLaneAt` (`{tmp}_vN_p`, noted in `reads`), `lane_id` as the member's; `None` for a
+/// term that may differ between the lanes of a quad in another way.
+fn quad_member(expr: &str, p: u32, tmp: &str, reads: &mut std::collections::BTreeSet<(String, u32)>) -> Option<String> {
+    const PURE: &[&str] = &[
+        "asfloat", "asuint", "asint", "asdouble", "isnan", "isnan_d", "isinf", "isfinite", "and", "or", "select", "abs", "min", "max",
+        "fclass", "fclass16", "fclass64", "f16tof32", "f32tof16", "sdwa_sel", "firstbitlow", "firstbithigh", "countbits", "reversebits",
+        "mul_hi_u32", "uint", "int", "float", "double",
+    ];
+    const SAME: &[&str] = &["vcc_lo", "vcc_hi", "exec_lo", "exec_hi", "m0", "scc", "true", "false", "uint", "int", "float", "bool", "double", "uint64_t", "int64_t"];
+    let b = expr.as_bytes();
+    let mut out = String::with_capacity(expr.len() * 2);
+    let mut i = 0;
+    while i < b.len() {
+        let c = b[i];
+        if c.is_ascii_digit() {
+            // a literal (0x3F800000u, 1.0f, 1e-3f), copied as it is
+            let s = i;
+            while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'.' || ((b[i] == b'-' || b[i] == b'+') && matches!(b[i - 1], b'e' | b'E') && !expr[s..].starts_with("0x"))) {
+                i += 1;
+            }
+            out.push_str(&expr[s..i]);
+        } else if c.is_ascii_alphabetic() || c == b'_' {
+            let s = i;
+            while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_') {
+                i += 1;
+            }
+            let id = &expr[s..i];
+            let call = expr[i..].trim_start().starts_with('(');
+            let reg = |prefix: &str| id.strip_prefix(prefix).is_some_and(|n| !n.is_empty() && n.bytes().all(|d| d.is_ascii_digit()));
+            if reg("v") {
+                out.push_str(&format!("{tmp}_{id}_{p}"));
+                reads.insert((id.to_string(), p));
+            } else if id == "lane_id" {
+                out.push_str(&format!("((lane_id & ~3u) | {p}u)"));
+            } else if reg("s") || reg("ttmp") || (call && PURE.contains(&id)) || (!call && SAME.contains(&id)) {
+                out.push_str(id);
+            } else {
+                return None;
+            }
+        } else {
+            out.push(c as char);
+            i += 1;
+        }
+    }
+    Some(out)
 }
 
 /// Layout of the SDWA / DPP extension dword for this instruction's base encoding.
@@ -455,6 +531,7 @@ impl Em {
             uses_scratch: false,
             x64_words: 1,
             mask_whole_live: BTreeMap::new(),
+            loops: Vec::new(),
             upper: None,
             cur_pc: 0,
             static_ss: BTreeMap::new(),
@@ -791,7 +868,16 @@ impl Em {
                 ballot = "ballot_px_local";
             }
         }
-        self.line(&format!("uint2 {m} = {ballot}(and({a}, ({cond})));"));
+        let in_loop = self.loops.iter().any(|&(start, end)| start <= self.cur_pc && self.cur_pc < end);
+        match if ballot == "ballot_px" && in_loop { quad_bits(a, cond, &m) } else { None } {
+            Some((reads, q)) => {
+                if !reads.is_empty() {
+                    self.line(&reads);
+                }
+                self.line(&format!("uint2 {m} = ballot_px_quad({q});"));
+            }
+            None => self.line(&format!("uint2 {m} = {ballot}(and({a}, ({cond})));")),
+        }
         if self.opt.wave64 {
             self.write64(dst, &format!("{m}.x"), &format!("{m}.y"));
         } else {
@@ -5199,9 +5285,10 @@ const PRELUDE_PIXEL: &str = r#"
 // answers for its member p. Only ballots and quad reads: a helper lane gets the wave's result
 // of a ballot, not of every wave op (WaveActiveBitOr gives it another value on an RTX 5070 Ti),
 // and each lane holds its own copy of EXEC – a helper lane's must be right as well.
-uint2 ballot_px(bool b) {
-    uint own = (uint)b << (WaveGetLaneIndex() & 3u);
-    uint q = own | QuadReadAcrossX(own) | QuadReadAcrossY(own) | QuadReadAcrossDiagonal(own);
+// (bit p of q: the quad's member p). In a loop the translator gives q from quad reads of the
+// compare's vector operands, not of its result (`quad_bits`: AMD's compiler crashed on those,
+// #134); elsewhere ballot_px quad-reads the result.
+uint2 ballot_px_quad(uint q) {
     uint2 m = uint2(0u, 0u);
     [unroll] for (uint p = 0u; p < 4u; p++) {
         uint2 w = WaveActiveBallot(((q >> p) & 1u) != 0u).xy;
@@ -5210,6 +5297,10 @@ uint2 ballot_px(bool b) {
         m |= (w & 0x11111111u) << p;
     }
     return uint2(select(and(xcl_w32, xcl_half != 0u), m.y, m.x), select(xcl_w32, 0u, m.y));
+}
+uint2 ballot_px(bool b) {
+    uint own = (uint)b << (WaveGetLaneIndex() & 3u);
+    return ballot_px_quad(own | QuadReadAcrossX(own) | QuadReadAcrossY(own) | QuadReadAcrossDiagonal(own));
 }
 // a mask only ever read lane by lane (v_cndmask, carry-ins; `x64_masks`): the wave's ballot
 // with the reading lane's own bit, which a helper lane has too
