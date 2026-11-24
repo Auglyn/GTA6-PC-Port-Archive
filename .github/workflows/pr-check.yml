@@ -10,7 +10,7 @@ name: PR checks
 
 on:
   pull_request_target:
-    types: [opened, edited, synchronize, reopened, ready_for_review]
+    types: [opened, edited, synchronize, reopened, ready_for_review, labeled, unlabeled]
 
 permissions:
   contents: read
@@ -31,10 +31,25 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           BODY: ${{ github.event.pull_request.body }}
           HEAD: ${{ github.event.pull_request.head.sha }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
           NUMBER: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
+          TEST_ONLY_APPROVAL: ${{ github.event.action == 'labeled' && github.event.label.name == 'test-only' }}
         run: |
           printf '%s' "$BODY" > body.md
           gh api "repos/$REPO/pulls/$NUMBER/files" --paginate \
             --jq '.[] | [.filename, .status, ((.patch == null) and (.changes == 0)), .sha] | @tsv' > files.tsv
-          python3 scripts/pr_check.py --body body.md --head "$HEAD" --files files.tsv --repo "$REPO"
+          approval_args=()
+          # A retained label does not approve a new revision. Check that the approval
+          # still matches the live PR head, target and description on reruns.
+          if [ "$TEST_ONLY_APPROVAL" = true ]; then
+            current=$(gh api "repos/$REPO/pulls/$NUMBER" \
+              --jq '[.head.sha, .base.ref, any(.labels[]; .name == "test-only"), ((.body // "") | @base64)] | @tsv')
+            IFS=$'\t' read -r current_head current_base current_label current_body <<< "$current"
+            if [ "$current_head" = "$HEAD" ] && [ "$current_base" = "$BASE_REF" ] && \
+               [ "$current_label" = true ] && [ "$current_body" = "$(printf '%s' "$BODY" | base64 -w 0)" ]; then
+              echo 'Retail smoke check waived for the labeled test-only revision.'
+              approval_args=(--test-only)
+            fi
+          fi
+          python3 scripts/pr_check.py --body body.md --head "$HEAD" --files files.tsv --repo "$REPO" "${approval_args[@]}"
