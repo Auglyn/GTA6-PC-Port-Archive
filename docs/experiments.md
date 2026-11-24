@@ -2631,6 +2631,34 @@ wraparound and group isolation. Their mutations reverse exchange offsets or
 counter direction. The binary fixture round-trips the four forms with LLVM 15.
 
 
+The private qword counters `ds_inc_u64`, `ds_dec_u64`, `ds_inc_rtn_u64` and
+`ds_dec_rtn_u64` compare the old 64-bit pair with the 64-bit limit in the
+source pair as unsigned values. The [RDNA 2 ISA reference
+guide](https://docs.amd.com/v/u/en-US/rdna2-shader-instruction-set-architecture)
+(70648, release 2020-11-30, section 12.13, PDF page 206) defines
+`DS_INC_U64` as `(tmp >= DATA[0:1]) ? 0 : tmp + 1` and `DS_DEC_U64` as
+`(tmp == 0 || tmp > DATA[0:1]) ? DATA[0:1] : tmp - 1`, both marked unsigned;
+table 95 lists opcodes 67/68 and 99/100 (0x63/0x64).
+The lowering compares the high words first and the low words on a tie, adds
+the carry out of `0xffffffff` on increment and subtracts the borrow on
+decrement. The returning forms capture the old pair before writing the
+destination.
+
+The fixture writes a lane-dependent pair with `ds_write_b64` at byte offset 8
+of the 16-byte record, calls the form, waits and reads the new pair back. The
+old high word takes one of `0x00000000`, `0x40000000`, `0x80000000` and
+`0xc0000000`, while the low word is zero on even lanes and `0xffffffff` on odd
+lanes. Lanes therefore fall below, on and above the
+`0x80000000_00000000` limit, include high words where the signed and unsigned
+comparisons differ, carry out of `0xffffffff` on a below-limit pair, borrow on
+decrement at the limit and present all-zero old pairs. The returning forms
+alias the destination with the limit pair and export the new pair followed by
+the old pair for one and two groups. Changing the increment's `>=` to `>`,
+making the high-word comparison signed, or dropping the zero check from
+decrement each reports a readback mismatch. These cases run in
+`compute_store_aot_lds_qword_(warp|hardware)` with the same private LDS
+gfx1030 profile.
+
 The private LDS f32 profile requires `--lds-f32-mode normal-rne` as a
 caller guarantee that interpreted operands and results are normal binary32
 or positive zero and that the native arithmetic uses round-to-nearest-even.

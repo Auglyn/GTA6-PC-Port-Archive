@@ -75,6 +75,16 @@ def hlsl_word(value):
     return f"tid.{AXES[value[1]]}" if value[0] == "thread" else f"params[{value[1] // 4}].{'xyzw'[value[1] % 4]}"
 
 
+def unsigned_qword_compare(lo, hi, rhs_lo, rhs_hi, relation):
+    """Inline unsigned 64-bit comparison, high word first and low word as tie-break."""
+    return f"(({hi} > {rhs_hi}) || (({hi} == {rhs_hi}) && ({lo} {relation} {rhs_lo})))"
+
+
+def qword_is_zero(lo, hi):
+    """Inline test that both words of a 64-bit pair are zero."""
+    return f"(({lo} == 0u) && ({hi} == 0u))"
+
+
 def alu_word(token, scalar, vector, pending):
     """The known word an ALU source names, or None: a VGPR, a loaded SGPR, an inline constant or a literal."""
     if token[0] == "v":
@@ -688,12 +698,13 @@ def lower(instructions, group, *, table_reg, descriptor_offset, group_reg=None, 
                     raise ValueError("Uninitialized private wide LDS word")
                 vector.update(zip(registers, (lds_wide_words[slot] for slot in slots)))
             ds_wait = True
-        elif ((m := re.fullmatch(r"ds_(add|sub|rsub|and|or|xor|min|max)(?P<ret>_rtn)?(_[uib]64) "
+        elif ((m := re.fullmatch(r"ds_(add|sub|rsub|inc|dec|and|or|xor|min|max)(?P<ret>_rtn)?(_[uib]64) "
                                  r"(?(ret)v\[(?P<dst_first>\d+):(?P<dst_last>\d+)\], )"
                                  r"v(?P<addr>\d+), v\[(?P<src_first>\d+):(?P<src_last>\d+)\]"
                                  r"(?: offset:(?P<offset>0|8))?", line))
-              and ((op := m[1] + m[3]) in ("add_u64", "sub_u64", "rsub_u64", "and_b64", "or_b64",
-                                        "xor_b64", "min_i64", "max_i64", "min_u64", "max_u64"))):
+              and (op := m[1] + m[3]) in (
+                  "add_u64", "sub_u64", "rsub_u64", "inc_u64", "dec_u64", "and_b64", "or_b64",
+                  "xor_b64", "min_i64", "max_i64", "min_u64", "max_u64")):
             addr, first, last = (int(m[key]) for key in ("addr", "src_first", "src_last"))
             destination = tuple(int(m[key]) for key in ("dst_first", "dst_last")) if m["ret"] else None
             slot = int(m["offset"] or 0) // 4
@@ -722,6 +733,20 @@ def lower(instructions, group, *, table_reg, descriptor_offset, group_reg=None, 
             elif op == "add_u64":
                 low = f"({lo} + {rhs_lo})"
                 high = f"({hi} + {rhs_hi} + uint({low} < {lo}))"
+            elif op in ("inc_u64", "dec_u64"):
+                # RDNA 2 ISA reference guide 70648, section 12.13: DS_INC_U64
+                # stores zero when the old qword is at or above the limit,
+                # DS_DEC_U64 stores the limit when the old qword is zero or
+                # above it, and both compare unsigned.
+                if op == "inc_u64":
+                    condition = unsigned_qword_compare(lo, hi, rhs_lo, rhs_hi, ">=")
+                    low = f"({condition} ? 0u : ({lo} + 1u))"
+                    high = f"({condition} ? 0u : ({hi} + uint({lo} == 0xffffffffu)))"
+                else:
+                    condition = (f"({qword_is_zero(lo, hi)} || "
+                                 f"{unsigned_qword_compare(lo, hi, rhs_lo, rhs_hi, '>')})")
+                    low = f"({condition} ? {rhs_lo} : ({lo} - 1u))"
+                    high = f"({condition} ? {rhs_hi} : ({hi} - uint({lo} == 0u)))"
             else:
                 low = f"({lo} - {rhs_lo})"
                 high = f"({hi} - {rhs_hi} - uint({lo} < {rhs_lo}))"

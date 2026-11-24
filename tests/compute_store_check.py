@@ -1694,8 +1694,19 @@ def _max_i64(a, b):
     return a if _signed64(a) > _signed64(b) else b
 
 
+def _inc_u64(old, limit):
+    # RDNA 2 ISA 70648, 12.13: (tmp >= limit) ? 0 : tmp + 1, unsigned compare.
+    return (old + 1) & 0xffffffffffffffff if old < limit else 0
+
+
+def _dec_u64(old, limit):
+    # RDNA 2 ISA 70648, 12.13: (tmp == 0 || tmp > limit) ? limit : tmp - 1.
+    return limit if old == 0 or old > limit else old - 1
+
+
 LDS_QWORD_UPDATES = {
     "ds_add_u64": operator.add, "ds_sub_u64": operator.sub, "ds_rsub_u64": lambda a, b: b - a,
+    "ds_inc_u64": _inc_u64, "ds_dec_u64": _dec_u64,
     "ds_and_b64": operator.and_, "ds_or_b64": operator.or_, "ds_xor_b64": operator.xor,
     "ds_min_u64": min, "ds_max_u64": max, "ds_min_i64": _min_i64, "ds_max_i64": _max_i64,
 }
@@ -1708,7 +1719,23 @@ LDS_QWORD_RETURNS = {f"{stem}_rtn_{width}": op for op in LDS_QWORD_UPDATES
 def lds_qword_program(op):
     returns = op in LDS_QWORD_RETURNS
     ret_operand = "v[18:19], " if returns else ""
-    if LDS_QWORD_RETURNS.get(op, op) in ("ds_min_i64", "ds_max_i64", "ds_min_u64", "ds_max_u64"):
+    base = LDS_QWORD_RETURNS.get(op, op)
+    if base in ("ds_inc_u64", "ds_dec_u64"):
+        # Multiplying the lane bits by three and masking maps a class n to
+        # 3 - n: the four high words straddle the limit high word's sign bit,
+        # even lanes present an all-zero pair, lane 2 equals the limit and
+        # borrows on decrement, and lane 3 carries on increment.
+        prior = [
+            "v_and_b32_e32 v23, 1, v8",
+            "v_mul_lo_u32 v16, v23, 0xffffffff",
+            "v_and_b32_e32 v22, 3, v8",
+            "v_mul_lo_u32 v22, v22, 3",
+            "v_and_b32_e32 v22, 3, v22",
+            "v_mul_lo_u32 v17, v22, 0x10000",
+            "v_mul_lo_u32 v17, v17, 0x4000",
+            "v_mov_b32_e32 v18, 0", "v_mov_b32_e32 v19, 0x80000000",
+        ]
+    elif base in ("ds_min_i64", "ds_max_i64", "ds_min_u64", "ds_max_u64"):
         # Even lanes cross the signed high-word boundary; odd lanes repeat the
         # high word and exercise the unsigned low-word tie-break.
         prior = [
@@ -1736,13 +1763,18 @@ def lds_qword_program(op):
 def lds_qword_reference(op, groups):
     words = []
     for lane in range(groups * 32):
-        if LDS_QWORD_RETURNS.get(op, op) in ("ds_min_i64", "ds_max_i64", "ds_min_u64", "ds_max_u64"):
+        base = LDS_QWORD_RETURNS.get(op, op)
+        if base in ("ds_inc_u64", "ds_dec_u64"):
+            high = (((3 * (lane & 3)) & 3) * 0x40000000) & 0xffffffff
+            previous = (high << 32) | (0xffffffff if lane & 1 else 0)
+            source = 0x8000000000000000
+        elif base in ("ds_min_i64", "ds_max_i64", "ds_min_u64", "ds_max_u64"):
             previous = ((0x7fffffff + (lane & 1)) << 32) | ((0xfffffff0 + lane) & 0xffffffff)
             source = 0x8000000000000018
         else:
             previous = (0xfffffff1 << 32) | ((0xfffffff0 + lane) & 0xffffffff)
             source = 0x0000000e00000018
-        current = LDS_QWORD_UPDATES[LDS_QWORD_RETURNS.get(op, op)](previous, source)
+        current = LDS_QWORD_UPDATES[base](previous, source)
         words.extend((current & 0xffffffff, (current >> 32) & 0xffffffff))
         if op in LDS_QWORD_RETURNS:
             words.extend((previous & 0xffffffff, previous >> 32))
@@ -2041,6 +2073,15 @@ def lds_controls():
     rejects("Unverified private LDS write", aot.lower,
             variant(high, ("ds_write_b32 v5, v6", "s_nop 0")), 32, **LDS_BINDING)
 
+    expected_returns = {
+        "ds_add_rtn_u64", "ds_sub_rtn_u64", "ds_rsub_rtn_u64",
+        "ds_inc_rtn_u64", "ds_dec_rtn_u64",
+        "ds_and_rtn_b64", "ds_or_rtn_b64", "ds_xor_rtn_b64",
+        "ds_min_rtn_i64", "ds_max_rtn_i64", "ds_min_rtn_u64", "ds_max_rtn_u64",
+    }
+    assert set(LDS_QWORD_RETURNS) == expected_returns
+    for name in expected_returns:
+        aot.lower(lds_qword_program(name), 32, **LDS_QWORD_RETURN_BINDING)
     ret = lds_qword_program("ds_add_rtn_u64")
     instruction = "ds_add_rtn_u64 v[18:19], v5, v[18:19] offset:8"
     for bad in (instruction.replace("v[18:19], v5", "v[18:20], v5"),
@@ -2181,7 +2222,7 @@ def lds_controls():
         ("ds_add_u32 v5, v254", "Unverified private LDS update"),
         ("ds_add_u32 v5, v6 offset:4", "Unsupported compute instruction"),
         ("ds_add_u32 v5, v6 gds", "Unsupported compute instruction"),
-        ("ds_inc_rtn_u64 v[10:11], v5, v[6:7]", "Unsupported compute instruction"),
+        ("ds_inc_rtn_u64 v[10:11], v5, v[6:7]", "Unverified private wide LDS update"),
     ):
         rejects(message, aot.lower, variant(lines, (update, bad)), 32, **LDS_BINDING)
     i = lines.index(update)
@@ -2288,6 +2329,37 @@ def ds_binary(directory, assembler, objcopy, library):
         assert output.read_text() == expected
 
 
+def qword_counter_mutants(base, lines, binding, returned):
+    """Mutants for the unsigned 64-bit inc/dec forms; returned selects the readback layout."""
+    compare = aot.unsigned_qword_compare
+
+    def strict(lo, hi, rhs_lo, rhs_hi, relation):
+        return compare(lo, hi, rhs_lo, rhs_hi, ">")
+
+    def signed(lo, hi, rhs_lo, rhs_hi, relation):
+        return (f"((asint({hi}) > asint({rhs_hi})) || "
+                f"(({hi} == {rhs_hi}) && ({lo} {relation} {rhs_lo})))")
+
+    if base == "ds_inc_u64":
+        # Lane 2 reaches the limit exactly: it must wrap to zero, not increment.
+        with patch.object(aot, "unsigned_qword_compare", strict):
+            mutated = aot.lower(lines, 32, **binding)
+        yield mutated, 8 if returned else 4
+    # Lane 0 has a high word on the signed side of 0x80000000, but decrement
+    # masks it with the zero clamp. Lane 3 is the first where the comparisons
+    # differ: unsigned keeps it below the limit and signed clamps it.
+    signed_word = 0 if base == "ds_inc_u64" else (12 if returned else 6)
+    with patch.object(aot, "unsigned_qword_compare", signed):
+        mutated = aot.lower(lines, 32, **binding)
+    yield mutated, signed_word
+    if base == "ds_dec_u64":
+        # Lane 0 holds the all-zero pair; dropping the zero clamp decrements
+        # it to 0xffffffff_ffffffff instead of loading the limit.
+        with patch.object(aot, "qword_is_zero", lambda lo, hi: "(0u == 1u)"):
+            mutated = aot.lower(lines, 32, **binding)
+        yield mutated, 0
+
+
 def ds_mutants(name, lines, binding, source):
     if name in LDS_ORDER_MUTANTS:
         changed = variant(lines, (f"{name} v5, v6", f"{LDS_ORDER_MUTANTS[name]} v5, v6"))
@@ -2347,8 +2419,15 @@ def ds_mutants(name, lines, binding, source):
         ref = lds_qword_reference(name, 2)
         word = next(i for i in range(len(ref)) if i % 4 >= 2 and ref[i] != ref[i - 2])
         yield aot.lower(changed, 32, **binding), word
+        if base in ("ds_min_u64", "ds_max_u64"):
+            wrong_name = name.replace("_u64", "_i64")
+            yield aot.lower(variant(lines, (name, wrong_name)), 32, **binding), 0
+        if base in ("ds_inc_u64", "ds_dec_u64"):
+            yield from qword_counter_mutants(base, lines, binding, True)
     elif name in LDS_QWORD_UPDATES:
-        if name == "ds_add_u64":
+        if name in ("ds_inc_u64", "ds_dec_u64"):
+            yield from qword_counter_mutants(name, lines, binding, False)
+        elif name == "ds_add_u64":
             wrong = source.replace(" + uint(", " + 0u * uint(")
             word = 1
             yield wrong, word
