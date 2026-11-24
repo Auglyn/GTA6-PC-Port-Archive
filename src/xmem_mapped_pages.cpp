@@ -231,12 +231,36 @@ extern "C" BOOL WINAPI XMemMapPhysicalPagesScatter(void* const* addresses, ULONG
     return map_pages(count, tokens, [=](ULONG_PTR i) { return reinterpret_cast<ULONG_PTR>(addresses[i]); });
 }
 
-// Reserve-only desktop profile from the source-built #888 comparison.
+// Reserve+commit desktop profile for the startup blocks observed on #870: the pool loop asks
+// for type 0x20003000 with 0x183/0x22004 or 0x283/0x2404, and later startup code for type
+// 0x20403000 (64 KiB pages) with 0x181/PAGE_READWRITE, each with a null base. Proposed
+// desktop policy: commit a fresh block of ordinary zero-filled read/write pages, whose size
+// must be a nonzero multiple of 64 KiB. The page-size request and the console protection bits
+// above PAGE_READWRITE are not reproduced. A host failure returns NULL with the host error.
+static void* commit_startup_block(SIZE_T bytes, DWORD allocation_type, ULONGLONG attributes,
+                                  DWORD protection) noexcept
+{
+    constexpr SIZE_T granularity = SIZE_T{64} << 10;
+    const bool supported = allocation_type == 0x20003000
+                               ? (attributes == 0x183 && protection == 0x22004)
+                                     || (attributes == 0x283 && protection == 0x2404)
+                               : attributes == 0x181 && protection == PAGE_READWRITE;
+    if (!bytes || bytes % granularity || !supported) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return nullptr;
+    }
+    return VirtualAlloc(nullptr, bytes, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+}
+
+// The startup commit profile above, and the reserve-only desktop profile from the source-built
+// #888 comparison.
 extern "C" void* WINAPI XMemVirtualAlloc(void* address, SIZE_T bytes, DWORD allocation_type,
                                         ULONGLONG attributes, DWORD protection)
 {
     constexpr DWORD startup_reserve = 0x20402000;
     constexpr SIZE_T gib = SIZE_T{1} << 30;
+    if (!address && (allocation_type == 0x20003000 || allocation_type == (startup_reserve | MEM_COMMIT)))
+        return commit_startup_block(bytes, allocation_type, attributes, protection);
     const bool supported = (attributes == 0x21 && protection == PAGE_READWRITE)
                            || (attributes == 3 && protection == (0x800 | PAGE_NOACCESS));
     if (address || (bytes != 16 * gib && bytes != 24 * gib) || allocation_type != startup_reserve || !supported) {

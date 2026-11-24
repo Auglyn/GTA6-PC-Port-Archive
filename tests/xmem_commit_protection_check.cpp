@@ -14,11 +14,15 @@
 //   * Live shared-page views use xmem.dll XMemAllocatePhysicalPages +
 //     XMemMapPhysicalPages / XMemMapPhysicalPagesScatter over caller-owned
 //     Windows placeholders (MEM_MAPPED), with per-view VirtualProtect.
-//   * XMemVirtualAlloc on the desktop shim accepts only the #888 reserve-only
+//   * XMemVirtualAlloc on the desktop shim accepts the #888 reserve-only
 //     profile (null address, 16 or 24 GiB, type 0x20402000, attribute/protection
-//     0x21/PAGE_READWRITE or 3/0x801). No accepted argument set commits memory or
-//     names an existing address, so a second commit through XMemVirtualAlloc is
-//     not reachable through the current shim. The XMemVirtualAlloc cases below
+//     0x21/PAGE_READWRITE or 3/0x801) and the startup commit profile (null address,
+//     type 0x20003000 with 0x183/0x22004 or 0x283/0x2404, or type 0x20403000 with
+//     0x181/PAGE_READWRITE), which commits a fresh block
+//     (cpu_native_xmem_pool_commit). The 0x21 commit variant below stays refused.
+//     No accepted argument set
+//     names an existing address, so a second commit of an existing range through
+//     XMemVirtualAlloc is not reachable through the current shim. The cases below
 //     prove that each refusal comes from argument validation (a paired call that
 //     differs only in the variable under test succeeds) instead of claiming a
 //     state-dependent refusal.
