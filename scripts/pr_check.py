@@ -7,7 +7,7 @@ merged"), checked from its description and its files – run by .github/workflow
 files.tsv: one line per file of the PR – path, status, binary (true/false), blob sha. --local
 asks git instead of the GitHub API (whether a commit is on main, a blob's size).
 """
-import argparse, os, re, subprocess, sys
+import argparse, base64, os, re, subprocess, sys
 
 SECTIONS = ("Tested", "Not tested", "AI use")
 # small / open-weight models are not accepted for code (CONTRIBUTING.md, "AI-assisted contributions")
@@ -35,6 +35,11 @@ def smoke_blocks(body):
                 block[k.strip()] = v.strip()
         out.append(block)
     return out
+
+
+def looks_binary(data):
+    """Git's test: a file is binary when its first 8000 bytes hold a NUL byte. An empty file is not."""
+    return b"\0" in data[:8000]
 
 
 def number(s):
@@ -122,12 +127,28 @@ def main():
             r = subprocess.run(["gh", "api", f"repos/{o.repo}/git/blobs/{sha}", "--jq", ".size"], capture_output=True, text=True)
         return int(r.stdout.strip()) if r.returncode == 0 and r.stdout.strip().isdigit() else 1 << 62
 
+    def blob_is_binary(sha):
+        # The workflow marks a file binary when GitHub shows no patch and 0 changed lines. That is
+        # also true of an empty file, a pure rename and a mode change, so look at the content.
+        if o.local:
+            r = subprocess.run(["git", "cat-file", "-p", sha], capture_output=True)
+            data = r.stdout if r.returncode == 0 else None
+        else:
+            r = subprocess.run(["gh", "api", f"repos/{o.repo}/git/blobs/{sha}", "--jq", ".content"],
+                               capture_output=True, text=True)
+            try:
+                data = base64.b64decode(r.stdout) if r.returncode == 0 else None
+            except ValueError:
+                data = None
+        return True if data is None else looks_binary(data)   # unreadable: keep the workflow's answer
+
     files = []
     for line in open(o.files, encoding="utf-8"):
         parts = line.rstrip("\r\n").split("\t")
         if len(parts) >= 4:
             sha = parts[3]
-            files.append((parts[0], parts[1], parts[2] == "true", lambda sha=sha: blob_size(sha)))
+            binary = parts[2] == "true" and blob_is_binary(sha)
+            files.append((parts[0], parts[1], binary, lambda sha=sha: blob_size(sha)))
 
     def is_main_ancestor(sha):
         if o.local:
