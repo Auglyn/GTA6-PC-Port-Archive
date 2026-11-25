@@ -7,13 +7,25 @@ Sémantique d'après la documentation publique d'AMD (« RDNA 2 Instruction Set 
 """
 import math
 
-from emu.rdna2_exec_ops import (MASK32, VECTOR, VECTOR_COMPARE, _float_op, _fma, _mul_add, bits_float,
-                                float_bits, ldexp, signed)
+from emu.rdna2_exec_ops import (MASK32, VECTOR, VECTOR_COMPARE, _float_op, _fma, _legacy_fma, _mul_add,
+                                bits_float, float_bits, ldexp, signed)
 
 SIGN = 0x8000_0000
 EXEC_LO = 126
 OUTPUT_SCALE = {1: 2.0, 2: 4.0, 3: 0.5}
 COMPARE_END, VOP2_START, VOP2_END, VOP1_START, VOP1_END = 0x100, 0x100, 0x140, 0x180, 0x200
+FLOAT_TO_INT = frozenset({"v_cvt_u32_f32", "v_cvt_i32_f32", "v_cvt_flr_i32_f32", "v_cvt_rpi_i32_f32",
+                          "v_frexp_exp_i32_f32"})
+
+
+def float_result(name):
+    """Résultat flottant 32 bits : clamp et omod s'appliquent."""
+    return "_f32" in name and name not in FLOAT_TO_INT and not name.startswith(("v_cvt_u32", "v_cvt_i32"))
+
+
+def float_inputs(name):
+    """Sources flottantes : abs et neg s'appliquent."""
+    return float_result(name) or name.startswith("v_cvt_") or name in FLOAT_TO_INT
 
 
 def _median(a, b, c):
@@ -23,11 +35,6 @@ def _median(a, b, c):
 def _float3(function):
     operation = _float_op(function)
     return lambda a, b, c: operation(bits_float(a), bits_float(b), bits_float(c))
-
-
-def _legacy_fma(x, y, z):
-    """« DX9 rules, 0.0 * x = 0.0 » (ISA RDNA 2, p. 167) ; sinon la FMA arrondie une seule fois."""
-    return z if x == 0 or y == 0 else _fma(x, y, z)
 
 
 def _bitfield(value, offset, width, is_signed=False):
@@ -155,10 +162,10 @@ def execute(wave, name, opcode, word, literal):
         return _carry(wave, name, fields, literal)
     is_vop1 = VOP1_START <= opcode < VOP1_END
     is_vop2 = VOP2_START <= opcode < VOP2_END
-    is_float = "_f32" in name and not name.startswith(("v_cvt_u32", "v_cvt_i32"))
+    is_float = float_result(name)
     destination = wave.v[fields.vdst]
     for lane in wave.active():
-        a, b, c = _inputs(wave, fields, lane, literal, is_float or name.startswith("v_cvt_"))
+        a, b, c = _inputs(wave, fields, lane, literal, float_inputs(name))
         if is_vop1 or is_vop2:
             condition = c >> lane & 1 if name == "v_cndmask_b32" else 0
             result = VECTOR[name](a, b if is_vop2 else 0, destination[lane], literal, condition)
@@ -181,6 +188,13 @@ def _compare(wave, name, fields, literal):
 
 
 def _carry(wave, name, fields, literal):
+    """VOP3b : retenue dans SDST, bits des lignes inactives à 0.
+
+    La doc RDNA 2 (section 6.2, p. 43) dit seulement que la forme VOP3 écrit la retenue « to an
+    arbitrary SGPR-pair » ; la règle « fully written, no partial mask updates » (section 3.9) est
+    énoncée pour VCC. Mesuré sur RDNA 2 (gfx1036, Wave32) : v_add_co_ci_u32 en VOP3 met aussi à 0
+    les bits des lignes inactives de son SGPR (mesure et portée citées dans rdna2_exec._carry).
+    """
     carries = 0
     for lane in wave.active():
         a, b, c = _inputs(wave, fields, lane, literal, False)

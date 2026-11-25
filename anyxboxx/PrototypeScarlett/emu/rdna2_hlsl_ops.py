@@ -48,6 +48,14 @@ uint SatF32ToU32(uint a) {
   if ((a & 0x7FFFFFFFu) > 0x7F800000u || x <= 0.0f) return 0u;
   return x >= 4294967296.0f ? 0xFFFFFFFFu : (uint)x;
 }
+uint FloorToI32(uint a, bool nearest) {
+  // v_cvt_flr/rpi_i32_f32 (mesures RDNA 2, VIctory #605) : NaN selon le signe ; rpi = floor(x + 0.5)
+  // exact, obtenu en comparant la fraction x - floor(x) (exacte en simple précision) à 0.5.
+  if ((a & 0x7FFFFFFFu) > 0x7F800000u) return (a >> 31) != 0u ? 0x80000000u : 0x7FFFFFFFu;
+  float x = asfloat(a), f = floor(x);
+  if (nearest && x - f >= 0.5f) f += 1.0f;
+  return SatF32ToI32(asuint(f));
+}
 uint SBfeU32(uint v, uint c) {
   uint w = (c >> 16) & 0x7Fu;
   if (w == 0u) return 0u;
@@ -75,6 +83,17 @@ uint QuadMaskB32(uint v) {
 uint LeadingSignsI32(uint v) {
   uint x = (v & 0x80000000u) != 0u ? ~v : v;
   return x == 0u ? 0xFFFFFFFFu : 31u - firstbithigh(x);
+}
+uint FrexpExpF32(uint a) {
+  uint e = (a >> 23) & 0xFFu, m = a & 0x7FFFFFu;
+  if (e == 0xFFu || (e == 0u && m == 0u)) return 0u;
+  return e != 0u ? e - 126u : asuint((int)firstbithigh(m) - 148);
+}
+uint FrexpMantF32(uint a) {
+  uint e = (a >> 23) & 0xFFu, m = a & 0x7FFFFFu;
+  if (e == 0xFFu || (e == 0u && m == 0u)) return a;
+  if (e == 0u) m = (m << (23u - firstbithigh(m))) & 0x7FFFFFu;
+  return (a & 0x80000000u) | (126u << 23) | m;
 }
 uint AlignBit(uint hi, uint lo, uint s) {
   s &= 31u;
@@ -331,6 +350,17 @@ VECTOR = {
     "v_mbcnt_lo_u32_b32": "(countbits({a} & ((1u << lane) - 1u)) + {b})",
     "v_mbcnt_hi_u32_b32": "{b}",
     "v_cndmask_b32": "((({c} >> lane) & 1u) != 0 ? {b} : {a})",
+    "v_mul_hi_i32_i24": "MulHiI32(asuint((asint({a}) << 8) >> 8), asuint((asint({b}) << 8) >> 8))",
+    "v_cvt_flr_i32_f32": "FloorToI32({a}, false)",
+    "v_cvt_rpi_i32_f32": "FloorToI32({a}, true)",
+    "v_cvt_off_f32_i4": "asuint((float)((asint({a}) << 28) >> 28) * 0.0625f)",
+    "v_rcp_iflag_f32": "asuint(rcp(asfloat({a})))",
+    "v_ffbh_i32": "LeadingSignsI32({a})",
+    "v_frexp_exp_i32_f32": "FrexpExpF32({a})",
+    "v_frexp_mant_f32": "FrexpMantF32({a})",
+    "v_fmac_legacy_f32": "FmaLegacyF32({a}, {b}, {d})",
+    "v_madmk_f32": "asuint(mad(asfloat({a}), asfloat({k}), asfloat({b})))",
+    "v_madak_f32": "asuint(mad(asfloat({a}), asfloat({b}), asfloat({k})))",
 }
 COMPARE = re.compile(r"^v_cmp(x?)_(f|lt|eq|le|gt|lg|ge|ne|neq|t|tru)_(f32|u32|i32)$")
 CONSTANT_TESTS = {"f": "false", "t": "true", "tru": "true"}

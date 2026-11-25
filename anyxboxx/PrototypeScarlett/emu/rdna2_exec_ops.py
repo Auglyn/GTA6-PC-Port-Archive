@@ -279,8 +279,40 @@ def _fma(a, b, c):
     return total
 
 
+def _legacy_fma(x, y, z):
+    """« DX9 rules, 0.0 * x = 0.0 » (ISA RDNA 2, p. 167) ; sinon la FMA arrondie une seule fois."""
+    return z if x == 0 or y == 0 else _fma(x, y, z)
+
+
 def _round_even(x):
     return x if math.isinf(x) or math.isnan(x) else float(round(x))
+
+
+def _frexp_exponent(x):
+    """Exposant e de x = m × 2^e, 0.5 ≤ |m| < 1 ; 0 pour ±0, ±infini et NaN."""
+    return 0 if math.isinf(x) or math.isnan(x) else math.frexp(x)[1]
+
+
+def _frexp_mantissa(bits):
+    """Mantisse m de x = m × 2^e (signe conservé) ; ±0, ±infini et NaN rendus tels quels."""
+    x = F(bits)
+    return bits if x == 0 or math.isinf(x) or math.isnan(x) else float_bits(math.frexp(x)[0])
+
+
+def _round_to_int(bits, rounding):
+    """v_cvt_flr/rpi_i32_f32 mesurés sur RDNA 2 (gfx1036, VIctory #605) : `rounding` appliqué à la
+    valeur exacte (rpi = floor(x + 0.5) sans arrondi intermédiaire), saturation, et un NaN donne
+    0x7FFFFFFF ou 0x80000000 selon son bit de signe (au contraire de v_cvt_i32_f32, où NaN → 0)."""
+    x = F(bits)
+    if math.isnan(x):
+        return INT32_MIN if bits >> 31 else INT32_MAX
+    return _to_int(float(rounding(x)) if math.isfinite(x) else x, INT32_MIN, INT32_MAX)
+
+
+def _leading_signs(value):
+    """Position (depuis le haut) du premier bit différent du signe ; -1 pour 0 et -1."""
+    value = ~value & MASK32 if value >> 31 else value
+    return 32 - value.bit_length() if value else MASK32
 
 
 VECTOR = {
@@ -339,7 +371,19 @@ VECTOR = {
     "v_mul_u32_u24": lambda a, b, d, k, c: (a & 0xFFFFFF) * (b & 0xFFFFFF),
     "v_mul_hi_u32_u24": lambda a, b, d, k, c: (a & 0xFFFFFF) * (b & 0xFFFFFF) >> 32,
     "v_mul_i32_i24": lambda a, b, d, k, c: signed(a, 24) * signed(b, 24),
+    "v_mul_hi_i32_i24": lambda a, b, d, k, c: signed(a, 24) * signed(b, 24) >> 32,
+    "v_cvt_flr_i32_f32": lambda a, b, d, k, c: _round_to_int(a, math.floor),
+    "v_cvt_rpi_i32_f32": lambda a, b, d, k, c: _round_to_int(a, lambda x: math.floor(x + 0.5)),   # exact en double
+    "v_cvt_off_f32_i4": lambda a, b, d, k, c: float_bits(signed(a, 4) / 16),
+    "v_rcp_iflag_f32": _unary_float(_reciprocal),
+    "v_ffbh_i32": lambda a, b, d, k, c: _leading_signs(a),
+    "v_frexp_exp_i32_f32": lambda a, b, d, k, c: _frexp_exponent(F(a)),
+    "v_frexp_mant_f32": lambda a, b, d, k, c: _frexp_mantissa(a),
+    "v_fmac_legacy_f32": lambda a, b, d, k, c: _float_op(_legacy_fma)(F(a), F(b), F(d)),
+    "v_madmk_f32": lambda a, b, d, k, c: _float_op(_mul_add)(F(a), F(k), F(b)),
+    "v_madak_f32": lambda a, b, d, k, c: _float_op(_mul_add)(F(a), F(b), F(k)),
 }
+VECTOR_NO_OPERATION = frozenset({"v_nop", "v_pipeflush", "v_clrexcp"})
 
 # --- Comparaisons vectorielles : (test, écrit EXEC au lieu de VCC) -----------------------
 

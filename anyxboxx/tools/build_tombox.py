@@ -14,6 +14,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -28,8 +29,34 @@ TIMEOUT = 3600
 
 def _cargo(crates):
     command = ["cargo", "build", "--release", *(arg for crate in crates for arg in ("-p", crate))]
-    return subprocess.run(command, cwd=TOMBOX, capture_output=True, text=True, encoding="utf-8",
-                          errors="replace", timeout=TIMEOUT)
+    return _run(command, TOMBOX)
+
+
+def _forward(stream, sink, lines):
+    """Recopie chaque ligne de `stream` dans `sink` dès qu'elle arrive, et la garde dans `lines`."""
+    for line in stream:
+        sink.write(line)
+        sink.flush()
+        lines.append(line)
+
+
+def _run(command, cwd, sink=None):
+    """Lance `command` en affichant sa sortie d'erreur en direct (cargo y écrit sa progression) ;
+    renvoie le code de retour et cette sortie, lue ensuite pour trouver les fichiers manquants."""
+    sink = sink or sys.stderr
+    lines = []
+    with subprocess.Popen(command, cwd=cwd, stderr=subprocess.PIPE, text=True, encoding="utf-8",
+                          errors="replace") as process:
+        reader = threading.Thread(target=_forward, args=(process.stderr, sink, lines), daemon=True)
+        reader.start()
+        try:
+            returncode = process.wait(timeout=TIMEOUT)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            raise
+        finally:
+            reader.join()
+    return subprocess.CompletedProcess(command, returncode, stderr="".join(lines))
 
 
 def _placeholder(raw):
