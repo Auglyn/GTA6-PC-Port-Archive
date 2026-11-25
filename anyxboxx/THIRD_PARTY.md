@@ -24,7 +24,7 @@ Jusqu'au 21 novembre 2026, AnyXboxX était sous LGPL 2.1 ou ultérieure. La clau
 | Décodeur XMA2 / WMA Pro `xma` de TomBox, portage Rust de FFmpeg `libavcodec/wmaprodec.c` | [omonkeyz/xbox-emulator](https://github.com/omonkeyz/xbox-emulator), [FFmpeg](https://ffmpeg.org) | LGPL-2.1 ou ultérieure | `rust/anyxboxx-audio` (son console) ; avis d'origine dans `third_party/tombox/crates/compat/xma/NOTICE` |
 | Luminances HDR de repli de DXVK (`NormalizeDisplayMetadata`, `src/wsi/wsi_edid.h`, commit `ff55077`) | [doitsujin/dxvk](https://github.com/doitsujin/dxvk) | zlib | Valeurs 0,01 / 1 499 / 799 nits reprises (pas de code copié) dans `runtime/xgameruntime/hdr_luminance.h`, quand l'écran n'annonce pas de métadonnées HDR statiques ([#191](https://github.com/LooperSalty/AnyXboxX/issues/191)) |
 | Banc GPU de Xbox2Windows (`tools/gpu-check/Run-GpuCheck.ps1`), commit `bcdce96` | [R0Y00/Xbox2Windows](https://github.com/R0Y00/Xbox2Windows) | MIT | Modèle de `tools/Run-GpuCheck.ps1` (tests lancés sur un adaptateur choisi, rapport Markdown par carte) ; avis MIT dans l'en-tête du script |
-| VIctory, repris de plusieurs dépôts | [Marvisak/VIctory](https://github.com/Marvisak/VIctory) et des forks, voir [Sources de `third_party/victory`](#sources-de-third_partyvictory) | GPL-3.0 ou ultérieure (VIctory), GPL-3.0 (forks) | Copié dans `third_party/victory`, devenu notre code ; compilé et lancé par `tools/lancer_victory.ps1` |
+| VIctory, base Neptune (VIctory Edit.) 2026-11-25c, reprise de plusieurs dépôts | [Marvisak/VIctory](https://github.com/Marvisak/VIctory) et des forks, voir [Sources de `third_party/victory`](#sources-de-third_partyvictory) | GPL-3.0 ou ultérieure (VIctory), GPL-3.0 (forks) | Copié dans `third_party/victory`, devenu notre code ; compilé et lancé par `tools/lancer_victory.ps1` |
 | Arrondi `softfloat_roundPackToF32` de Berkeley SoftFloat 3e (John R. Hauser) | [ucb-bar/berkeley-softfloat-3](https://github.com/ucb-bar/berkeley-softfloat-3) | BSD 3 clauses | Réécrit en HLSL, réduit à l'arrondi au plus proche pair, dans `FmaRoundPack` (`PrototypeScarlett/emu/rdna2_hlsl_fma.py`, FMA f32 arrondie une seule fois) |
 
 ## Sources de `third_party/victory`
@@ -35,6 +35,26 @@ Jusqu'au 21 novembre 2026, AnyXboxX était sous LGPL 2.1 ou ultérieure. La clau
 Source: <dépôt> <PR ou commit>
 Co-authored-by: Nom <e-mail>
 ```
+
+Depuis le 25 novembre au soir, la base est **Neptune (VIctory Edit.) 2026-11-25c** : la source correspondante livrée avec son paquet (`neptune-ve-source.zip`, GPL-3.0 ou ultérieure), committée telle quelle (commit « feat: VIctory base moved to Neptune (VIctory Edit.) 2026-11-25c »), puis nos changements, chacun dans son commit. Aucune dépendance git ni chemin hors de l'arbre : `Cargo.toml` et `Cargo.lock` ne prennent que crates.io.
+
+| Dépôt d'origine | Licence | Dans la base Neptune (d'après son `NEPTUNE-README.txt`) | Repris après |
+| --- | --- | --- | --- |
+| Neptune (VIctory Edit.), paquet du 2026-11-25 au soir (auteur sans contact public) | GPL-3.0 ou ultérieure | L'assemblage et ses propres changements : temps d'image, souris et clavier, Rich Presence Discord, éclairage ambiant de remplacement, file de textures et mémoire de la carte, attente de pipelines bornée à 2,5 s, `play.ps1` (jeu de réglages repris dans `tools/lancer_victory.ps1`) | Rich Presence Discord éteinte sauf `VICTORY_DISCORD=1` |
+| [Marvisak/VIctory](https://github.com/Marvisak/VIctory) (Marvisak et ses contributeurs) | GPL-3.0 ou ultérieure | Le runtime d'origine | |
+| [fxceless/victory-fork](https://github.com/fxceless/victory-fork) (fxceless ; PR de Jonirulah, Flyander, AscilCH) | GPL-3.0 | La base : niveaux à la demande, synchronisation du tas de descripteurs (`a26859f`, `9376fd6`) | |
+| [myokex/victory-amd](https://github.com/myokex/victory-amd) (myokex) | GPL-3.0 | La base, avec fxceless/victory-fork | |
+| [soldsawn/victory-nvidia-8gb](https://github.com/soldsawn/victory-nvidia-8gb) (soldsawn) | GPL-3.0 | Le traducteur de shaders (programmes wave64 appariés sur les cartes NVIDIA à 32 lanes) | |
+| Belobug, [reddxd-byte/ShakiraRED-dt](https://github.com/reddxd-byte/ShakiraRED-dt) | GPL-3.0 | La passe de lumière ambiante | |
+| [ZSlayerHQ/victory-world-runtime](https://github.com/ZSlayerHQ/victory-world-runtime) (ZSlayerHQ) | GPL-3.0 | Écritures vues entre vues, lectures noyau, dispatchs en parties | |
+| [JoshuuDev/victory-amd](https://github.com/JoshuuDev/victory-amd) (JoshuuDev) | GPL-3.0 | Verrou de remappage par plage ; corrections de blend et de descripteurs | |
+| zm0kie | GPL-3.0 | Overlay (F10), envois de fenêtres, lignes mémoire, `tools/` (`start-neptune.ps1`, `memwatch.ps1`) | |
+| [skornuta/victory-fork](https://github.com/skornuta/victory-fork) (skornuta) | GPL-3.0 | Export des temps d'image (`VICTORY_FRAMETIME_DUMP`) | |
+| Trexies | GPL-3.0 | Petits tampons regroupés | |
+| Le correctif de redirection FidelityFX reçu pour DexNom Runtime | GPL-3.0 | `VICTORY_FSR_DLL` (mode Series S, non utilisé par le lanceur) | |
+| [LooperSalty/victory](https://github.com/LooperSalty/victory) (Looper_Salty) | GPL-3.0 ou ultérieure | | Les quatre commits `xg:` (`19feca8`, `1f0fe1d`, `36955ee`, `fb021f7`) : `xg_xs.dll` du GDK de l'utilisateur comme oracle ou service (`VICTORY_XG_DLL`, `VICTORY_XG_MODE`, jamais copiée dans le dépôt) et HLE qui répond comme la DLL de Microsoft |
+
+### Base précédente (jusqu'au 25 novembre au soir)
 
 Le détail par changement est dans `git log -- third_party/victory`. La copie initiale (commit « chore: intégrer VIctory dans third_party/victory au lieu d'un sous-module ») n'a pas un commit par changement : le tableau garde ce qu'elle contenait, puis ce qui est venu après, par dépôt d'origine.
 
@@ -48,7 +68,7 @@ Le détail par changement est dans `git log -- third_party/victory`. La copie in
 | [PastiiJay/klbf-lab](https://github.com/PastiiJay/klbf-lab), branche `klbf-amd` (PastiiJay, KLBF) | GPL-3.0 | | Portages : demi-vagues wave32 sur un hôte à 64 lanes, garde NaN |
 | [rorodev6/victory](https://github.com/rorodev6/victory) (rorodev6) | GPL-3.0 ou ultérieure | | Compteur de fps en haut à gauche (`fps_overlay.rs`, commit `4ddc0c1`), porté avec une taille réglable (`VICTORY_FPS_OVERLAY_SIZE`) |
 
-Les autres commits de `third_party/victory` sont écrits pour AnyXboxX (Proton, réductions de write-watch, gardes, vues, diagnostics) ; leur auteur est celui du commit.
+Les autres commits de cette base précédente étaient écrits pour AnyXboxX (Proton, réductions de write-watch, gardes, vues, diagnostics) ; leur auteur est celui du commit. Ils ne sont pas dans la base Neptune.
 
 ## Exceptions
 
@@ -56,6 +76,6 @@ Registre des données propriétaires indispensables à un format, admises par d�
 
 | Fichier | Format | Contenu | Décision du mainteneur |
 | --- | --- | --- | --- |
-| `third_party/victory/crates/victory-formats/src/bcpack-tables.bin` (environ 78 Kio, venu avec la copie de VIctory) | BCPack | Tables constantes du format : modèles d'entropie, tables de rang des indices, codes de contrôle, dictionnaires par format (voir `third_party/victory/docs/asset-policy.md`) | **Admise par décision du mainteneur le 2026-11-25** (#199) ; admise dans VIctory par décision de son propriétaire le 2026-11-23 |
+| `third_party/victory/crates/victory-formats/src/bcpack-tables.bin` (environ 78 Kio, venu avec la copie de VIctory, identique octet pour octet dans la base Neptune) | BCPack | Tables constantes du format : modèles d'entropie, tables de rang des indices, codes de contrôle, dictionnaires par format (voir `third_party/victory/docs/asset-policy.md`) | **Admise par décision du mainteneur le 2026-11-25** (#199) ; admise dans VIctory par décision de son propriétaire le 2026-11-23 |
 
 Aucun fichier de jeu, de console ou de SDK n'est inclus dans le dépôt.

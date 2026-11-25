@@ -85,6 +85,10 @@ class Wave:
             return code - 128
         if 193 <= code <= 208:
             return (192 - code) & (MASK32 if width == 1 else (1 << 64) - 1)
+        if code in INLINE_FLOATS and width == 2:
+            # ISA RDNA 2 §5.2 (p. 32) : codes 240-248 « single or double floats », 1/(2π) double
+            # 0x3fc45f306dc9c882 ; une source 64 bits lit le double (LLVM : isInlinableLiteral64).
+            return rdna2_exec_cmp64.double_bits(rdna2_exec_cmp64.INLINE_DOUBLES[code])
         if code in INLINE_FLOATS:
             return float_bits(INLINE_FLOATS[code])
         raise Untranslated(f"opérande scalaire {code} non pris en charge")

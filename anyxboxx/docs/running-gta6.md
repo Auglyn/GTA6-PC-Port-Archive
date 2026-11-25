@@ -6,6 +6,19 @@ This guide installs and starts the project, and lists everything you need to rep
 
 The launch goes through [VIctory](https://github.com/Marvisak/VIctory) (Marvisak, GPL-3.0 or later), copied into this repository under `third_party/victory`, where it is our own code: nothing is synced or pinned. The copy started from the branch `anyxboxx/fork-7b0-lot9-murs` of the maintainer's fork [LooperSalty/victory](https://github.com/LooperSalty/victory), then took 57 commits for Proton and AMD cards (see below). That branch assembles the fork [fxceless/victory-fork](https://github.com/fxceless/victory-fork) (GPL-3.0) at `7b0f736`, eight earlier pull requests of it, seven new ones, the port of the offline precompilation of #282 and commits of ours (`xg_xs.dll` layout answered like Microsoft's library, see below), at commit `80d58f8`. The script `tools/lancer_victory.ps1` builds it and starts it on your game folder.
 
+## Neptune base (25 November, evening)
+
+`third_party/victory` now holds the corresponding source of Neptune (VIctory Edit.) 2026-11-25c (GPL-3.0-or-later; it stands on `fxceless/victory-fork`, `myokex/victory-amd`, `soldsawn/victory-nvidia-8gb`, ShakiraRED-dt, `ZSlayerHQ/victory-world-runtime`, `JoshuuDev/victory-amd` and others, see [THIRD_PARTY.md](../THIRD_PARTY.md)), plus our four `xg:` commits (Microsoft's `xg_xs.dll` as an oracle, `-XgDll`) and Discord Rich Presence off unless `VICTORY_DISCORD=1`. The sections below describe the previous base `80d58f8` and its 57 Proton/AMD commits, which are not carried over.
+
+```powershell
+.	ools\lancer_victory.ps1 -GameDir <game folder> -Warm   # first time: about 7 min of shader translation, then the game
+.	ools\lancer_victory.ps1 -GameDir <game folder>         # after that
+```
+
+The launcher builds the release profile (`-Diag` or `-Dred` for the diagnostics build) and sets Neptune's `play.ps1` switch set for the Series X path (16 GB card: lower `VICTORY_CARD_WINDOWS_MB` and `VICTORY_CARD_BUFFERS_MB` on a smaller one). `-Warm` runs `victory.exe warm` on the game folder's `.rpf` files only. `-AutoA` taps A through the start screens, `-FrametimeDump` writes a frame time CSV into the cache folder. In the game, F10 hides the figures in the corner and F12 saves a picture to Pictures.
+
+Measured by the maintainer on 25 November (RTX 4070 SUPER, i7-13700KF, Series X path at 4K, world, after `warm`, release build): median about 12.5 fps, about 15 fps over the last minute, peaks at 30, about 7,500 draws per frame, no crash; the previous base ran at about 5 fps there. Known issues (Neptune's notes): objects and clothes briefly black while their textures are swapped, parts of the world missing behind some doors and on some roofs, no facial animation, frame time jumps while the game streams; indoor light is an even ambient stand-in for the ray-traced lighting.
+
 ## Proton and AMD fixes (25 November)
 
 `third_party/victory` is no longer a submodule: it holds a copy of VIctory at the previous pin `80d58f8` (next section, unchanged), followed in this repository's history by 57 commits for Proton and AMD cards (`git log -- third_party/victory`). Each commit names its source; one taken from someone else ends with `Source:` and `Co-authored-by:` lines. Every source repository is listed in [THIRD_PARTY.md](../THIRD_PARTY.md).

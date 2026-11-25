@@ -6,6 +6,19 @@ Ce guide explique comment installer et lancer le projet, et tout ce qu'il faut i
 
 Le lancement passe par [VIctory](https://github.com/Marvisak/VIctory) (Marvisak, GPL-3.0 ou ultérieure), copié dans ce dépôt sous `third_party/victory`, où il est notre code : rien n'est synchronisé ni épinglé. La copie part de la branche `anyxboxx/fork-7b0-lot9-murs` du fork du mainteneur [LooperSalty/victory](https://github.com/LooperSalty/victory), puis a reçu 57 commits pour Proton et les cartes AMD (voir plus bas). Cette branche assemble le fork [fxceless/victory-fork](https://github.com/fxceless/victory-fork) (GPL-3.0) au commit `7b0f736`, huit de ses pull requests précédentes, sept nouvelles, le portage de la précompilation hors ligne de #282 et des commits à nous (disposition `xg_xs.dll` servie comme la bibliothèque de Microsoft, voir plus bas), au commit `80d58f8`. Le script `tools/lancer_victory.ps1` le compile et le lance sur votre dossier du jeu.
 
+## Base Neptune (25 novembre, soir)
+
+`third_party/victory` contient désormais la source correspondante de Neptune (VIctory Edit.) 2026-11-25c (GPL-3.0-or-later ; elle repose sur `fxceless/victory-fork`, `myokex/victory-amd`, `soldsawn/victory-nvidia-8gb`, ShakiraRED-dt, `ZSlayerHQ/victory-world-runtime`, `JoshuuDev/victory-amd` et d'autres, voir [THIRD_PARTY.md](../../THIRD_PARTY.md)), plus nos quatre commits `xg:` (la `xg_xs.dll` de Microsoft comme oracle, `-XgDll`) et la Rich Presence Discord éteinte sauf `VICTORY_DISCORD=1`. Les sections suivantes décrivent la base précédente `80d58f8` et ses 57 commits Proton/AMD, qui ne sont pas repris.
+
+```powershell
+.\tools\lancer_victory.ps1 -GameDir <dossier du jeu> -Warm   # la première fois : environ 7 min de traduction des shaders, puis le jeu
+.\tools\lancer_victory.ps1 -GameDir <dossier du jeu>         # ensuite
+```
+
+Le lanceur compile le profil release (`-Diag` ou `-Dred` pour la build de diagnostic) et pose le jeu de réglages du `play.ps1` de Neptune pour le chemin Series X (carte de 16 Go : baisser `VICTORY_CARD_WINDOWS_MB` et `VICTORY_CARD_BUFFERS_MB` sur une carte plus petite). `-Warm` lance `victory.exe warm` sur les seuls fichiers `.rpf` du dossier du jeu. `-AutoA` appuie sur A pendant les écrans de démarrage, `-FrametimeDump` écrit un CSV des temps d'image dans le dossier du cache. En jeu, F10 masque les chiffres du coin et F12 enregistre une image dans Images.
+
+Mesuré par le mainteneur le 25 novembre (RTX 4070 SUPER, i7-13700KF, chemin Series X en 4K, monde, après `warm`, build release) : médiane d'environ 12,5 fps, environ 15 fps sur la dernière minute, pointes à 30, environ 7 500 draws par image, sans plantage ; la base précédente tournait à environ 5 fps au même endroit. Problèmes connus (notes de Neptune) : objets et vêtements noirs un instant pendant le remplacement de leurs textures, parties du monde absentes derrière certaines portes et sur certains toits, pas d'animation faciale, sauts du temps d'image pendant le streaming ; la lumière intérieure est une lumière ambiante uniforme à la place de l'éclairage en lancer de rayons.
+
 ## Correctifs Proton et AMD (25 novembre)
 
 `third_party/victory` n'est plus un sous-module : il contient une copie de VIctory à l'épinglage précédent `80d58f8` (section suivante, inchangée), suivie dans l'historique de ce dépôt de 57 commits pour Proton et les cartes AMD (`git log -- third_party/victory`). Chaque commit nomme sa source ; un commit repris de quelqu'un d'autre se termine par les lignes `Source:` et `Co-authored-by:`. Chaque dépôt d'origine est listé dans [THIRD_PARTY.md](../../THIRD_PARTY.md).

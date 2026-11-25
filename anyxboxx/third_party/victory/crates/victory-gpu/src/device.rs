@@ -29,7 +29,7 @@ pub static IID: Iid = guid(
 );
 
 /// The levels the device answers to, as on PC: `ID3D12Device1` to
-/// `ID3D12Device8`, and `ID3D12Device11`, which Grand Theft Auto VI creates
+/// `ID3D12Device8`, and `ID3D12Device11`, which the title creates
 /// its device as. Each level's table is the one before plus its methods.
 const LEVEL_IIDS: [Iid; 9] = [
     guid(
@@ -94,7 +94,7 @@ pub(crate) fn is_device(iid: *const Iid) -> bool {
 }
 
 /// The interface version these layouts were checked against (2.4). Both
-/// Minecraft (March 2022) and Grand Theft Auto VI (April 2026) pass it.
+/// Minecraft (March 2022) and the title (April 2026) pass it.
 pub const CHECKED_VERSION: u32 = 0x0002_0004;
 
 /// Feature level 12_2, what the console hardware supports.
@@ -160,7 +160,7 @@ pub extern "system" fn create(
 /// queues then have the newer layouts (two more methods each; see
 /// `list` and `queue`), although the interface version stays 2.4.
 /// shortcut: the creation interface is the only sign of the newer layouts
-/// we have (Grand Theft Auto VI, April 2026, versus Minecraft, March 2022);
+/// we have (the title, April 2026, versus Minecraft, March 2022);
 /// look for a better one if a title breaks the rule.
 static NEWER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -346,20 +346,16 @@ fn feature_levels(data: *mut c_void) -> HRESULT {
     }
 }
 
-/// Device methods 0x1c8 and 0x218 (`SLOT`): `DeserializeGraphicsPipelineStateX`
-/// and `DeserializeComputePipelineStateX`, the readers of what
-/// `SerializePipelineStateX` (0x1c0, 0x210) writes. The title calls both as
-/// `(this, serialised state, interface id, out)` and asks for
-/// `ID3D12PipelineState`: it offers pipelines from its console pipeline
-/// cache. The serialised form is the console driver's, of no use to a host
-/// driver, so the calls fail with `out` null, as XCL's do (its device slots
-/// 57 and 67), and the title makes its pipelines from their descriptions.
-/// Counted in one run of the 1.0.2.1 build (a probe, not kept): each of the
-/// 2,689 compute calls was followed at once, on the same thread, by
-/// `CreateComputePipelineStateX` (0x1f0); the 25,450 graphics calls came in
-/// one batch, one after the other, and graphics pipelines were made later
-/// through `CreatePipelineState` (0x2b0, 80,515 calls in that run).
-/// The first calls log the state's words and what its first word points at.
+/// Device methods 0x1c8 and 0x218 (`SLOT`). The title calls both
+/// (title+0x2477578 and title+0x24800d5) as `(this, description, interface
+/// id, out)`, asks for `ID3D12PipelineState`, and on success keeps the
+/// object `out` names and draws with it; on failure it goes without that
+/// pipeline, silently. What the descriptions hold is not known: the calls
+/// fail as they always did, with `out` null, and the first ones log the
+/// description's words and what its first word points at, so that the two
+/// methods can be written.
+/// shortcut: not implemented. Answering `S_OK` here without making the
+/// pipeline would hand the title whatever its stack held as an object.
 extern "system" fn unknown_pipeline<const SLOT: usize>(
     _: This,
     desc: *const u8,
@@ -392,12 +388,12 @@ extern "system" fn unknown_pipeline<const SLOT: usize>(
         let first = description
             .as_ref()
             .and_then(|w| words(w[0] as usize));
-        tracing::info!(
+        tracing::warn!(
             slot = format_args!("{:#x}", SLOT),
             calls,
             description = format_args!("{description:x?}"),
             first_points_at = format_args!("{first:x?}"),
-            "a pipeline offered from the title's console pipeline cache (DeserializePipelineStateX) is declined: the title makes it from its description"
+            "a pipeline creation method that is not implemented: the title goes without this pipeline"
         );
     }
     E_NOTIMPL
@@ -494,7 +490,7 @@ mod tests {
 
     #[test]
     fn newer_device_levels_are_the_same_device() {
-        // ID3D12Device11, as Grand Theft Auto VI asks for it.
+        // ID3D12Device11, as the title asks for it.
         let (hr, device) = create_as(&LEVEL_IIDS[8]);
         assert_eq!((hr, device), (S_OK, super::device()));
         let mut same = std::ptr::null();

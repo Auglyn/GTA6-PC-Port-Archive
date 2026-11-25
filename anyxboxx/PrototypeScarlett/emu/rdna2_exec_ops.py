@@ -25,8 +25,21 @@ def float_bits(value):
         return POSITIVE_INFINITY if value > 0 else NEGATIVE_INFINITY
 
 
+EXPONENT_F32, MANTISSA_F32, QUIET_F32 = 0x7F80_0000, 0x007F_FFFF, 0x0040_0000
+
+
 def bits_float(bits):
-    return struct.unpack("<f", struct.pack("<I", bits & MASK32))[0]
+    """Flottant d'un motif f32 ; un NaN signalant revient silencieux (bit 22 posé).
+
+    CPython 3.12 et 3.13 le rendaient silencieux en convertissant le float en double ; CPython 3.14 garde
+    le bit signalant (struct.unpack("<f") de 0x7F800001 puis struct.pack("<f") redonne 0x7F800001 au lieu
+    de 0x7FC00001, mesuré sur 3.12.13, 3.13.13 et 3.14.10). Le bit est posé ici pour que toutes les
+    versions suivent la même règle (celle de _first_nan et des tests de NaN).
+    """
+    bits &= MASK32
+    if bits & EXPONENT_F32 == EXPONENT_F32 and bits & MANTISSA_F32:
+        bits |= QUIET_F32
+    return struct.unpack("<f", struct.pack("<I", bits))[0]
 
 
 def signed(value, bits=32):
