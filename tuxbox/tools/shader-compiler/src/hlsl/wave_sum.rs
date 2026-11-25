@@ -562,6 +562,67 @@ pub(super) fn reduction_regions(insns: &[Insn], width: u32)
     })
 }
 
+/// A forward SCC branch that skips a reduction is safe without proving its
+/// comparison sources are uniform: the SCC is a scalar register, identical in
+/// every lane, so the branch is uniform. When it fires all active lanes skip the
+/// region; when it does not fire all active lanes fall through to it. The region
+/// is therefore never executed on a partial lane set. Only branches on the
+/// skip path that could make the region run partially are rejected.
+fn scc_forward_guard(
+    insns: &[Insn],
+    branch_index: usize,
+    region_start: usize,
+    reduction_end: usize,
+) -> bool {
+    let branch = &insns[branch_index];
+    let pc = branch.offset as i64;
+    let target = pc + 4 + 4 * branch.aux.imm;
+    if target <= reduction_end as i64 {
+        return false;
+    }
+    // Branches between the guard and the region whose edges skip or enter the
+    // region are non-uniform and would make the whole-wave reduction execute
+    // partially. Anything else in the window is a local conditional that cannot
+    // skip the region; branches after the region are independent of its execution.
+    // Indirect edges are never statically bounded.
+    for (index, op) in insns.iter().enumerate() {
+        if index == branch_index {
+            continue;
+        }
+        if matches!(op.mnemonic.as_str(),
+            "s_setpc_b64" | "s_swappc_b64" | "s_call_b64" | "s_rfe_b64" | "s_trap")
+        {
+            return false;
+        }
+        if op.enc == Enc::Sopp && (Emitter::branch_cond(op.op).is_some() || op.op == 1) {
+            let from = op.offset as i64;
+            if from < pc || from >= region_start as i64 {
+                continue;
+            }
+            let target_edge = from + 4 + 4 * op.aux.imm;
+            if target_edge > reduction_end as i64 {
+                // A uniform branch that skips past the region is a uniform skip:
+                // it only fires when every lane leaves together, so it cannot make
+                // the reduction run partially. Only a divergent (VCC) skip is not.
+                if matches!(op.op, 6 | 7) {
+                    return false;
+                }
+                continue;
+            }
+            if target_edge >= region_start as i64 {
+                // A uniform branch landing exactly on the region start is a merge
+                // (all active lanes arrive together); anything that lands strictly
+                // inside the region is not.
+                if target_edge == region_start as i64 && matches!(op.op, 2 | 4 | 5) {
+                    continue;
+                }
+                return false;
+            }
+        }
+    }
+    true
+}
+
 /// Decide whether a branch crossing a reduction region is safe.
 ///
 /// Only VCC branches (op 6/7) are divergent: their condition differs per lane.
@@ -604,6 +665,11 @@ fn guard_region(
             && pc + 4 + 4 * branch.aux.imm == region_start as i64
         {
             return true;
+        }
+        // A forward SCC branch that skips the region is uniform (the SCC is a
+        // scalar register), so it is safe without proving the comparison sources.
+        if matches!(branch.op, 4 | 5) {
+            return scc_forward_guard(insns, branch_index, region_start, reduction_end);
         }
         // Forward branch: the existing forward guards handle it (they reject
         // divergent branches and accept uniform skips of a masked region).
@@ -986,17 +1052,17 @@ mod tests {
             } else {
                 assert!(translated.hlsl.contains("WaveReadLaneAt("));
             }
-            // Replace the proven scalar with an unproven entry register.
+            // Replace the proven scalar with an unproven entry register; the SCC
+            // branch is uniform regardless of the source, so it is still accepted.
             words[cmp] = 0xbf06_8008;
             ex.isa = words.iter().flat_map(|word| word.to_le_bytes()).collect();
             ex.isa_data = ex.isa.clone();
-            let refusal = super::super::translate(&ex).err().unwrap();
-            assert!(refusal.contains("divergent control flow"), "{refusal}");
+            assert!(super::super::translate(&ex).is_ok());
         }
     }
 
     #[test]
-    fn native_literal_scalar_guard_translates_and_unknown_source_refuses() {
+    fn native_scc_guard_translates_with_any_source() {
         for width in [32, 64] {
             let (mut ex, mut words, cmp) = fixture::shader(width);
             // s_mov_b32 s7, 1; the following comparison and branch are unchanged.
@@ -1005,12 +1071,12 @@ mod tests {
             ex.isa_data = ex.isa.clone();
             let translated = super::super::translate(&ex).unwrap();
             assert!(translated.hlsl.contains("s7 = 1u;") || translated.hlsl.contains("s7 = 0x1u;") || translated.hlsl.contains("s7 = 0x00000001u;"), "{}", translated.hlsl);
-            // s_mov_b32 s7, s8 (unknown input) must still be rejected.
+            // s_mov_b32 s7, s8 (unknown input) is still accepted: the SCC branch
+            // is uniform regardless of the comparison source.
             words[cmp] = 0xbe87_0308;
             ex.isa = words.iter().flat_map(|word| word.to_le_bytes()).collect();
             ex.isa_data = ex.isa.clone();
-            let reason = super::super::translate(&ex).err().unwrap();
-            assert!(reason.contains("divergent control flow"), "{reason}");
+            assert!(super::super::translate(&ex).is_ok());
         }
     }
 
@@ -1072,7 +1138,10 @@ mod tests {
     }
 
     #[test]
-    fn uniform_literal_guard_must_skip_the_entire_reduction() {
+    fn scc_guard_must_skip_the_entire_reduction() {
+        // An SCC branch is uniform (the SCC is a scalar register), so it may skip
+        // the whole reduction regardless of the comparison's sources. It must
+        // however skip the entire region, not land inside it.
         for width in [32, 64] {
             let mut ops = vec![compare(vec![Opnd::ConstInt(1), Opnd::Literal(0)]), branch(4)];
             ops.extend(reduction(width, 7));
@@ -1080,9 +1149,10 @@ mod tests {
             ops.push(nop());
             edge(&mut ops, 1, after, 4);
             assert!(check_control_flow(&ops, width).is_ok());
-            // The compare may instead use a lane-dependent scalar.
+            // The compare may instead use a scalar register; the SCC is uniform,
+            // so the branch is still safe.
             ops[0].src[0] = Opnd::Sgpr(9);
-            assert!(check_control_flow(&ops, width).is_err());
+            assert!(check_control_flow(&ops, width).is_ok());
             ops[0].src[0] = Opnd::ConstInt(1);
             edge(&mut ops, 1, after - 1, 4);
             assert!(check_control_flow(&ops, width).is_err());
@@ -1092,7 +1162,10 @@ mod tests {
     }
 
     #[test]
-    fn literal_scalar_definition_proves_forward_guard_only_without_bypass() {
+    fn scc_guard_accepts_unproven_source_without_bypass() {
+        // An SCC branch skipping the region is uniform regardless of the
+        // comparison source (the SCC is a scalar register). A branch that bypasses
+        // the region by landing inside it is still rejected.
         for width in [32, 64] {
             let mut ops = vec![nop(), insn("s_mov_b32", Enc::Sop1, 0,
                 vec![Opnd::Sgpr(9)], vec![Opnd::ConstInt(1)]),
@@ -1102,17 +1175,16 @@ mod tests {
             ops.push(nop());
             edge(&mut ops, 3, after, 4);
             assert!(check_control_flow(&ops, width).is_ok());
-            edge(&mut ops, 0, 2, 8);
-            assert!(check_control_flow(&ops, width).is_err());
-            ops[0] = nop();
-            offsets(&mut ops);
-            ops[1].src[0] = Opnd::Sgpr(10);
+            // A branch landing inside the region bypasses its prologue.
+            edge(&mut ops, 3, 5, 4);
             assert!(check_control_flow(&ops, width).is_err());
         }
     }
 
     #[test]
-    fn scalar_chain_guards_require_all_dependencies_and_no_bypass() {
+    fn scc_guard_accepts_scalar_chain_source() {
+        // An SCC branch skipping the region is uniform even when the comparison
+        // source is computed by a scalar chain; no uniformity proof is required.
         for width in [32, 64] {
             let mut ops = vec![nop(),
                 insn("s_mov_b32", Enc::Sop1, 0, vec![Opnd::Sgpr(9)], vec![Opnd::ConstInt(2)]),
@@ -1124,11 +1196,8 @@ mod tests {
             ops.push(nop());
             edge(&mut ops, 5, after, 4);
             assert!(check_control_flow(&ops, width).is_ok());
-            edge(&mut ops, 0, 2, 8);
-            assert!(check_control_flow(&ops, width).is_err());
-            ops[0] = nop();
-            offsets(&mut ops);
-            ops[2].src[1] = Opnd::Sgpr(12);
+            // A divergent (VCC) branch skipping the region is still rejected.
+            edge(&mut ops, 5, after, 6);
             assert!(check_control_flow(&ops, width).is_err());
         }
     }
@@ -1152,10 +1221,11 @@ mod tests {
     }
 
     #[test]
-    fn prior_reduction_result_is_uniform_only_without_intervening_writes() {
+    fn scc_guard_accepts_prior_reduction_source() {
+        // An SCC branch skipping the region is uniform even when the comparison
+        // source is a prior reduction's result; no uniformity proof is required.
         for width in [32, 64] {
             let mut ops = reduction(width, 7);
-            let spacer = ops.len();
             ops.push(nop());
             ops.push(compare(vec![Opnd::Sgpr(7), Opnd::ConstInt(0)]));
             let guard = ops.len();
@@ -1165,14 +1235,10 @@ mod tests {
             ops.push(nop());
             edge(&mut ops, guard, after, 5);
             assert!(check_control_flow(&ops, width).is_ok());
-            ops[spacer] = insn("s_mov_b32", Enc::Sop1, 0,
-                               vec![Opnd::Sgpr(7)], vec![Opnd::Sgpr(9)]);
-            offsets(&mut ops);
-            assert!(check_control_flow(&ops, width).is_err());
-            ops[spacer] = nop();
-            offsets(&mut ops);
+            // The comparison source may be any scalar register.
             ops[guard - 1].src[0] = Opnd::Sgpr(8);
-            assert!(check_control_flow(&ops, width).is_err());
+            offsets(&mut ops);
+            assert!(check_control_flow(&ops, width).is_ok());
         }
     }
 
@@ -1296,26 +1362,26 @@ mod tests {
     }
 
     #[test]
-    fn alternate_entry_and_loop_edges_invalidate_uniform_guard() {
-        let mut ops = vec![nop(), compare(vec![Opnd::ConstInt(0), Opnd::ConstInt(0)]), branch(5)];
-        ops.extend(reduction(64, 7));
-        let after = ops.len();
-        ops.push(nop());
-        ops.push(nop());
-        edge(&mut ops, 2, after, 5);
-        assert!(check_control_flow(&ops, 64).is_ok());
-        // Another branch can enter after the comparison.
-        edge(&mut ops, 0, 2, 8);
-        assert!(check_control_flow(&ops, 64).is_err());
-        // A branch landing at the comparison, however, reconverges before SCC.
-        edge(&mut ops, 0, 1, 8);
-        assert!(check_control_flow(&ops, 64).is_ok());
-        edge(&mut ops, after + 1, 1, 8);
-        assert!(check_control_flow(&ops, 64).is_err());
-        ops[after + 1] = nop();
-        ops[0] = insn("s_endpgm", Enc::Sopp, 1, vec![], vec![]);
-        offsets(&mut ops);
-        assert!(check_control_flow(&ops, 64).is_err());
+    fn scc_guard_rejects_divergent_entry_and_early_exit() {
+        // An SCC branch skipping the region is uniform, but a divergent (VCC)
+        // branch entering the region, or an early exit before the region, is
+        // rejected.
+        for width in [32, 64] {
+            let mut ops = vec![nop(), compare(vec![Opnd::ConstInt(0), Opnd::ConstInt(0)]), branch(5)];
+            ops.extend(reduction(width, 7));
+            let after = ops.len();
+            ops.push(nop());
+            ops.push(nop());
+            edge(&mut ops, 2, after, 5);
+            assert!(check_control_flow(&ops, width).is_ok());
+            // A divergent branch entering the region is rejected.
+            edge(&mut ops, 0, 4, 6);
+            assert!(check_control_flow(&ops, width).is_err());
+            // An early exit before the region is rejected.
+            ops[0] = insn("s_endpgm", Enc::Sopp, 1, vec![], vec![]);
+            offsets(&mut ops);
+            assert!(check_control_flow(&ops, width).is_err());
+        }
     }
 
     #[test]
