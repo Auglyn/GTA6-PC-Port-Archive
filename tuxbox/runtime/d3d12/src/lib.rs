@@ -3,6 +3,7 @@
 mod big_stack;
 mod clwb;
 mod clzero;
+mod insertq;
 mod mwaitx;
 mod commands;
 mod compile_gate;

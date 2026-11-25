@@ -274,6 +274,9 @@ VkBuffer vulkan_buffer(ID3D12Resource* resource);
 const VulkanDeviceInfo* vulkan_device_info(ID3D12Device* device);
 // True when a slot-133 buffer is a shadow copied from the title's pages, false when they were imported. For tests.
 bool title_shadow_buffer(ID3D12Resource* resource);
+// Slot-133 imports (VK_EXT_external_memory_host) whose memory `device` holds: an import declined after its memory
+// was allocated is freed before create_buffer_at_host_address returns. For tests.
+std::uint64_t title_host_imports(ID3D12Device* device);
 // VirtualQuery calls made by the title-buffer shadows in their latest refresh. For tests.
 std::uint64_t title_shadow_refresh_queries(ID3D12Device* device);
 // The trackers behind the title-buffer shadows and title windows (copies whose pages overlap or touch share one).
