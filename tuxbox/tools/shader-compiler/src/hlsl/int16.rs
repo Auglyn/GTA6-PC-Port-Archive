@@ -77,9 +77,11 @@ pub(super) fn expression(ins: &Insn) -> Result<Option<String>, String> {
     }
     let (w0, w1) = (ins.raw[0], ins.raw[1]);
     let allow_immediates = matches!(ins.mnemonic.as_str(), "v_add_nc_i16" | "v_sub_nc_i16");
-    // For these two operations, accept integer immediates in the verified low-half form.
+    // gfx1030 accepts inline integers for ordinary multiply without op_sel.
+    let inline_mul = ins.mnemonic == "v_mul_lo_u16" && w0 & 0x7800 == 0;
     if new_half(ins) && (packed || !ins.src[..arity].iter().enumerate().all(|(i, src)| {
         matches!(src, Opnd::Vgpr(_))
+            || (inline_mul && matches!(src, Opnd::ConstInt(_)))
             || (allow_immediates
                 && matches!(src, Opnd::ConstInt(_) | Opnd::Literal(_))
                 && w0 & (1 << (11 + i)) == 0)
@@ -211,6 +213,26 @@ mod tests {
         );
         // v_add_nc_i16 v7, v4, -1 op_sel:[0,1,0]
         assert!(translate(Stage::Compute, &[0xd70d_1007, 0x0001_8304]).is_err());
+    }
+
+    #[test]
+    fn inline_half_multiply_preserves_the_high_half() {
+        use crate::hlsl::float64::tests::translate;
+        use crate::Stage;
+
+        // LLVM gfx1030: v_mul_lo_u16 v4, v0, 7
+        //               v_mul_lo_u16 v4, -1, v0
+        for (sources, product) in [
+            (0x0001_0f00, "(v0 & 0xffffu) * (0x7u & 0xffffu)"),
+            (0x0002_00c1, "(0xffffffffu & 0xffffu) * (v0 & 0xffffu)"),
+        ] {
+            let hlsl = translate(Stage::Compute, &[0xd705_0004, sources]).unwrap();
+            assert!(hlsl.contains(&format!("(v4 & 0xffff0000u) | (({product}) & 0xffffu)")), "{hlsl}");
+        }
+
+        // The inline case does not cover op_sel or a trailing literal word.
+        assert!(translate(Stage::Compute, &[0xd705_1004, 0x0001_0f00]).is_err());
+        assert!(translate(Stage::Compute, &[0xd705_0004, 0x0001_ff00, 0x1234]).is_err());
     }
 
     #[test]

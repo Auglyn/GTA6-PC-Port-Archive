@@ -1,20 +1,44 @@
 //! Track only descriptors with additional guest state, such as placed SRVs and stencil DSVs.
 use super::lock;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     ops::Range,
     sync::{Arc, Mutex, Weak},
+    time::{Duration, Instant},
 };
 use windows::Win32::Graphics::Direct3D12::*;
 
 pub(crate) type Views<T> = DescriptorMap<Weak<T>>;
 pub(crate) type HeapViews<T> = DescriptorRange<Weak<T>>;
 
-pub(crate) struct DescriptorMap<V>(Mutex<BTreeMap<usize, V>>);
+/// The second field keeps values replaced in a descriptor slot alive for
+/// [`RETIRE_GRACE`]. A descriptor write is immediate on the CPU timeline, but
+/// command lists that already reference the old descriptor may still be
+/// running on the GPU. On the console the old view names guest memory that
+/// stays mapped; here its backing (an imported buffer or placed texture) would
+/// be released under the running dispatch, an SM MMU fault (Xid 13).
+pub(crate) struct DescriptorMap<V>(Mutex<BTreeMap<usize, V>>, Mutex<VecDeque<(Instant, V)>>);
+
+const RETIRE_GRACE: Duration = Duration::from_secs(3);
 
 impl<V> Default for DescriptorMap<V> {
     fn default() -> Self {
-        Self(Default::default())
+        Self(Default::default(), Default::default())
+    }
+}
+
+impl<V> DescriptorMap<V> {
+    /// Hold replaced values until in-flight GPU work has finished with them.
+    fn retire(&self, replaced: impl IntoIterator<Item = V>) {
+        let now = Instant::now();
+        let expired: Vec<(Instant, V)> = {
+            let mut queue = lock(&self.1);
+            queue.extend(replaced.into_iter().map(|v| (now, v)));
+            let keep = queue.partition_point(|(at, _)| now.duration_since(*at) >= RETIRE_GRACE);
+            queue.drain(..keep).collect()
+        };
+        // Dropped outside the lock: a backing's Drop takes other registries' locks.
+        drop(expired);
     }
 }
 
@@ -88,12 +112,15 @@ impl<V: Clone> DescriptorMap<V> {
     }
 
     pub(crate) fn store(&self, handle: usize, value: Option<V>) {
-        let mut views = lock(&self.0);
-        if let Some(value) = value {
-            views.insert(handle, value);
-        } else {
-            views.remove(&handle);
-        }
+        let old = {
+            let mut views = lock(&self.0);
+            if let Some(value) = value {
+                views.insert(handle, value)
+            } else {
+                views.remove(&handle)
+            }
+        };
+        if old.is_some() { self.retire(old); }
     }
 
     pub(crate) fn heap(
@@ -120,6 +147,7 @@ impl<V: Clone> DescriptorMap<V> {
         destinations: impl Iterator<Item = (usize, u32)>,
         sources: impl Iterator<Item = (usize, u32)>,
     ) {
+        let mut replaced = Vec::new();
         let mut views = lock(&self.0);
         if views.is_empty() {
             return;
@@ -139,7 +167,7 @@ impl<V: Clone> DescriptorMap<V> {
                     .range(from..from + span)
                     .map(|(&key, value)| (to + (key - from), value.clone())),
             );
-            views.extract_if(to..to + span, |_, _| true).for_each(drop);
+            replaced.extend(views.extract_if(to..to + span, |_, _| true).map(|(_, v)| v));
             views.extend(copied.drain(..));
             d = if count == left {
                 dst.next()
@@ -152,5 +180,7 @@ impl<V: Clone> DescriptorMap<V> {
                 Some((from + span, available - count))
             };
         }
+        drop(views);
+        if !replaced.is_empty() { self.retire(replaced); }
     }
 }

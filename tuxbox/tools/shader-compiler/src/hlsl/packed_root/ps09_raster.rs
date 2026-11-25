@@ -172,19 +172,25 @@ pub(super) fn bindings(
     Ok(Some(plan))
 }
 
+/// Emit a two-word texel load or proven UMAX into the supplied uint64 image.
+/// The packed LOAD keeps its exact sequential encoding; atomics share the ISA proof.
 pub(in crate::hlsl) fn emit_wide_image(em: &mut Emitter<'_>, ins: &Insn, image: &str) -> Result<(), String> {
     // With DMASK=3, IMAGE_ATOMIC_UMAX consumes two VGPRs as one unsigned
     // 64-bit operand. The paired IMAGE_LOAD reads the same RG32_UINT texel.
     let [Opnd::Vgpr(d)] = ins.dst[..] else {
         return Err("invalid image data".into());
     };
-    let Opnd::Vgpr(a) = ins.src[0] else {
-        return Err("invalid image coordinates".into());
+    let [a, a1] = if ins.mnemonic == "image_load" {
+        let Opnd::Vgpr(a) = ins.src[0] else {
+            return Err("invalid image coordinates".into());
+        };
+        if !matches!(ins.raw[..], [0xf0001308 | 0xf05c1308, _]) {
+            return Err("unsupported 64-bit image access flags".into());
+        }
+        [a, a.checked_add(1).ok_or("64-bit image coordinate register overflow")?]
+    } else {
+        wide_atomic_coordinates(ins)?
     };
-    if !matches!(ins.raw[..], [0xf0001308 | 0xf05c1308, _]) {
-        return Err("unsupported 64-bit image access flags".into());
-    }
-    let a1 = a.checked_add(1).ok_or("64-bit image coordinate register overflow")?;
     let d1 = d.checked_add(1).ok_or("64-bit image data register overflow")?;
     for n in [a, a1, d, d1] {
         em.touch(&Opnd::Vgpr(n));

@@ -116,6 +116,37 @@ mod tests {
     }
 
     #[test]
+    fn bitwise_quad_exchange_combines_the_selected_source_with_the_local_operand() {
+        for (op, symbol) in [(0x3808_04fa, "|"), (0x3608_04fa, "&"), (0x3a08_04fa, "^")] {
+            for control in [0xff0c_b101, 0xff04_b101] {
+                let mut ex = compute_extract(&[op, control, 0xbf81_0000]);
+                let hlsl = super::super::translate(&ex).unwrap().hlsl;
+                assert!(hlsl.contains("WaveReadLaneAt(v1,"), "{hlsl}");
+                assert!(hlsl.contains(&format!("v4 = q0 {symbol} v2;")), "{hlsl}");
+
+                ex.psv_threads = Some([1, 1, 1]);
+                assert!(super::super::translate(&ex).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn bitwise_quad_exchange_with_inactive_source_obeys_bound_control() {
+        // gfx1030: v_{or,and,xor}_b32_dpp v4, v1, v2 quad_perm:[1,0,3,2], FI=0.
+        for (op, symbol) in [(0x3808_04fa, "|"), (0x3608_04fa, "&"), (0x3a08_04fa, "^")] {
+            let ex = compute_extract(&[op, 0xff00_b101, 0xbf81_0000]);
+            let keep = super::super::translate(&ex).unwrap().hlsl;
+            assert!(keep.contains("WaveReadLaneAt(uint2(v1, exec_lo & 1u),"), "{keep}");
+            assert!(keep.contains(&format!("q0active ? (q0 {symbol} v2) : v4")), "{keep}");
+
+            let ex = compute_extract(&[op, 0xff08_b101, 0xbf81_0000]);
+            let zero = super::super::translate(&ex).unwrap().hlsl;
+            assert!(zero.contains("WaveReadLaneAt((exec_lo & 1u) != 0u ? v1 : 0u,"), "{zero}");
+            assert!(zero.contains(&format!("v4 = q0 {symbol} v2;")), "{zero}");
+        }
+    }
+
+    #[test]
     fn compute_register_writes_share_one_exec_region() {
         // v_add_nc_u32 v1, v0, v0; v_add_nc_u32 v2, v1, v1; s_endpgm
         let ex = compute_extract(&[0x4a02_0100, 0x4a04_0301, 0xbf81_0000]);

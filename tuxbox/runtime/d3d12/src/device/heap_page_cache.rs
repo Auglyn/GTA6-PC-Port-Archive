@@ -3,6 +3,16 @@ use std::{collections::{HashMap, VecDeque}, sync::{Arc, Weak}};
 
 const LIMIT: usize = 4096;
 const SWEEP: usize = 16;
+const PAGE: u64 = 65536;
+
+/// The key of an import spanning several whole pages at `base`. A page-aligned
+/// base has its low 16 bits clear, so they carry the page count: two imports
+/// share a key only when they cover exactly the same pages. A single page
+/// keeps its base as the key, which no span key can equal.
+pub(super) fn span_key(base: u64, size: u64) -> Option<u64> {
+    let pages = size / PAGE;
+    (base.is_multiple_of(PAGE) && size.is_multiple_of(PAGE) && (2..PAGE).contains(&pages)).then_some(base | pages)
+}
 
 pub(super) struct PageCache<T> {
     entries: HashMap<u64, Weak<T>>,
@@ -51,6 +61,54 @@ impl<T> PageCache<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn span_keys_identify_exact_page_ranges() {
+        let base = 0x1_2345_0000;
+        let key = span_key(base, 17 * PAGE).unwrap();
+        assert_eq!(span_key(base, 17 * PAGE), Some(key));
+        // Another length or another start is another import.
+        assert_ne!(span_key(base, 16 * PAGE), Some(key));
+        assert_ne!(span_key(base + PAGE, 17 * PAGE), Some(key));
+        // Neighbouring ranges that overlap must not collide either.
+        assert_ne!(span_key(base, 2 * PAGE), span_key(base + PAGE, 2 * PAGE));
+        // No span shares the key of a single page, which is its base.
+        for pages in 2..64 {
+            let key = span_key(base, pages * PAGE).unwrap();
+            assert!(!key.is_multiple_of(PAGE));
+            assert_eq!(key & !(PAGE - 1), base);
+        }
+    }
+
+    #[test]
+    fn span_keys_reject_ranges_the_key_cannot_describe() {
+        let base = 0x1_2345_0000;
+        // Single pages have their own caches, keyed by base.
+        assert_eq!(span_key(base, PAGE), None);
+        assert_eq!(span_key(base, 0), None);
+        // Partial pages and unaligned bases are never shared.
+        assert_eq!(span_key(base, 2 * PAGE + 1), None);
+        assert_eq!(span_key(base + 4096, 2 * PAGE), None);
+        // The count must fit below the page bits: 4 GiB and above is not cached.
+        assert!(span_key(base, (PAGE - 1) * PAGE).is_some());
+        assert_eq!(span_key(base, PAGE * PAGE), None);
+    }
+
+    #[test]
+    fn spans_and_pages_at_one_base_keep_separate_imports() {
+        let mut cache = PageCache::default();
+        let base = 0x7000_0000;
+        let page = cache.get_or_open(base, |_| true, || Ok::<_, ()>(Arc::new(1))).unwrap();
+        let short = cache.get_or_open(span_key(base, 2 * PAGE).unwrap(), |_| true, || Ok::<_, ()>(Arc::new(2))).unwrap();
+        let long = cache.get_or_open(span_key(base, 17 * PAGE).unwrap(), |_| true, || Ok::<_, ()>(Arc::new(17))).unwrap();
+        assert_eq!((*page, *short, *long), (1, 2, 17));
+        // A repeated view of the same range gets the live import back.
+        let again = cache.get_or_open(span_key(base, 17 * PAGE).unwrap(), |_| true, || Err(())).unwrap();
+        assert!(Arc::ptr_eq(&long, &again));
+        // Once every holder is gone the range is imported afresh.
+        drop(long); drop(again);
+        assert_eq!(*cache.get_or_open(span_key(base, 17 * PAGE).unwrap(), |_| true, || Ok::<_, ()>(Arc::new(18))).unwrap(), 18);
+    }
+
     #[test]
     fn interleaved_live_pages_reuse_exact_heap_and_expired_pages_reopen() {
         let mut cache = PageCache::default();

@@ -17,7 +17,8 @@ from .inspect import digest
 from .shader_prep import has_dxil_container
 
 
-# Bump when the DXC arguments or the validation policy change.
+# Bump when a policy change can make cached DXIL unacceptable under validation.
+# Output-equivalent optimisation and fallback variants share the policy value.
 POLICY = 1
 IDENTITY_FILE = "dxil-identity"
 LIBRARIES = ("libdxcompiler*", "libdxil*", "dxcompiler.dll", "dxil.dll")

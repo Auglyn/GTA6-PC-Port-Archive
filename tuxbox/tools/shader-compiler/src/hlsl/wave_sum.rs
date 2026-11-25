@@ -1,6 +1,7 @@
 //! Fixed-width DPP sums, extrema and prefix scans. Keep intermediate
 //! register writes and the restored EXEC observable after each reduction.
 use super::{Emitter, Enc, Insn, Opnd};
+use std::collections::BTreeSet;
 
 pub(super) const DPP_REDUCE: u32 = 0x7ff1;
 pub(super) const READ_LANE: u32 = 0x7ff2;
@@ -498,10 +499,17 @@ fn execz_forward_guard(
             }
             if op.enc == Enc::Sopp && (Emitter::branch_cond(op.op).is_some() || op.op == 1) {
                 let from = op.offset as i64;
+                let target_edge = from + 4 + 4 * op.aux.imm;
+                // Every invocation must reach the guard's wave vote. A forward
+                // rejoin at the guard is safe; bypasses and enclosing loops are not.
+                if (from < pc && target_edge > pc)
+                    || (target_edge <= pc && pc <= from)
+                {
+                    return false;
+                }
                 if from < pc || from >= region_start as i64 {
                     continue;
                 }
-                let target_edge = from + 4 + 4 * op.aux.imm;
                 if target_edge >= region_start as i64 {
                     return false;
                 }
@@ -512,7 +520,10 @@ fn execz_forward_guard(
     uniform_forward_guard(insns, branch_index, reduction_end, verified_reads)
 }
 
-pub(super) fn check_control_flow(insns: &[Insn], width: u32) -> Result<(), String> {
+/// Validate fixed-width reductions and return EXECZ instruction indices whose
+/// masked region and whole-wave arrival permit a wave-wide empty-EXEC vote.
+pub(super) fn check_control_flow(insns: &[Insn], width: u32) -> Result<BTreeSet<usize>, String> {
+    let mut execz_guards = BTreeSet::new();
     let mut verified_reads = Vec::new();
     for (first, ins) in insns.iter().enumerate() {
         if ins.op != DPP_REDUCE || ins.aux.imm != 0 {
@@ -543,19 +554,23 @@ pub(super) fn check_control_flow(insns: &[Insn], width: u32) -> Result<(), Strin
             }
             if Emitter::branch_cond(branch.op).is_some() {
                 let target = pc + 4 + 4 * branch.aux.imm;
-                if ((pc < start && target >= start) || (pc > end && target <= end)
-                    || (pc >= start && pc <= end))
-                    && !(pc < start && execz_forward_guard(insns, branch_index, start as usize, end as usize, first, &ins.mnemonic, &verified_reads))
+                if (pc < start && target >= start) || (pc > end && target <= end)
+                    || (pc >= start && pc <= end)
                 {
-                    return Err(format!(
-                        "wave reduction at {start:#x} may execute in divergent control flow"
-                    ));
+                    if !(pc < start && execz_forward_guard(insns, branch_index, start as usize, end as usize, first, &ins.mnemonic, &verified_reads)) {
+                        return Err(format!(
+                            "wave reduction at {start:#x} may execute in divergent control flow"
+                        ));
+                    }
+                    if branch.op == 8 {
+                        execz_guards.insert(branch_index);
+                    }
                 }
             }
         }
         verified_reads.push(last_read);
     }
-    Ok(())
+    Ok(execz_guards)
 }
 
 // Only a complete, single guest wave64 may use group rendezvous. Every
@@ -1037,7 +1052,21 @@ mod tests {
             let after = ops.len();
             ops.push(nop());
             edge(&mut ops, 1, after, 8);
-            assert!(check_control_flow(&ops, width).is_ok());
+            assert_eq!(check_control_flow(&ops, width).unwrap(), BTreeSet::from([1]));
+        }
+    }
+
+    #[test]
+    fn execz_forward_skip_rejects_enclosing_loop_before_region() {
+        for width in [32, 64] {
+            let mut ops = vec![nop(), branch(8), nop(), branch(4)];
+            ops.extend(masked_reduction(width, 7));
+            let after = ops.len();
+            ops.push(nop());
+            edge(&mut ops, 1, after, 8);
+            // This loop encloses the vote but ends before the reduction.
+            edge(&mut ops, 3, 0, 4);
+            assert!(check_control_flow(&ops, width).is_err());
         }
     }
 

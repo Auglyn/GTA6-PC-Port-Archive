@@ -181,7 +181,7 @@ fn decide(bytes: &[u8], rip: usize, features: CpuCacheFeatures, patched: &[usize
 /// Safely copy up to 15 committed, readable, non-guard bytes starting at `rip`
 /// within `[rip, end)`, seamlessly handling instructions that straddle a page
 /// boundary between regions with different protections.
-fn read_code_bytes(rip: usize, end: usize) -> ([u8; MAX_X86_INSN_LEN], usize) {
+pub(crate) fn read_code_bytes(rip: usize, end: usize) -> ([u8; MAX_X86_INSN_LEN], usize) {
     let mut buf = [0u8; MAX_X86_INSN_LEN];
     let limit = end.saturating_sub(rip).min(MAX_X86_INSN_LEN);
     let mut copied = 0usize;

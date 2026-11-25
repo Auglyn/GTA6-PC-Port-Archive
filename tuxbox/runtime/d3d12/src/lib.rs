@@ -2,6 +2,8 @@
 
 mod big_stack;
 mod clwb;
+mod clzero;
+mod mwaitx;
 mod commands;
 mod compile_gate;
 mod device;

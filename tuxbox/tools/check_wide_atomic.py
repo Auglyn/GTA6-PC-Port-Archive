@@ -4,6 +4,8 @@
 Capture the HLSL body from:
   cargo test --manifest-path tools/shader-compiler/Cargo.toml --target x86_64-unknown-linux-gnu verified_atomic_does_not_depend_on_shader_name -- --nocapture
 Save the lines between BEGIN_ATOMIC and END_ATOMIC to --body.
+For packed-instruction NSA coordinates, capture the body from
+verified_nsa_atomic_uses_the_encoded_second_coordinate and pass --non-sequential.
 The existing visibility guest is reused with synthetic vertex/pixel inputs.
 No retail shaders or game assets are required.
 """
@@ -24,6 +26,8 @@ parser = argparse.ArgumentParser(description=__doc__)
 for name in ("body", "provider", "proton", "prefix", "compiler-dir", "work", "output"):
     parser.add_argument("--" + name, type=Path, required=True)
 parser.add_argument("--adapter", required=True)
+parser.add_argument("--non-sequential", action="store_true",
+                    help="Provide y in v5 and a deliberately different value in v2.")
 args = parser.parse_args()
 w = args.work.resolve()
 w.mkdir(parents=True, exist_ok=True)
@@ -42,7 +46,9 @@ with TemporaryDirectory(dir=w) as td:
   gate="uint(all(int2(pos.xy) >= rect.xy) && all(int2(pos.xy) < rect.zw))" if clip else "1u"
   cluster_decl="uint4 cluster=i.cluster;" if mesh else ""
   rect_decl="int4 rect=i.rect;" if clip else ""
-  ps=f"RWTexture2D<uint64_t> uav0 : register(u0);\nstruct Input {{ {inputs} }};\nvoid main(Input i) {{\nfloat4 pos=i.pos; uint id=i.id; {cluster_decl} {rect_decl}\nuint exec_lo = {gate}; uint v1 = (uint)pos.x, v2 = (uint)pos.y, v3 = {val}, v4 = asuint(pos.z);\n{body}\n}}\n"
+  y = "0xffffffffu" if args.non_sequential else "(uint)pos.y"
+  nsa_y = "uint v5 = (uint)pos.y;" if args.non_sequential else ""
+  ps=f"RWTexture2D<uint64_t> uav0 : register(u0);\nstruct Input {{ {inputs} }};\nvoid main(Input i) {{\nfloat4 pos=i.pos; uint id=i.id; {cluster_decl} {rect_decl}\nuint exec_lo = {gate}; uint v1 = (uint)pos.x, v2 = {y}, v3 = {val}, v4 = asuint(pos.z); {nsa_y}\n{body}\n}}\n"
   source=trial/f"ps{index}.hlsl";source.write_text(ps)
   for stage,path,profile,defs in [("vs",p/"tools/reference/visibility/vertex.hlsl","vs_6_0",["-DMESH_INPUT=1"]*mesh+["-DCLIP_INPUT=1"]*clip),("ps",source,"ps_6_6",[])]:
    blob=trial/f"{stage}{index}.dxil"

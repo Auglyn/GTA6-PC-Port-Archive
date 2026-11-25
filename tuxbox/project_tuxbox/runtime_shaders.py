@@ -212,9 +212,31 @@ def archive_request(archive, source, inputs):
 O0_TIMEOUT = 90
 
 
-def compile_dxil(dxc, target, hlsl, output, store, request):
+def validated_dxil(dxv, output, stage):
+    """Return bounded, stage-correct output bytes after DXV accepts the file."""
+    run_tool([dxv, output], timeout=10)
+    data = bounded_shader(output)
+    if portable_stage(data) != stage:
+        raise ValueError("compiler returned invalid DXIL or a different shader stage")
+    return data
+
+
+def compile_dxil(dxc, dxv, target, hlsl, output, store, request, stage):
+    """Compile HLSL for the requested stage and return fully validated DXIL bytes."""
     entry = [] if target == "lib_6_3" else ["-E", "main"]
     unoptimised = [dxc, "-T", target, *entry, "-O0", "-Fo", output, hlsl]
+    # Large generated pixel programs can spend the cap in Jump Threading.
+    # Try this validated variant before consulting the baseline slow marker;
+    # an older DXC's flag rejection falls back just like a candidate timeout.
+    if target == "ps_6_6" and hlsl.stat().st_size >= (256 << 10):
+        try:
+            run_tool([dxc, "-T", target, *entry, "-disable-lifetime-markers",
+                      "-Fo", output, hlsl], timeout=15)
+            if not output.exists():
+                raise ValueError("compiler returned no DXIL output")
+            return validated_dxil(dxv, output, stage)
+        except (subprocess.TimeoutExpired, ValueError):
+            output.unlink(missing_ok=True)
     # cs_6_6 programs from this boot either finish default optimisation in
     # under a second or sit in it until the cap. The ones that sit there
     # compile at -O0 in a few seconds, and the driver optimises that DXIL
@@ -222,7 +244,7 @@ def compile_dxil(dxc, target, hlsl, output, store, request):
     # straight to -O0 rather than spending the cap again.
     if target == "cs_6_6" or (store and store.is_slow(request, target)):
         run_tool(unoptimised, timeout=O0_TIMEOUT)
-        return
+        return validated_dxil(dxv, output, stage)
     try:
         run_tool([dxc, "-T", target, *entry, "-Fo", output, hlsl], timeout=15)
     except subprocess.TimeoutExpired:
@@ -230,6 +252,7 @@ def compile_dxil(dxc, target, hlsl, output, store, request):
             store.mark_slow(request, target)
         output.unlink(missing_ok=True)
         run_tool(unoptimised, timeout=O0_TIMEOUT)
+    return validated_dxil(dxv, output, stage)
 
 
 def compile_request(source, key, tools, cache, session, *, remember=None):
@@ -325,17 +348,15 @@ def compile_request(source, key, tools, cache, session, *, remember=None):
             target_stage = STAGE_IDS[target.split("_", 1)[0]]
             if target_stage not in stages:
                 raise ValueError("compiler profile differs from requested shader stage")
-            # An earlier translator may have produced this exact HLSL.
+            # An earlier translator may have produced this exact HLSL. Reuse any
+            # validated equivalent output, including the candidate and -O0 paths;
+            # compiler policy changes deliberately leave warm cache entries valid.
             store = DxilStore.for_cache(cache)
             content = store.key(hlsl.read_bytes(), target) if store else None
             data = bounded_shader(output) if store and store.fetch(content, output) else None
             if data is None or portable_stage(data) != target_stage:
                 output.unlink(missing_ok=True)
-                compile_dxil(dxc, target, hlsl, output, store, key)
-                run_tool([dxv, output], timeout=10)
-                data = bounded_shader(output)
-                if portable_stage(data) != target_stage:
-                    raise ValueError("compiler returned invalid DXIL or a different shader stage")
+                data = compile_dxil(dxc, dxv, target, hlsl, output, store, key, target_stage)
                 if store:
                     store.save(content, output)
             stamp = work / "sha256"

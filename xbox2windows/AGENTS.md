@@ -97,8 +97,14 @@ Windows build, commit and debug-layer status.
 
 ## Pure-Python checks
 
-These checks do not need Windows, D3D12 or game files. The list matches the
-platform-independent Python job in `.github/workflows/windows.yml`:
+These checks do not need Windows, D3D12 or game files. From the repository
+root, run the first two commands below to set up the environment, then choose
+individual checks as needed.
+
+The full Linux CI list is in the `Run Python checks` step of the `python-linux`
+job in the [CI workflow](.github/workflows/windows.yml). To run it locally,
+copy the step's `tools/run_checks_parallel.py` command with all its arguments
+and replace the leading `python` with `./out/pe-env/bin/python`.
 
 ```bash
 python3 -m venv out/pe-env
@@ -147,11 +153,13 @@ python3 -m venv out/pe-env
 ./out/pe-env/bin/python -B tests/rectlist_topology_check.py
 ./out/pe-env/bin/python -B tests/startup_sampler_heap_check.py
 ./out/pe-env/bin/python -B tests/startup_image_sample_l_check.py
+./out/pe-env/bin/python -B tests/startup_image_sample_b_check.py
 ./out/pe-env/bin/python -B tests/startup_image_3d_check.py
 ./out/pe-env/bin/python -B tests/startup_image_load_mip_check.py
 ./out/pe-env/bin/python -B tests/startup_gfx2hlsl_operand_count_check.py
 ./out/pe-env/bin/python -B tests/startup_gfx2hlsl_mad_check.py
 ./out/pe-env/bin/python -B tests/startup_gfx2hlsl_compute_check.py
+./out/pe-env/bin/python -B tests/startup_compute_translate_check.py
 ./out/pe-env/bin/python -B tests/startup_gfx2hlsl_swap_check.py
 ./out/pe-env/bin/python -B tests/startup_image_2d_array_check.py
 ./out/pe-env/bin/python -B tests/startup_image_sample_a16_check.py
@@ -173,6 +181,7 @@ python3 -m venv out/pe-env
 ./out/pe-env/bin/python -B tests/startup_gfx2hlsl_int_med3_check.py
 ./out/pe-env/bin/python -B tests/startup_gfx2hlsl_cselect_mask_check.py
 ./out/pe-env/bin/python -B tests/startup_gfx2hlsl_mask_overwrite_check.py
+./out/pe-env/bin/python -B tests/startup_gfx2hlsl_add_sub_co_check.py
 ./out/pe-env/bin/python -B tests/startup_flat_param_check.py
 ./out/pe-env/bin/python -B tests/startup_build_rev_check.py
 ./out/pe-env/bin/python -B tests/startup_gfx2hlsl_root_check.py
@@ -187,6 +196,7 @@ python3 -m venv out/pe-env
 ./out/pe-env/bin/python -B tests/compute_load_format_check.py
 ./out/pe-env/bin/python -B tests/compute_heap_view_check.py
 ./out/pe-env/bin/python -B tests/compute_heap_store_check.py
+./out/pe-env/bin/python -B tests/compute_desc_numeric_check.py controls
 ./out/pe-env/bin/python -B tests/startup_ngg_slice_check.py
 ./out/pe-env/bin/python -B tests/mesh_dynamic_aot_check.py
 ./out/pe-env/bin/python -B tests/mesh_lane_spill_check.py
@@ -196,6 +206,7 @@ python3 -m venv out/pe-env
 ./out/pe-env/bin/python -B tests/startup_triage_run_check.py
 ./out/pe-env/bin/python -B tests/startup_run_ps1_check.py
 ./out/pe-env/bin/python -B tests/startup_gfx2hlsl_bit_alu_check.py
+./out/pe-env/bin/python -B tests/startup_gfx2hlsl_sgpr_spill_check.py
 ./out/pe-env/bin/python -B tests/startup_gfx2hlsl_shift64_check.py
 ./out/pe-env/bin/python -B tests/startup_gfx2hlsl_vopc_sdwa_check.py
 ./out/pe-env/bin/python -B tests/startup_gfx2hlsl_f32_lg_check.py

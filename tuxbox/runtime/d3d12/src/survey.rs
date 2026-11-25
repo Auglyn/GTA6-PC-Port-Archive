@@ -73,7 +73,8 @@ fn early_return_distance(rva: usize, bytes: &[u8]) -> Option<usize> {
 }
 
 /// Register the vectored exception handler once. Safe to call from `DllMain`
-/// so early title code (such as `clwb` on pre-Ice Lake CPUs) is covered before
+/// so early title code (such as `clwb` on pre-Ice Lake CPUs, or `clzero` on
+/// Intel CPUs) is covered before
 /// the first device is created.
 pub(crate) fn install_handler() -> bool {
     static INSTALL: Once = Once::new();
@@ -96,8 +97,9 @@ pub(crate) fn uninstall_handler() {
 }
 
 /// Install the assert handler once, when the title creates its first device.
-/// Outside survey mode the handler only steps over `RECOVERABLE` and rewrites
-/// unsupported `clwb` instructions.
+/// Outside survey mode the handler only steps over `RECOVERABLE`, rewrites
+/// unsupported `clwb` instructions, emulates unsupported `clzero` and rewrites
+/// unsupported `monitorx`/`mwaitx` to NOPs.
 pub(crate) fn install() {
     let installed = install_handler();
     static LOGGED: Once = Once::new();
@@ -148,7 +150,10 @@ unsafe extern "system" fn handler(info: *mut EXCEPTION_POINTERS) -> i32 {
     };
     if record_.ExceptionCode == EXCEPTION_ILLEGAL_INSTRUCTION {
         if let Some((start, end)) = title_image() {
-            if crate::clwb::handle_illegal_instruction(context, start, end) {
+            if crate::clwb::handle_illegal_instruction(context, start, end)
+                || crate::clzero::handle_illegal_instruction(context, start, end)
+                || crate::mwaitx::handle_illegal_instruction(context, start, end)
+            {
                 return CONTINUE_EXECUTION;
             }
         }

@@ -959,17 +959,30 @@ pub(super) unsafe extern "system" fn register_pages(
 }
 
 pub(super) extern "system" fn unregister_pages(device: &Device, token: usize) {
-    device.state.page_pools.0.lock().unwrap_or_else(|e| e.into_inner()).remove(&token);
+    device.state.page_pools.pools.lock().unwrap_or_else(|e| e.into_inner()).remove(&token);
 }
 
 #[path = "heap_page_cache.rs"]
 mod heap_page_cache;
-use heap_page_cache::PageCache;
+use heap_page_cache::{PageCache, span_key};
 
 // Registration returns an opaque cookie. Import the actual slices when a
 // resource uses them, so a large title arena doesn't pin untouched pages.
 #[derive(Default)]
-pub(super) struct PagePools(std::sync::Mutex<std::collections::HashMap<usize, Box<PagePool>>>);
+pub(super) struct PagePools {
+    pools: std::sync::Mutex<std::collections::HashMap<usize, Box<PagePool>>>,
+    // Single-page imports outside every registered pool. Titles place many
+    // resources on the same page: ProjectScarlett 1.0.2.1 imported one page
+    // 9,352 times in its first minute. Each fresh host heap is another driver
+    // buffer, and RADV passes every live buffer with each submission, so the
+    // kernel's per-submit validation grows with the import count.
+    //
+    // Imports of several pages share this cache under a key that also holds
+    // their page count. The same title views five fixed ranges of 448 KiB to
+    // 1.2 MiB about five times a frame each, and its recording allocators
+    // keep every import for 216 frames: about 4,500 live buffers.
+    loose: std::sync::Mutex<PageCache<ImportedHeap>>,
+}
 
 struct PagePool {
     start: u64,
@@ -981,7 +994,7 @@ impl PagePools {
     fn register(&self, start: u64, end: u64) -> usize {
         let pool = Box::new(PagePool { start, end, pages: PageCache::default() });
         let token = core::ptr::from_ref(pool.as_ref()).addr();
-        self.0.lock().unwrap_or_else(|e| e.into_inner()).insert(token, pool);
+        self.pools.lock().unwrap_or_else(|e| e.into_inner()).insert(token, pool);
         token
     }
 
@@ -994,29 +1007,51 @@ impl PagePools {
             Ok(Arc::new(ImportedHeap { native, _pin: pin }))
         };
         if size == u64::from(D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT) {
-            let mut pools = self.0.lock().unwrap_or_else(|e| e.into_inner());
+            use std::sync::atomic::AtomicU64;
+            let mut pools = self.pools.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(pool) = pools.values_mut().find(|pool| pool.start <= base && base + size <= pool.end) {
-                // Interleaved allocations can revisit a page whose heap is
-                // still owned by a resource. Reuse only that exact live import.
-                let mut opened = false;
-                let result = pool.pages.get_or_open(base, ImportedHeap::is_live, || {
-                    opened = true;
-                    open()
-                });
-                // The native resource owns the Arc; the cache is weak.
-                // Count only successful imports and hits, not failed opens.
-                if result.is_ok() {
-                    static OPEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-                    static HIT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-                    if opened {
-                        trace_buffer_path("pool_open", &OPEN, source, size);
-                    } else {
-                        trace_buffer_path("pool_hit", &HIT, source, size);
-                    }
-                }
-                return result;
+                static OPEN: AtomicU64 = AtomicU64::new(0);
+                static HIT: AtomicU64 = AtomicU64::new(0);
+                return reuse_page(&mut pool.pages, base, open, [("pool_open", &OPEN), ("pool_hit", &HIT)], source, size);
             }
+            drop(pools);
+            static OPEN: AtomicU64 = AtomicU64::new(0);
+            static HIT: AtomicU64 = AtomicU64::new(0);
+            let mut loose = self.loose.lock().unwrap_or_else(|e| e.into_inner());
+            return reuse_page(&mut loose, base, open, [("page_open", &OPEN), ("page_hit", &HIT)], source, size);
+        }
+        if let Some(key) = span_key(base, size) {
+            use std::sync::atomic::AtomicU64;
+            static OPEN: AtomicU64 = AtomicU64::new(0);
+            static HIT: AtomicU64 = AtomicU64::new(0);
+            let mut loose = self.loose.lock().unwrap_or_else(|e| e.into_inner());
+            return reuse_page(&mut loose, key, open, [("span_open", &OPEN), ("span_hit", &HIT)], source, size);
         }
         open()
     }
+}
+
+// Interleaved allocations can revisit a page whose heap is still owned by a
+// resource. Reuse only that exact live import, while its pages are unchanged.
+fn reuse_page(
+    pages: &mut PageCache<ImportedHeap>, base: u64,
+    open: impl FnOnce() -> windows::core::Result<Arc<ImportedHeap>>,
+    [(open_path, opens), (hit_path, hits)]: [(&'static str, &std::sync::atomic::AtomicU64); 2],
+    source: &'static str, size: u64,
+) -> windows::core::Result<Arc<ImportedHeap>> {
+    let mut opened = false;
+    let result = pages.get_or_open(base, ImportedHeap::is_live, || {
+        opened = true;
+        open()
+    });
+    // The native resource owns the Arc; the cache is weak.
+    // Count only successful imports and hits, not failed opens.
+    if result.is_ok() {
+        if opened {
+            trace_buffer_path(open_path, opens, source, size);
+        } else {
+            trace_buffer_path(hit_path, hits, source, size);
+        }
+    }
+    result
 }
