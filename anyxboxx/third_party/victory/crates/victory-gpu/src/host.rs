@@ -2452,6 +2452,99 @@ fn no_copy_back() -> bool {
     *ON.get_or_init(|| std::env::var_os("VICTORY_NO_COPY_BACK").is_some_and(|v| v == "1"))
 }
 
+/// (fps-neptune) Whether a landing's merges run on several threads (`VICTORY_RELAY_WIDE_MERGE=1`;
+/// off by default). The relay merged 1,100-1,300 pieces (60-80 MB) a frame one after the other
+/// on its one thread: about 25 ms of its 31 ms landing (run main-neptune-2258).
+fn relay_wide_merge() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| relay() && std::env::var_os("VICTORY_RELAY_WIDE_MERGE").is_some_and(|v| v == "1"))
+}
+
+/// Cuts `sizes` (in order) into at most `parts` runs of about the same bytes: each run is
+/// `(first, end)` indexes. Pieces stay in order so that those of one copy mostly stay together.
+fn balanced_runs(sizes: &[usize], parts: usize) -> Vec<(usize, usize)> {
+    let total: usize = sizes.iter().sum();
+    let parts = parts.max(1).min(sizes.len().max(1));
+    let each = total.div_ceil(parts).max(1);
+    let mut runs = Vec::new();
+    let (mut first, mut bytes) = (0, 0);
+    for (i, &n) in sizes.iter().enumerate() {
+        bytes += n;
+        if bytes >= each && runs.len() + 1 < parts {
+            runs.push((first, i + 1));
+            (first, bytes) = (i + 1, 0);
+        }
+    }
+    if first < sizes.len() {
+        runs.push((first, sizes.len()));
+    }
+    runs
+}
+
+/// Merges fetched pieces (copy, offsets in it, address of the fetched bytes, send number the
+/// merge is made after) into title memory; the bytes written.
+fn merge_landed(pieces: Vec<(std::sync::Arc<crate::shadow::Shadow>, usize, usize, usize, u64)>) -> usize {
+    use std::sync::atomic::AtomicUsize;
+    let merge = |(shadow, lo, hi, from, after): &(std::sync::Arc<crate::shadow::Shadow>, usize, usize, usize, u64), title: &mut Vec<u8>| {
+        // SAFETY: the mapping of the fetched bytes; the copy into it has run and the caller
+        // waits for every job.
+        let gpu = unsafe { std::slice::from_raw_parts(*from as *const u8, hi - lo) };
+        let merged = shadow.card_merge_relay(*lo, gpu, *after, title);
+        shadow.walls_merged(gpu.len(), merged);
+        merged
+    };
+    if !relay_wide_merge() || pieces.len() < 16 {
+        let mut title = Vec::new();
+        return pieces.iter().map(|p| merge(p, &mut title)).sum();
+    }
+    let sizes: Vec<usize> = pieces.iter().map(|p| p.2 - p.1).collect();
+    let runs = balanced_runs(&sizes, 8);
+    let pieces = std::sync::Arc::new(pieces);
+    let written = std::sync::Arc::new(AtomicUsize::new(0));
+    let jobs: Vec<Box<dyn FnOnce() + Send>> = runs
+        .into_iter()
+        .map(|(first, end)| {
+            let (pieces, written) = (pieces.clone(), written.clone());
+            Box::new(move || {
+                let mut title = Vec::new();
+                let mut sum = 0;
+                for p in &pieces[first..end] {
+                    let (shadow, lo, hi, from, after) = p;
+                    // SAFETY: as above.
+                    let gpu = unsafe { std::slice::from_raw_parts(*from as *const u8, hi - lo) };
+                    let merged = shadow.card_merge_relay(*lo, gpu, *after, &mut title);
+                    shadow.walls_merged(gpu.len(), merged);
+                    sum += merged;
+                }
+                written.fetch_add(sum, Ordering::Relaxed);
+            }) as Box<dyn FnOnce() + Send>
+        })
+        .collect();
+    crate::shadow::wide_run(jobs);
+    written.load(Ordering::Relaxed)
+}
+
+#[cfg(test)]
+mod relay_merge_tests {
+    use super::balanced_runs;
+
+    #[test]
+    fn runs_cover_every_piece_once_in_order() {
+        let sizes = [64, 64, 1, 64, 64, 64, 8, 64, 64, 64];
+        let runs = balanced_runs(&sizes, 4);
+        assert!(runs.len() <= 4);
+        assert_eq!(runs.first().unwrap().0, 0);
+        assert_eq!(runs.last().unwrap().1, sizes.len());
+        assert!(runs.windows(2).all(|w| w[0].1 == w[1].0));
+    }
+
+    #[test]
+    fn few_pieces_make_few_runs() {
+        assert_eq!(balanced_runs(&[10], 8), vec![(0, 1)]);
+        assert!(balanced_runs(&[], 8).is_empty());
+    }
+}
+
 /// (Neptune) Title buffer copies run on the card since the last frame line.
 pub(crate) static CARD_COPIES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
@@ -5231,28 +5324,20 @@ impl Host {
             CARD_STATS[5].fetch_add(1, Ordering::Relaxed);
             CARD_STATS[6].fetch_add(us, Ordering::Relaxed);
         }
-        let mut title = Vec::new();
-        let mut written = 0;
+        // (fps-neptune) `VICTORY_RELAY_WIDE_MERGE=1`: the merges of one landing's pieces run on the
+        // copy-back thread's kept threads (`VICTORY_WIDE_MERGE` only reaches the non-relay path).
+        let mut jobs_in: Vec<(std::sync::Arc<crate::shadow::Shadow>, usize, usize, usize, u64)> = Vec::new();
         if let Some((data, _)) = kept_down {
             for (shadow, lo, hi, at, _, after) in &kept {
-                // SAFETY: the mapping of the fetched bytes, `kept_total` of
-                // them; the copy into it has run.
-                let gpu = unsafe { std::slice::from_raw_parts((data + *at as usize) as *const u8, hi - lo) };
-                let merged = shadow.card_merge_relay(*lo, gpu, *after, &mut title);
-                shadow.walls_merged(gpu.len(), merged);
-                written += merged;
+                jobs_in.push((shadow.clone(), *lo, *hi, data + *at as usize, *after));
             }
         }
         if let Some((data, _, after)) = live_down {
             for (shadow, lo, hi, at) in &pieces {
-                // SAFETY: the mapping of the fetched bytes, `total` of them;
-                // the copy into it has run.
-                let gpu = unsafe { std::slice::from_raw_parts((data + *at as usize) as *const u8, hi - lo) };
-                let merged = shadow.card_merge_relay(*lo, gpu, after, &mut title);
-                shadow.walls_merged(gpu.len(), merged);
-                written += merged;
+                jobs_in.push((shadow.clone(), *lo, *hi, data + *at as usize, after));
             }
         }
+        let written = merge_landed(jobs_in);
         COPY_BACK[1].fetch_add(written as u64, Ordering::Relaxed);
         match (keeping, last_sent, live_down) {
             (true, Some(sent), _) => crate::shadow::relay_fetched(sent),

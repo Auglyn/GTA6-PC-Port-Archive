@@ -470,6 +470,34 @@ class RuntimeShaderLinks(unittest.TestCase):
                     self.assertEqual(compile_dxil("dxc", "dxv", target, hlsl, output, None, "request", stage), dxil)
                 self.assertEqual([call.args[0][0] for call in compiler.call_args_list], ["dxc", "dxv"])
 
+    def test_dispatched_programs_use_the_candidate_at_any_size(self):
+        """A block dispatcher takes the candidate flag, and -O0 when that fails."""
+        hlsl, output = self.cache / "shader.hlsl", self.cache / "out.cso"
+        hlsl.write_bytes(b"uint tb_pc = 0u; [loop] while (tb_pc != 7u) {}")
+        for target, stage in (("ps_6_6", 0), ("ps_6_0", 0), ("vs_6_6", 1), ("cs_6_0", 5)):
+            for failure in (None, "flag", "timeout"):
+                with self.subTest(target=target, failure=failure):
+                    output.unlink(missing_ok=True)
+                    store = Mock()
+                    dxil = portable_program(stage, b"dispatched")
+                    def run(args, *, timeout):
+                        if args[0] != "dxc":
+                            return
+                        candidate = "-disable-lifetime-markers" in args
+                        self.assertNotEqual(candidate, "-O0" in args)
+                        self.assertEqual(timeout, 15 if candidate else O0_TIMEOUT)
+                        output.write_bytes(dxil)
+                        if candidate and failure == "flag":
+                            raise ToolFailure("dxc", 1, "unknown argument")
+                        if candidate and failure == "timeout":
+                            raise subprocess.TimeoutExpired("dxc", timeout)
+                    with patch("project_tuxbox.runtime_shaders.run_tool", side_effect=run) as compiler:
+                        self.assertEqual(compile_dxil("dxc", "dxv", target, hlsl, output, store, "request", stage), dxil)
+                    tools = ["dxc", "dxv"] if failure is None else ["dxc", "dxc", "dxv"]
+                    self.assertEqual([call.args[0][0] for call in compiler.call_args_list], tools)
+                    store.is_slow.assert_not_called()
+                    store.mark_slow.assert_not_called()
+
     def test_cs_6_6_optimises_without_lifetime_markers(self):
         program = b"Xbox compute shader"
         key = hashlib.sha256(program).hexdigest()
@@ -548,6 +576,7 @@ class RuntimeShaderLinks(unittest.TestCase):
                     raise ToolFailure("xshader", 65, "unsupported")
                 self.assertEqual(program, b"Xbox geometry shader")
                 self.assertEqual(args[args.index("--pixel-order") + 1].read_bytes(), portable_program(0, b"r0.z"))
+                args[args.index("--hlsl-out") + 1].touch()
                 args[args.index("--profile-out") + 1].write_text("gs_6_0")
             if args[0] == "dxc":
                 args[args.index("-Fo") + 1].write_bytes(portable_program(2, b"gs"))

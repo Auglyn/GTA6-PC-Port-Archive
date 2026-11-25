@@ -45,7 +45,7 @@ Depuis le 25 novembre au soir, la base est **Neptune (VIctory Edit.) 2026-11-25c
 | [fxceless/victory-fork](https://github.com/fxceless/victory-fork) (fxceless ; PR de Jonirulah, Flyander, AscilCH) | GPL-3.0 | La base : niveaux à la demande, synchronisation du tas de descripteurs (`a26859f`, `9376fd6`) | |
 | [myokex/victory-amd](https://github.com/myokex/victory-amd) (myokex) | GPL-3.0 | La base, avec fxceless/victory-fork | |
 | [soldsawn/victory-nvidia-8gb](https://github.com/soldsawn/victory-nvidia-8gb) (soldsawn) | GPL-3.0 | Le traducteur de shaders (programmes wave64 appariés sur les cartes NVIDIA à 32 lanes) | |
-| Belobug, [reddxd-byte/ShakiraRED-dt](https://github.com/reddxd-byte/ShakiraRED-dt) | GPL-3.0 | La passe de lumière ambiante | |
+| Belobug, [reddxd-byte/ShakiraRED-dt](https://github.com/reddxd-byte/ShakiraRED-dt) | GPL-3.0 ou ultérieure | La passe de lumière ambiante | La passe du tas sur les emplacements marqués (`VICTORY_HEAP_PASS_DIRTY`, commit `2c6dc966`, portée de `c2271e5`, squash de VIwork de Trexies/victory-fork) |
 | [ZSlayerHQ/victory-world-runtime](https://github.com/ZSlayerHQ/victory-world-runtime) (ZSlayerHQ) | GPL-3.0 | Écritures vues entre vues, lectures noyau, dispatchs en parties | |
 | [JoshuuDev/victory-amd](https://github.com/JoshuuDev/victory-amd) (JoshuuDev) | GPL-3.0 | Verrou de remappage par plage ; corrections de blend et de descripteurs | |
 | zm0kie | GPL-3.0 | Overlay (F10), envois de fenêtres, lignes mémoire, `tools/` (`start-neptune.ps1`, `memwatch.ps1`) | |

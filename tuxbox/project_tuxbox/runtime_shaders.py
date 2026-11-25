@@ -214,6 +214,8 @@ O0_TIMEOUT = 90
 # The longest optimised cs_6_6 compile in a ProjectScarlett sample took 40 s
 # with twelve compiles sharing the processor.
 COMPUTE_TIMEOUT = 60
+# The loop the shader compiler puts a program's blocks in when its loops cannot be nested.
+DISPATCHER = b"while (tb_pc != "
 
 
 def validated_dxil(dxv, output, stage):
@@ -232,7 +234,11 @@ def compile_dxil(dxc, dxv, target, hlsl, output, store, request, stage):
     # Large generated pixel programs can spend the cap in Jump Threading.
     # Try this validated variant before consulting the baseline slow marker;
     # an older DXC's flag rejection falls back just like a candidate timeout.
-    if target == "ps_6_6" and hlsl.stat().st_size >= (256 << 10):
+    # Programs of the shader compiler's block dispatcher take it at any size: at
+    # default optimisation with lifetime markers some cost RADV minutes and more
+    # than 20 GB, so without this variant they are compiled at -O0.
+    dispatched = target != "cs_6_6" and DISPATCHER in hlsl.read_bytes()
+    if dispatched or target == "ps_6_6" and hlsl.stat().st_size >= (256 << 10):
         try:
             run_tool([dxc, "-T", target, *entry, "-disable-lifetime-markers",
                       "-Fo", output, hlsl], timeout=15)
@@ -241,9 +247,9 @@ def compile_dxil(dxc, dxv, target, hlsl, output, store, request, stage):
             return validated_dxil(dxv, output, stage)
         except (subprocess.TimeoutExpired, ValueError):
             output.unlink(missing_ok=True)
-    # A request that timed out before goes straight to -O0 rather than spending
-    # the cap again.
-    if store and store.is_slow(request, target):
+    # A dispatched program whose candidate failed, or a request that timed out
+    # before, goes straight to -O0 rather than spending the cap again.
+    if dispatched or (store and store.is_slow(request, target)):
         run_tool(unoptimised, timeout=O0_TIMEOUT)
         return validated_dxil(dxv, output, stage)
     # See `COMPUTE_FLAGS`. -O0 remains the fallback: the largest programs still

@@ -464,22 +464,36 @@ impl<'a> Emitter<'a> {
             self.line(&format!("uint tb_pc = {entry}u; [loop] while (tb_pc != {n}u) {{"));
         }
         self.loop_depth += 1;
-        // Flat `if (tb_sel == K)` tests on a snapshot of the block id (FXC mishandles a
-        // `switch` whose selector is assigned inside its cases).
-        if barriers.is_empty() {
-            self.line("uint tb_sel = tb_pc; tb_pc = 0xffffffffu;");
-        } else {
+        // Blocks are tested in program order on the live block id, so one pass over them
+        // follows every forward jump and only a jump back needs another. Many blocks are
+        // nested by range, which skips most tests. (FXC mishandles a `switch` whose selector
+        // is assigned inside its cases.)
+        const RANGE: usize = 24;
+        let spans: &[usize] = match starts.len() {
+            0..=RANGE => &[],
+            blocks if blocks <= RANGE * RANGE => &[RANGE],
+            _ => &[RANGE * RANGE, RANGE],
+        };
+        if !barriers.is_empty() {
             let at = barriers.iter().map(|i| format!("tb_pc == {i}u")).collect::<Vec<_>>().join(" || ");
             self.line(&format!("bool tb_wait = {at};"));
             // When lanes stand at different barriers the earliest goes first.
             self.line("bool tb_busy = WaveActiveAnyTrue(!tb_wait); uint tb_low = WaveActiveMin(tb_pc);");
             self.line("tb_wait = tb_wait && (tb_busy || tb_pc != tb_low);");
-            self.line("uint tb_sel = tb_wait ? 0xfffffffeu : tb_pc; if (!tb_wait) tb_pc = 0xffffffffu;");
+            // The barrier a lane may enter in this pass. One it reaches later waits for the next.
+            self.line("uint tb_sel = tb_wait ? 0xfffffffeu : tb_pc;");
         }
         let insns = self.insns.clone();
         for (b, &start) in starts.iter().enumerate() {
             let end = starts.get(b + 1).copied().unwrap_or(n);
-            self.line(&format!("if (tb_sel == {start}u) {{"));
+            for &span in spans {
+                if b % span == 0 {
+                    let to = starts.get(b + span).copied().unwrap_or(n);
+                    self.line(&format!("if (tb_pc - {start}u < {}u) {{", to - start));
+                }
+            }
+            let entered = if barriers.contains(&start) { format!(" && tb_sel == {start}u") } else { String::new() };
+            self.line(&format!("if (tb_pc == {start}u{entered}) {{"));
             self.drop_heap_handles();
             for i in start..end {
                 let ins = &insns[i];
@@ -509,9 +523,10 @@ impl<'a> Emitter<'a> {
                 format!("{end}u")
             };
             self.line(&format!("tb_pc = {next}; }}"));
+            for &span in spans.iter().rev() {
+                if b % span == span - 1 || b + 1 == starts.len() { self.line("}"); }
+            }
         }
-        // No block matched (cannot happen for a well-formed program): stop.
-        self.line(&format!("if (tb_pc == 0xffffffffu) tb_pc = {n}u;"));
         self.line("}");
         self.drop_heap_handles();
         self.loop_depth = self.loop_depth.saturating_sub(1);

@@ -11,21 +11,28 @@ import pytest
 
 RACINE = Path(__file__).resolve().parents[1]
 VICTORY = RACINE / "third_party" / "victory"
-# play.ps1 de Neptune (VIctory Edit.) 2026-11-25c, chemin Series X : la table du lanceur doit être exactement celle-ci
-# (sans VICTORY_WAVE_OWN_LDS_GROUPS, que le code de Neptune ne lit pas).
-NEPTUNE = {
-    "VICTORY_CARD_WINDOWS_MB": "4096", "VICTORY_BAKE_TEXTURES_MS": "10000", "VICTORY_EARLY_TEXTURES_MS": "40",
+# Table du lanceur : play.ps1 de Neptune (VIctory Edit.) 2026-11-25c, chemin Series X (sans
+# VICTORY_WAVE_OWN_LDS_GROUPS, que le code de Neptune ne lit pas), plus les réglages mesurés le 25 novembre
+# (passe de tas sur les emplacements marqués, copie regroupée, fenêtres de 1536 Mo, file de listes de 512 Mo, etc.).
+REGLAGES = {
+    "VICTORY_CARD_WINDOWS_MB": "1536", "VICTORY_BAKE_TEXTURES_MS": "10000", "VICTORY_EARLY_TEXTURES_MS": "40",
     "VICTORY_WIDE_MERGE": "1", "VICTORY_RELAY_OWN_QUEUE": "1",
     "VICTORY_UNDER_WRITES_WORDS": "1", "VICTORY_UNDER_WRITES_RUNS": "100000", "VICTORY_UNDER_WRITES_MASKS": "1",
     "VICTORY_RELAY": "2", "VICTORY_WIDE_REFRESH": "1", "VICTORY_ASK_ONCE": "1", "VICTORY_TEXTURE_NO_WAIT": "1",
     "VICTORY_CARD_REHASH_RUNS": "1", "VICTORY_JOIN_COPIES": "1", "VICTORY_D3D12_BACKGROUND": "0",
     "VICTORY_LATE_WAIT_LISTS": "1024", "VICTORY_WINDOW_TAILS": "1", "VICTORY_TEXTURE_STAGE_MB": "512",
     "VICTORY_CARD_BUFFERS_MIN_KB": "64", "VICTORY_ASK_QUIET": "8", "VICTORY_COPY_CHANGED": "1",
-    "VICTORY_QUIET_BACK": "1", "VICTORY_LIST_POOL_MOST": "2048", "VICTORY_LIST_POOL_MB": "2048",
+    "VICTORY_QUIET_BACK": "1", "VICTORY_LIST_POOL_MOST": "2048", "VICTORY_LIST_POOL_MB": "512",
     "VICTORY_WIDE_THREADS": "12", "VICTORY_UNDER_WRITES_MASKS_LEAST": "1", "VICTORY_INDIRECT_RAW": "2",
     "VICTORY_TEXTURE_HASH_EVERY": "32", "VICTORY_LEVELS_ON_DEMAND": "1", "VICTORY_WINDOW_KB": "1024",
     "VICTORY_CARD_BUFFERS_MB": "1536", "VICTORY_CARD_WINDOW_UPLOAD": "1", "VICTORY_DROP_DXIL": "1",
-    "VICTORY_DESC_DATA": "1", "VICTORY_VRAM_IDLE_MS": "15000,2500,1000", "VICTORY_PIPELINE_WAIT_MS": "2500",
+    "VICTORY_DESC_DATA": "1", "VICTORY_VRAM_IDLE_MS": "8000,2000,1000", "VICTORY_PIPELINE_WAIT_MS": "2500",
+    "VICTORY_TEXTURE_ROOM_PERCENT": "93", "VICTORY_HEAP_PASS_DIRTY": "1", "VICTORY_COPY_COALESCE": "256",
+}
+# -Quality, par-dessus la table (lu dans le bloc `if ($Quality)` du lanceur).
+QUALITE = {
+    "VICTORY_CARD_WINDOWS_MB": "0", "VICTORY_CARD_BUFFERS_MB": "1024", "VICTORY_LIST_POOL_MOST": "256",
+    "VICTORY_LIST_POOL_MB": "256", "VICTORY_TEXTURE_STAGE_MB": "192",
 }
 # Absentes du code de VIctory (base Neptune) : les poser ne change rien.
 ABSENTES = (
@@ -74,10 +81,10 @@ def _table(texte):
     return texte[texte.index("$tuned = [ordered]@{"):texte.index("foreach ($name in $tuned.Keys)")]
 
 
-def test_launcher_sets_neptunes_switch_set_and_can_turn_it_off():
+def test_launcher_sets_the_measured_switch_set_and_can_turn_it_off():
     texte = _lanceur()
     table = dict(re.findall(r"^\s*(VICTORY_[A-Z0-9_]+)\s*=\s*'([^']*)'", _table(texte), re.MULTILINE))
-    assert table == NEPTUNE
+    assert table == REGLAGES
     assert "$NoTunedSettings" in texte and "-not $NoTunedSettings" in texte
 
 
@@ -96,6 +103,15 @@ def test_launcher_keeps_discord_off():
     assert texte.index("$env:VICTORY_DISCORD = '0'") < texte.index("if (-not $NoTunedSettings)")
     discord = (VICTORY / "apps" / "victory" / "src" / "discord.rs").read_text(encoding="utf-8")
     assert 'v == "1"' in discord and 'v == "0"' not in discord        # la présence ne s'allume que sur demande
+
+
+def test_launcher_copies_the_ocean_height_maps_back_even_without_tuned_settings():
+    texte = _lanceur()
+    assert "$env:VICTORY_OCEAN_READBACK = '1'" in texte
+    assert texte.index("$env:VICTORY_OCEAN_READBACK = '1'") < texte.index("if (-not $NoTunedSettings)")
+    assert "VICTORY_TEXTURE_BACK_MODES" not in _variables_posees(texte)   # linear layouts only
+    texback = (VICTORY / "crates" / "victory-gpu" / "src" / "texback.rs").read_text(encoding="utf-8")
+    assert '"VICTORY_OCEAN_READBACK"' in texback and 'v == "1"' in texback   # off unless the launcher asks
 
 
 def test_launcher_leaves_out_variables_victory_does_not_read():
@@ -148,6 +164,12 @@ public static class FakeTool {
         if (name == "victory") {
             Console.WriteLine("card rehash runs: " + (Environment.GetEnvironmentVariable("VICTORY_CARD_REHASH_RUNS") ?? "unset"));
             Console.WriteLine("discord: " + (Environment.GetEnvironmentVariable("VICTORY_DISCORD") ?? "unset"));
+            string echo = Environment.GetEnvironmentVariable("FAKE_TOOL_ECHO");
+            if (!string.IsNullOrEmpty(echo)) {
+                foreach (string nom in echo.Split(',')) {
+                    Console.WriteLine(nom + "=" + (Environment.GetEnvironmentVariable(nom) ?? "unset"));
+                }
+            }
         }
         string err = Environment.GetEnvironmentVariable("FAKE_TOOL_STDERR_" + name.ToUpperInvariant());
         if (!string.IsNullOrEmpty(err)) {
@@ -176,8 +198,12 @@ def faux_outil(tmp_path_factory):
     return exe
 
 
-def _lancer(tmp_path, faux_outil, code_cargo=0, options=(), code_victory=CODE_SORTIE_VICTORY):
-    """Lance une copie du vrai lanceur : faux dépôt, faux jeu, faux cargo sur le PATH, victory.exe déjà compilé."""
+def _lancer(tmp_path, faux_outil, code_cargo=0, options=(), code_victory=CODE_SORTIE_VICTORY, echo=(), commande=None):
+    """Lance une copie du vrai lanceur : faux dépôt, faux jeu, faux cargo sur le PATH, victory.exe déjà compilé.
+
+    echo : noms de variables que victory.exe affiche (valeur ou « unset »). commande : suite PowerShell passée
+    après -GameDir (pour une table -Override), lancée par -Command au lieu de -File.
+    """
     script = tmp_path / "depot" / "tools" / "lancer_victory.ps1"
     script.parent.mkdir(parents=True)
     shutil.copy(RACINE / "tools" / "lancer_victory.ps1", script)
@@ -199,10 +225,17 @@ def _lancer(tmp_path, faux_outil, code_cargo=0, options=(), code_victory=CODE_SO
     env = {**os.environ, "PATH": f"{outils}{os.pathsep}{os.environ['PATH']}", "CARGO_TARGET_DIR": str(cible),
            "FAKE_TOOL_LOG": str(journal), "FAKE_TOOL_EXIT_CARGO": str(code_cargo),
            "FAKE_TOOL_EXIT_VICTORY": str(code_victory)}
-    for nom in ("VICTORY_CARD_REHASH_RUNS", "VICTORY_DISCORD"):
+    for nom in ("VICTORY_CARD_REHASH_RUNS", "VICTORY_DISCORD", *echo):
         env.pop(nom, None)
-    fini = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script),
-                           "-GameDir", str(jeu), *options], env=env, capture_output=True, text=True, timeout=120)
+    if echo:
+        env["FAKE_TOOL_ECHO"] = ",".join(echo)
+    if commande is None:
+        appel = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script),
+                 "-GameDir", str(jeu), *options]
+    else:
+        cmd = f"& '{script}' -GameDir '{jeu}' {commande}; exit $LASTEXITCODE"
+        appel = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", cmd]
+    fini = subprocess.run(appel, env=env, capture_output=True, text=True, timeout=120)
     appels = journal.read_text(encoding="utf-8").splitlines() if journal.is_file() else []
     return fini, appels, manifeste, jeu
 
@@ -223,6 +256,61 @@ def test_launcher_rebuilds_release_and_runs_with_discord_off(tmp_path, faux_outi
 
     fini, _, _, _ = _lancer(tmp_path / "nu", faux_outil, options=("-NoTunedSettings",))
     assert "card rehash runs: unset" in fini.stdout.splitlines()
+
+
+ECHO_DEFAUT = ("VICTORY_CARD_WINDOWS_MB", "VICTORY_CARD_BUFFERS_MB", "VICTORY_LIST_POOL_MOST", "VICTORY_LIST_POOL_MB",
+               "VICTORY_TEXTURE_STAGE_MB", "VICTORY_TEXTURE_ROOM_PERCENT", "VICTORY_VRAM_IDLE_MS",
+               "VICTORY_HEAP_PASS_DIRTY", "VICTORY_COPY_COALESCE", "VICTORY_RELAY_WIDE_MERGE")
+
+
+def _valeurs(sortie):
+    """Lignes « NOM=valeur » affichées par le faux victory.exe."""
+    return dict(ligne.split("=", 1) for ligne in sortie.splitlines() if "=" in ligne and ligne.startswith("VICTORY_"))
+
+
+def test_launcher_defaults_are_the_measured_fast_set(tmp_path, faux_outil):
+    fini, _, _, _ = _lancer(tmp_path, faux_outil, echo=ECHO_DEFAUT)
+    assert fini.returncode == CODE_SORTIE_VICTORY, fini.stderr
+    valeurs = _valeurs(fini.stdout)
+    assert valeurs == {
+        "VICTORY_CARD_WINDOWS_MB": "1536", "VICTORY_CARD_BUFFERS_MB": "1536", "VICTORY_LIST_POOL_MOST": "2048",
+        "VICTORY_LIST_POOL_MB": "512", "VICTORY_TEXTURE_STAGE_MB": "512", "VICTORY_TEXTURE_ROOM_PERCENT": "93",
+        "VICTORY_VRAM_IDLE_MS": "8000,2000,1000", "VICTORY_HEAP_PASS_DIRTY": "1", "VICTORY_COPY_COALESCE": "256",
+        "VICTORY_RELAY_WIDE_MERGE": "unset",   # VIctory's option, off by default, not measured
+    }
+
+
+def test_quality_switch_puts_the_picture_first_set_on_top(tmp_path, faux_outil):
+    fini, _, _, _ = _lancer(tmp_path, faux_outil, options=("-Quality",), echo=ECHO_DEFAUT)
+    assert fini.returncode == CODE_SORTIE_VICTORY, fini.stderr
+    valeurs = _valeurs(fini.stdout)
+    assert {n: valeurs[n] for n in QUALITE} == QUALITE
+    assert valeurs["VICTORY_TEXTURE_ROOM_PERCENT"] == "93" and valeurs["VICTORY_HEAP_PASS_DIRTY"] == "1"
+    assert valeurs["VICTORY_COPY_COALESCE"] == "256" and valeurs["VICTORY_VRAM_IDLE_MS"] == "8000,2000,1000"
+
+
+def test_quality_switch_applies_without_the_tuned_set(tmp_path, faux_outil):
+    fini, _, _, _ = _lancer(tmp_path, faux_outil, options=("-Quality", "-NoTunedSettings"), echo=ECHO_DEFAUT)
+    valeurs = _valeurs(fini.stdout)
+    assert {n: valeurs[n] for n in QUALITE} == QUALITE
+    assert valeurs["VICTORY_HEAP_PASS_DIRTY"] == "unset" and valeurs["VICTORY_COPY_COALESCE"] == "unset"
+
+
+def test_override_wins_over_quality_and_the_tuned_set(tmp_path, faux_outil):
+    fini, _, _, _ = _lancer(
+        tmp_path, faux_outil, echo=("VICTORY_CARD_BUFFERS_MB", "VICTORY_RELAY", "VICTORY_CARD_WINDOWS_MB"),
+        commande="-Quality -Override @{ VICTORY_CARD_BUFFERS_MB = '2048'; VICTORY_RELAY = '0' }",
+    )
+    assert fini.returncode == CODE_SORTIE_VICTORY, fini.stderr
+    valeurs = _valeurs(fini.stdout)
+    assert valeurs["VICTORY_CARD_BUFFERS_MB"] == "2048" and valeurs["VICTORY_RELAY"] == "0"
+    assert valeurs["VICTORY_CARD_WINDOWS_MB"] == "0"           # le -Quality reste pour le reste
+
+
+def test_override_rejects_names_that_are_not_victory_variables(tmp_path, faux_outil):
+    fini, appels, _, _ = _lancer(tmp_path, faux_outil, commande="-Override @{ PATH = 'x' }")
+    assert fini.returncode != 0 and "-Override takes VICTORY_* names only" in fini.stderr
+    assert not any(a.startswith("victory") for a in appels), appels   # rien n'est lancé
 
 
 def test_launcher_builds_the_diag_profile_for_dred(tmp_path, faux_outil):

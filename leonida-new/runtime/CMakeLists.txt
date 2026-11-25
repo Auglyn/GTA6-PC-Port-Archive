@@ -250,6 +250,20 @@ if(WIN32 AND LEONIDA_BUILD_WINDOWS_RUNTIME)
     target_compile_options(root_sig_test PRIVATE /W4 /permissive- /utf-8)
     target_link_options(root_sig_test PRIVATE /OPT:NOREF)
 
+    # The flag mask keeps every public root-signature flag: helpers over [0, 0xFFFF], the shims against the host
+    # serializer and deserializer (old upstream PR 7140).
+    add_executable(root_sig_public_flags_test
+      test/root_sig_public_flags_test.cpp
+      shims/registry.cpp
+      shims/d3d12_xs.cpp
+      shims/d3d12_xs_device.cpp
+      shims/d3d12_xs_pso_stream.cpp
+    )
+    target_link_libraries(root_sig_public_flags_test PRIVATE gta6rt_d3d12_xs_rootsig ${D3D12_LIBRARY})
+    target_compile_definitions(root_sig_public_flags_test PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_compile_options(root_sig_public_flags_test PRIVATE /W4 /permissive- /utf-8)
+    target_link_options(root_sig_public_flags_test PRIVATE /OPT:NOREF)
+
     # RTS0 parser oracle: synthetic descriptors only, serialized by the real PC
     # d3d12.dll and parsed back by rt::rootsig::parse_rts0. A layout mismatch
     # fails here with the blob bytes, never silently in a draw.
@@ -439,7 +453,7 @@ if(WIN32 AND LEONIDA_BUILD_WINDOWS_RUNTIME)
   target_link_options(file_system_test PRIVATE /OPT:NOREF)
   target_link_libraries(file_system_test PRIVATE advapi32)  # the ACL calls of the unlistable-marker-folder check
 
-  # LEONIDA_SKIP_INT3 (shims/startup_trace.h): its own executable, the variable is read once per process.
+  # LEONIDA_SKIP_INT3 (shims/startup_trace.h): each case runs in a child process with its own environment.
   add_executable(int3_skip_test
     test/int3_skip_test.cpp
     shims/registry.cpp
@@ -776,6 +790,16 @@ if(BUILD_TESTING)
     target_link_libraries(title_hud_test PRIVATE Vulkan::Headers user32 psapi)
     add_test(NAME title_hud COMMAND title_hud_test)
   endif()
+
+  # LEONIDA_DEV_OVERLAY's text and the phase bookkeeping behind it (src/dev_overlay.h): no window, GPU or game file.
+  find_package(Threads REQUIRED)
+  add_executable(dev_overlay_test test/dev_overlay_test.cpp)
+  target_include_directories(dev_overlay_test PRIVATE src)
+  target_link_libraries(dev_overlay_test PRIVATE Threads::Threads)
+  if(WIN32)
+    target_link_libraries(dev_overlay_test PRIVATE user32 gdi32 psapi)
+  endif()
+  add_test(NAME dev_overlay COMMAND dev_overlay_test)
 
   add_executable(pipeline_cache_file_test test/pipeline_cache_file_test.cpp)
   add_test(NAME pipeline_cache_file COMMAND pipeline_cache_file_test)
@@ -1390,6 +1414,9 @@ if(BUILD_TESTING)
 
   if(TARGET root_sig_test)
     add_test(NAME root_sig COMMAND root_sig_test)
+  endif()
+  if(TARGET root_sig_public_flags_test)
+    add_test(NAME root_sig_public_flags COMMAND root_sig_public_flags_test)
   endif()
   add_executable(command_list_test test/command_list_test.cpp)
   add_test(NAME command_list COMMAND command_list_test)

@@ -2158,7 +2158,21 @@ sets them, and it does so twice.
 
 `amd_fidelityfx_upscaler_xbox.dll` does neither. Its 29 `RTS0` parts carry `Flags = 0`, and no instruction in it uses
 the constant `0x3000000`. So the bits are not a property of every console root signature; this builder adds them. The
-game executable is not in the package, so whether its root signatures carry them is open.
+retail executable's root signatures do not carry them either (old upstream PR 7140): its direct call passes a 1.1
+description with `Flags = 0x80` (`LOCAL_ROOT_SIGNATURE`), and its root-signature decoder reads `Flags` as a
+zero-extended 16-bit value.
+
+The mask stays unconditional, because it can't touch a public flag: it clears bits 24-31
+(`kXboxRootSignatureFlagHighByte`, `runtime/shims/d3d12_xs_rootsig.h`), and every public
+`D3D12_ROOT_SIGNATURE_FLAGS` value is in bits 0-11 (the highest is `SAMPLER_HEAP_DIRECTLY_INDEXED`, `0x800`). So it is
+safe on every descriptor and blob, whatever built it. `root_sig_public_flags_test` pins this:
+
+- the helpers keep every flag value in `[0, 0xFFFF]`;
+- the shims' serializers give the host's blob byte for byte for each public flag the host takes. Where the host
+  refuses only `CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED` or `SAMPLER_HEAP_DIRECTLY_INDEXED` (Windows 10's in-box `d3d12.dll`),
+  they serialize on purpose: the blob is the host's blob without those bits, with the full flags in `RTS0` and a valid
+  container hash (`kDirectlyIndexedFlags`, `runtime/shims/d3d12_xs_rootsig.h`);
+- a blob with `0x03000080` comes back as `0x80`.
 
 **Version 1.2 on older runtimes.** The in-box `d3d12.dll` of Windows 10 (measured on 22H2, 10.0.19045, without the
 Agility SDK) and of Windows 11 23H2 (#361) serializes root signatures only up to 1.1. On Windows 10 it rejects even an
@@ -3529,7 +3543,11 @@ will forward to. The queue-side calls ignore which queue they came on (one `VkQu
   `WaitFrameEventX` returns at the next origin with the next token (1, 2, 3, ...; 0 is the null token) and does not
   return while `latency` presented frames are still waiting for their vblank. A frame presented before the origin event
   is armed is not paced (`PresentX` does not hold it for a vblank), so it is shown at once and never waits for a vblank:
-  blank presents of a loading screen do not delay the first wait. A wait that comes late returns at once
+  blank presents of a loading screen do not delay the first wait. At most `latency` frames are in flight once the event
+  is armed: a present into a full queue (several presents with no wait between them) replaces the newest queued frame
+  and takes its vblank, like a mailbox, so the replaced frame is never shown (no display statistic) and the older ones
+  keep their vblanks. However many presents come between two waits, the next wait passes when the oldest frame is
+  shown. A wait that comes late returns at once
   with the newest passed origin; the missed ones are skipped. A finite timeout gives
   `HRESULT_FROM_WIN32(WAIT_TIMEOUT)`; nothing registered, or suspended, gives `HRESULT_FROM_WIN32(ERROR_INVALID_STATE)`.
   `LEONIDA_PRESENT_UNCAP` (any non-empty value other than "0", read when the object is made) takes the frame-rate
@@ -3545,8 +3563,11 @@ will forward to. The queue-side calls ignore which queue they came on (one `VkQu
   `SuspendX`/`ResumeX` so suspended pauses are excluded), computing nearest-rank `p50`/`p95`/`p99` and the mean drift
   against the active target interval (`FramePacer::pacing_summary()`). On teardown after at least one present,
   `XboxPresentation` logs a single `[rt] present: pacing summary ...` line on stderr, which `tools/boot_trace.py`
-  surfaces beside the D3D12 call counts. Confirmed on a fake clock by `frame_pacer_test` (known 100-frame distribution,
-  positive and negative drift, ring-buffer wrap-around, suspend/resume exclusion, uncapped mode) and by
+  surfaces beside the D3D12 call counts. The intervals are between `PresentX` calls, not between frames shown: a frame
+  replaced in a full queue (see the latency limit above) still counts as a present with its real interval, so the
+  percentiles describe the title's present cadence, and a burst of presents between two waits shows up as short
+  intervals. Confirmed on a fake clock by `frame_pacer_test` (known 100-frame distribution,
+  positive and negative drift, ring-buffer wrap-around, suspend/resume exclusion, uncapped mode, replaced frames) and by
   `tests/test_boot_trace.py`.
 - *`PresentX`*: 0 planes presents a black frame (no token needed). 1 plane blits plane 0's first resource (a
   single-sample 2D colour texture in `PRESENT`) to the swapchain image, limited to `pSrcViewRects[0]` when set
@@ -3765,7 +3786,8 @@ will forward to. The queue-side calls ignore which queue they came on (one `VkQu
   (placement, point/bilinear, alpha overlay, HDR10 and PQ conversions, refusals; against a CPU model), token errors,
   statistics, suspend/resume, `ImmediateThresholdPercent` with a late frame at several thresholds (immediate mode
   chosen, or not for 0, below the lateness, on time) and with `LEONIDA_PRESENT_NO_TEAR=1`, 30 frames at 60 Hz in real
-  time; skipped, exit 77, without a Vulkan device). `frame_pacer_test` also sweeps `decide_present_sync`.
+  time; skipped, exit 77, without a Vulkan device). `frame_pacer_test` also sweeps `decide_present_sync`, and checks
+  that 1000 presents between two waits leave at most `latency` frames in flight (latency 1, 2 and 3).
 
 ### 4.6 Queries
 
@@ -3788,15 +3810,20 @@ Implemented (`QueryHeap` in `runtime/shims/d3d12_vulkan_device.cpp`, the query c
   (`compare_invalid_arguments`, "query heap:", RTX 5070 / 621.14): `E_INVALIDARG` for no queries, a node other than
   node 0, or a type past `PIPELINE_STATISTICS1` (7), checked before the output; a valid description with a null
   output is then `E_UNEXPECTED`, not `S_FALSE`.
-- **Stream-output statistics** (D3D-302). The layer has no stream output: a graphics PSO with `StreamOutput`
-  entries is refused and `SOSetTargets` is not implemented, so no primitive reaches a stream and every
-  `SO_STATISTICS_STREAM0..3` query counts 0 written and 0 needed. An `SO_STATISTICS` heap is therefore made without
-  a `VkQueryPool`: `BeginQuery`/`EndQuery` record nothing in Vulkan (D3D12's call rules are still kept, and the
+- **Stream-output statistics** (D3D-302). The layer still refuses `StreamOutput` PSOs and does not implement
+  `SOSetTargets`, so no primitive reaches a stream yet. With `VK_EXT_transform_feedback` enabled on the device
+  (`D3D-TRANSFORM-FEEDBACK-DEVICE`) and its `transformFeedbackQueries` property set, an `SO_STATISTICS` heap is a
+  real `VK_QUERY_TYPE_TRANSFORM_FEEDBACK_STREAM_EXT` pool begun and ended indexed on the stream
+  (`vkCmdBeginQueryIndexedEXT` / `vkCmdEndQueryIndexedEXT`), and `ResolveQueryData` copies the two 64-bit results per
+  query (16 bytes: `NumPrimitivesWritten`, `PrimitivesStorageNeeded`), in the same order; with no stream output they
+  are 0. A stream at or above the device's `maxTransformFeedbackStreams` runs nothing and resolves zero, as if the
+  heap had no pool. Without the feature, the property, or a nonzero `maxTransformFeedbackStreams`, the heap is made
+  without a `VkQueryPool`: `BeginQuery`/`EndQuery` run nothing in Vulkan (D3D12's call rules are still kept, and the
   heap's queries track ended or not as the others do), they overlap no other query, and `ResolveQueryData` writes
-  zeros (`vkCmdFillBuffer`, 16 bytes per query: `NumPrimitivesWritten`, `PrimitivesStorageNeeded`), with no
-  statistics split since nothing is dispatched. When stream output lands, the heap becomes a
-  `VK_QUERY_TYPE_TRANSFORM_FEEDBACK_STREAM_EXT` pool begun with `vkCmdBeginQueryIndexedEXT` on the stream, whose two
-  results are in the same order.
+  zeros (`vkCmdFillBuffer`, 16 bytes per query), with no statistics split since nothing is dispatched. Two
+  overlapping `SO_STATISTICS` queries on one stream would be two active indexed queries in one pool
+  (`VUID-vkCmdBeginQueryIndexedEXT-queryPool-04753`), so `prepare()` refuses such a list
+  (`ReplayResult::invalid_query`); queries on different streams are fine.
 - **Recording.** The list keeps D3D12's rules for the calls: timestamps only have `EndQuery`; every other query is
   begun and ended in the same list with the same type, is not begun again while it runs, and is not resolved while
   it runs; resolve offsets are multiples of 8. A list closed with a query still running reports `E_INVALIDARG` and

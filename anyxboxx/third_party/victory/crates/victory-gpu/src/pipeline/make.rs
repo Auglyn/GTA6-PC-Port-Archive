@@ -37,6 +37,8 @@ pub(crate) struct Pending {
     pub(crate) graphics: Option<Box<GraphicsState>>,
     queue_state: AtomicU8,
     made: OnceLock<Option<HostPipeline>>,
+    /// Recording threads waiting for this particular pipeline.
+    completion: (Mutex<()>, Condvar),
     /// What identifies it across runs (shader containers and state), and
     /// whether a draw or dispatch has requested it yet.
     key: String,
@@ -118,6 +120,7 @@ impl Pending {
             begun: OnceLock::new(),
             queue_state: AtomicU8::new(NOT_QUEUED),
             made: OnceLock::new(),
+            completion: (Mutex::new(()), Condvar::new()),
             key: key.finalize().to_hex()[..32].to_owned(),
             used: AtomicBool::new(false),
         }
@@ -138,7 +141,7 @@ impl Pending {
         let _ = self.begun.set(Instant::now());
         self.made
             .get_or_init(|| HostPipeline::new(&self.shaders, self.graphics.as_deref()));
-        let (lock, done) = &DONE;
+        let (lock, done) = &self.completion;
         let _held = lock.lock().unwrap_or_else(|e| e.into_inner());
         done.notify_all();
     }
@@ -168,9 +171,6 @@ pub(crate) fn missing(p: &Pending) -> Option<String> {
         }
     }
 }
-
-/// Signalled whenever a worker has made a pipeline.
-static DONE: (Mutex<()>, Condvar) = (Mutex::new(()), Condvar::new());
 
 /// Waiting allowed per title frame, over all threads.
 fn wait_budget() -> Duration {
@@ -437,7 +437,7 @@ fn wait(p: &Pending, frame: u64) {
     if left.is_zero() {
         return;
     }
-    let (lock, done) = &DONE;
+    let (lock, done) = &p.completion;
     let mut held = lock.lock().unwrap_or_else(|e| e.into_inner());
     while p.made.get().is_none() && !p.slow() {
         let rest = left.saturating_sub(started.elapsed());
@@ -680,6 +680,23 @@ mod loading_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn another_pipeline_can_finish_while_a_waiter_holds_its_lock() {
+        let first = Pending::new(Vec::new(), None);
+        let second = Pending::new(Vec::new(), None);
+        let guard = first.completion.0.lock().unwrap();
+        std::thread::scope(|scope| {
+            let (sent, received) = std::sync::mpsc::channel();
+            scope.spawn(move || {
+                second.make();
+                sent.send(()).unwrap();
+            });
+            let completed = received.recv_timeout(Duration::from_secs(5));
+            drop(guard);
+            completed.unwrap();
+        });
+    }
 
     /// A first use queues the pipeline and, within the budget, gets the
     /// worker's answer (here: no host pipeline for no shaders).

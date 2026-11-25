@@ -49,6 +49,7 @@ pub mod object;
 pub mod pipeline;
 #[cfg(windows)]
 mod primitive;
+mod heap_pass;
 pub mod query;
 pub mod queue;
 pub mod resource;

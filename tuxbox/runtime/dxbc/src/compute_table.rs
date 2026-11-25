@@ -194,8 +194,8 @@ fn read_bindings(
             (0x300, 0x804) if stage <= 1 && (4..=2048).contains(&shape) && shape % 4 == 0 => {
                 let named = |ty| rows.chunks_exact(stride)
                     .any(|r| word(r, 0) == Some(ty) && word(r, 8) == Some(register) && word(r, 12) == Some(register));
-                // Only under the newly reflected roots, so other paths keep their result.
-                (0, if named(5) || multi_table.is_none() { 5 } else { 3 })
+                // Only under a reflected root, so root-less translations keep their result.
+                (0, if named(5) || root.is_none() { 5 } else { 3 })
             }
             (0x302, 0x804) if stage <= 1 => (2, 2),
             (2, 0x10904) if stage == 0 => (4, 2), // root constants in s9

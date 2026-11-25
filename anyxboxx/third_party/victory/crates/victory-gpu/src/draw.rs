@@ -8,6 +8,8 @@
 //! stencil reference, topology, targets) is set on the host list as the
 //! title sets it.
 
+mod root_slots;
+
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use victory_shader::resource::RootIndexedView;
@@ -1521,32 +1523,35 @@ impl State {
         // at best); all of them every 16 passes, because a view of a
         // released resource goes stale without a write, and a slot written
         // before its memory had a host copy is only made then.
-        type Ranges = std::collections::HashMap<u32, (std::sync::Arc<crate::shadow::Shadow>, u64, u64)>;
-        static RANGES: std::sync::Mutex<Option<std::collections::HashMap<usize, (u64, Ranges)>>> =
+        // Which slots are looked at is `crate::heap_pass` (the full sweep every
+        // 16 passes unless `VICTORY_HEAP_PASS_DIRTY=1`).
+        type Picked = crate::heap_pass::Picked<std::sync::Arc<crate::shadow::Shadow>>;
+        static RANGES: std::sync::Mutex<Option<std::collections::HashMap<usize, Picked>>> =
             std::sync::Mutex::new(None);
         let mut kept = RANGES.lock().unwrap_or_else(|e| e.into_inner());
-        let (passes, ranges) = kept
-            .get_or_insert_with(Default::default)
+        let heaps = kept.get_or_insert_with(Default::default);
+        let forgotten = crate::descriptor::take_forgotten();
+        for picked in heaps.values_mut() {
+            picked.note_forgotten(forgotten.as_deref());
+        }
+        let ranges = heaps
             .entry(std::ptr::from_ref(host) as usize)
-            .or_insert_with(|| (0, Ranges::new()));
+            .or_insert_with(|| Picked::new(crate::heap_pass::full_pass()));
         let changed = host.buffer_changes();
-        let slots = if *passes % 16 == 0 {
-            ranges.clear();
-            host.buffer_slots()
-        } else {
-            changed
-        };
-        *passes += 1;
+        let record = |index: u32| heap.handle(index).map(crate::descriptor::record_at);
+        let slots = ranges.plan(changed, || host.buffer_slots(), record, crate::descriptor::record_entry);
         // Whether the device was there before the pass: a view that removes
         // it is named below.
         static GONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
         let mut alive = !GONE.load(Ordering::Relaxed) && crate::descriptor::host::device_removed().is_none();
         HEAP_PASS_PARTS[1].fetch_add(slots.len() as u64, Ordering::Relaxed);
         for (n, &index) in slots.iter().enumerate() {
-            ranges.remove(&index);
+            ranges.forget(index);
             let Some(handle) = heap.handle(index) else {
                 continue;
             };
+            let record = crate::descriptor::record_at(handle);
+            let entry = crate::descriptor::record_entry(record);
             let Some(view) = host.mirror(index, handle, true) else {
                 continue;
             };
@@ -1568,26 +1573,23 @@ impl State {
             // The copy the slot shows (`buffer_copy`), not the one the
             // view's range alone would find.
             let Some((shadow, address, len)) = crate::descriptor::host::buffer_copy(&view) else {
+                if crate::descriptor::host::buffer_range(&view).is_some_and(|(_, len)| len > 0) {
+                    ranges.orphan(index, record, entry);
+                }
                 continue;
             };
             #[cfg(feature = "diagnostics")]
             if host.shows(index, &shadow.buffer) == Some(false) {
                 HEAP_VIEWS_ELSEWHERE.fetch_add(1, Ordering::Relaxed);
             }
-            ranges.insert(index, (shadow, address, address + len));
+            let key = std::sync::Arc::as_ptr(&shadow) as usize;
+            ranges.keep(index, key, &shadow, [address, address + len], record, entry);
         }
-        let views = ranges.len() as u32;
+        let views = ranges.views() as u32;
         // Per host copy, the span its picked views cover.
-        let mut spans: std::collections::HashMap<usize, (std::sync::Arc<crate::shadow::Shadow>, u64, u64)> =
-            std::collections::HashMap::new();
-        for (shadow, from, to) in ranges.values() {
-            let key = std::sync::Arc::as_ptr(shadow) as usize;
-            let span = spans.entry(key).or_insert_with(|| (shadow.clone(), *from, *to));
-            span.1 = span.1.min(*from);
-            span.2 = span.2.max(*to);
-        }
+        let spans = ranges.spans();
         drop(kept);
-        let bytes: u64 = spans.values().map(|s| s.2 - s.1).sum();
+        let bytes: u64 = spans.iter().map(|s| s.2 - s.1).sum();
         // Memory that is not write-watched is copied whole by every refresh.
         // It was once refreshed only every 120 frames (unmapped pages read
         // one by one cost 14 GB a frame in run 11, before they were
@@ -1598,7 +1600,7 @@ impl State {
         static WHOLE: std::sync::Mutex<Option<std::collections::HashMap<usize, u64>>> = std::sync::Mutex::new(None);
         let mut whole = WHOLE.lock().unwrap_or_else(|e| e.into_inner());
         let whole = whole.get_or_insert_with(Default::default);
-        for (shadow, from, to) in spans.values() {
+        for (shadow, from, to) in &spans {
             if shadow.unwatched() {
                 // By the copy's number: a copy made where one let go was
                 // (`shadow::let_go_idle`) has never been refreshed.
@@ -2667,17 +2669,15 @@ impl State {
         compute: bool,
     ) -> Vec<(u8, u32)> {
         let tables = |u: &&UsedResource| u.root == RootType::Table;
-        let mut fresh: Vec<u8> = used
-            .iter()
-            .filter(tables)
-            .filter(|u| u.kind == ResourceType::Cbv)
-            .map(|u| u.slot)
-            .collect();
+        let mut fresh = root_slots::RootSlots::default();
+        for u in used.iter().filter(tables).filter(|u| u.kind == ResourceType::Cbv) {
+            fresh.insert(u.slot);
+        }
         // Tables reaching past a host heap smaller than the title's (the
         // host's limit, 1,000,000 views on NVIDIA) are made afresh too: the
         // title's slots there have no host slot of their own.
         for u in used.iter().filter(tables) {
-            if fresh.contains(&u.slot) {
+            if fresh.contains(u.slot) {
                 continue;
             }
             let Some(&Root::Table(table)) = self.roots_ref(compute).get(usize::from(u.slot)) else {
@@ -2691,18 +2691,16 @@ impl State {
                 continue;
             };
             if index >= host.count() {
-                fresh.push(u.slot);
+                fresh.insert(u.slot);
             }
         }
-        fresh.sort_unstable();
-        fresh.dedup();
         for u in used.iter().filter(tables) {
-            if !fresh.contains(&u.slot) {
+            if !fresh.contains(u.slot) {
                 self.table_entry(list, u, compute);
             }
         }
         let mut made = Vec::new();
-        for slot in fresh {
+        for slot in fresh.ordered() {
             let Some(&Root::Table(table)) = self.roots_ref(compute).get(usize::from(slot)) else {
                 continue;
             };

@@ -31,7 +31,8 @@
   Optional. Passed unchanged to VICTORY_SKIP_PIPELINES when given.
 
 .PARAMETER NoTunedSettings
-  Optional. Does not set Neptune's switch set below (only VICTORY_GAME_DIR and VICTORY_DISCORD are set).
+  Optional. Does not set Neptune's switch set below (only VICTORY_GAME_DIR, VICTORY_DISCORD and
+  VICTORY_OCEAN_READBACK are set).
 
 .PARAMETER Dred
   Optional. Turns on device-removed data (VICTORY_D3D12_DRED) to diagnose a device loss; needs the diagnostics build,
@@ -48,11 +49,25 @@
 .PARAMETER BatchCardRehash
   Optional. Sets VICTORY_CARD_REHASH_RUNS=1 even with -NoTunedSettings (Neptune's switch set already sets it).
 
+.PARAMETER Override
+  Optional. A hashtable of VICTORY_* variables set after the tuned set (and after -NoTunedSettings), for A/B runs:
+  -Override @{ VICTORY_RELAY = '0'; VICTORY_PIPELINE_WAIT_MS = '12000' }. Applied last, so it wins over the set.
+
+.PARAMETER Quality
+  Optional. Applies the picture-first set on top of the tuned set (after -NoTunedSettings too, before -Override):
+  windows and buffers are read fresh each frame instead of kept as card copies, with more VRAM headroom. It costs
+  about half the frame rate: measured about 7 to 9 fps against 14 to 17 for the default set, with 51 to 93 texture
+  refusals against 296 (run auto-ram-2326). Picture first, frame rate second.
+
 .NOTES
   The switch set is Neptune (VIctory Edit.) 2026-11-25c's play.ps1 for the Series X path (no PC FidelityFX DLL, no
-  VICTORY_AUTO_A unless -AutoA). Measured by the maintainer on 2026-11-25 (RTX 4070 SUPER, i7-13700KF, Series X 4K,
-  release build, after warm): about 12 fps in the world. It is tuned for a 16 GB card: on a smaller one, lower
-  VICTORY_CARD_WINDOWS_MB and VICTORY_CARD_BUFFERS_MB first. Discord Rich Presence stays off (VICTORY_DISCORD=0).
+  VICTORY_AUTO_A unless -AutoA), with the measured changes of 2026-11-25 on top (heap pass on dirty slots, copy
+  coalescing, 1536 MB windows, texture room 93 %, idle times 8 s / 2 s / 1 s, 512 MB list pool). Measured by the
+  maintainer on 2026-11-25 (RTX 4070 SUPER, i7-13700KF, Series X 4K, release build, after warm): median about 13.8 fps
+  in the world (15.6 to 17.0 over the last minute), 72.5 ms a frame. VICTORY_CARD_WINDOWS_MB was sized for a 16 GB card:
+  4096 spilled VRAM into system RAM on a 12 GB card; on a smaller card, lower VICTORY_CARD_BUFFERS_MB first.
+  Discord Rich Presence stays off (VICTORY_DISCORD=0).
+  The ocean's height maps are copied back for the title's CPU (VICTORY_OCEAN_READBACK=1), or boats sit on the sea bed.
 
 .EXAMPLE
   .\tools\lancer_victory.ps1 -GameDir D:\Games\MyPackage -Warm
@@ -73,7 +88,9 @@ param(
     [switch]$Dred,
     [string]$XgDll,
     [ValidateSet('real', 'compare')][string]$XgMode = 'real',
-    [switch]$BatchCardRehash
+    [switch]$BatchCardRehash,
+    [switch]$Quality,
+    [hashtable]$Override = @{}
 )
 
 $ErrorActionPreference = 'Stop'
@@ -121,11 +138,15 @@ if ($LASTEXITCODE -ne 0) { throw "cargo build failed (exit code $LASTEXITCODE)."
 $env:VICTORY_GAME_DIR = $GameDir
 # Neptune's Discord Rich Presence stays off (our copy also needs VICTORY_DISCORD=1 to turn it on).
 $env:VICTORY_DISCORD = '0'
+# The title's CPU reads the ocean height maps its wave passes write on the GPU: boats float on them. Off by default in
+# our copy (texback.rs); without it they read memory nothing wrote and boats sit on the sea bed. Linear layouts only
+# (VICTORY_TEXTURE_BACK_MODES left unset): the height maps are linear, XOR modes turned the water to foam.
+$env:VICTORY_OCEAN_READBACK = '1'
 if (-not $NoTunedSettings) {
     # Neptune (VIctory Edit.) 2026-11-25c, play.ps1, Series X path. Its VICTORY_WAVE_OWN_LDS_GROUPS is left out: no code
     # of this tree reads it (Neptune's shader translator, from soldsawn/victory-nvidia-8gb, dropped that wave rule).
     $tuned = [ordered]@{
-        VICTORY_CARD_WINDOWS_MB          = '4096'      # draw data on the card (16 GB card)
+        VICTORY_CARD_WINDOWS_MB          = '1536'      # draw data on the card; 4096 spilled VRAM on a 12 GB card
         VICTORY_BAKE_TEXTURES_MS         = '10000'     # textures uploaded before the character bake
         VICTORY_EARLY_TEXTURES_MS        = '40'
         VICTORY_WIDE_MERGE               = '1'         # shader results merged back on several threads
@@ -148,7 +169,7 @@ if (-not $NoTunedSettings) {
         VICTORY_COPY_CHANGED             = '1'         # only bytes that differ go up to the card
         VICTORY_QUIET_BACK               = '1'         # copied-back shader results are not read again
         VICTORY_LIST_POOL_MOST           = '2048'      # command lists kept, not made anew each frame
-        VICTORY_LIST_POOL_MB             = '2048'
+        VICTORY_LIST_POOL_MB             = '512'
         VICTORY_WIDE_THREADS             = '12'
         VICTORY_UNDER_WRITES_MASKS_LEAST = '1'         # small changes go up in one pass per buffer
         VICTORY_INDIRECT_RAW             = '2'         # indirect draws use the game's own arguments
@@ -159,12 +180,28 @@ if (-not $NoTunedSettings) {
         VICTORY_CARD_WINDOW_UPLOAD       = '1'
         VICTORY_DROP_DXIL                = '1'
         VICTORY_DESC_DATA                = '1'         # shaders that read a descriptor as data translate
-        VICTORY_VRAM_IDLE_MS             = '15000,2500,1000'   # an unused texture is kept 15 s while the card has room
+        VICTORY_VRAM_IDLE_MS             = '8000,2000,1000'    # an unused texture is kept 8 s while the card has room
         VICTORY_PIPELINE_WAIT_MS         = '2500'      # a frame waits at most 2.5 s for a shader being compiled
+        VICTORY_TEXTURE_ROOM_PERCENT     = '93'        # textures use up to 93 % of the card's room
+        VICTORY_HEAP_PASS_DIRTY          = '1'         # the heap pass looks only at slots marked since its last pass
+        VICTORY_COPY_COALESCE            = '256'       # changed runs up to 256 bytes apart go up as one range
     }
     foreach ($name in $tuned.Keys) {
         Set-Item -Path "Env:$name" -Value $tuned[$name]
     }
+}
+if ($Quality) {
+    # Picture first: windows and buffers are read fresh each frame instead of kept as card copies (0 = no windows),
+    # with more VRAM headroom for the textures. About half the frame rate of the default set.
+    $env:VICTORY_CARD_WINDOWS_MB = '0'
+    $env:VICTORY_CARD_BUFFERS_MB = '1024'
+    $env:VICTORY_LIST_POOL_MOST = '256'
+    $env:VICTORY_LIST_POOL_MB = '256'
+    $env:VICTORY_TEXTURE_STAGE_MB = '192'
+}
+foreach ($name in $Override.Keys) {
+    if ($name -notlike 'VICTORY_*') { throw "-Override takes VICTORY_* names only: '$name'." }
+    Set-Item -Path "Env:$name" -Value ([string]$Override[$name])
 }
 if ($AutoA) {
     $env:VICTORY_AUTO_A = '150'

@@ -295,9 +295,9 @@ pub(crate) fn target_format(format: u32) -> u32 {
     // (`VICTORY_RENDER_S`) renders and writes its HDR buffers in it, which
     // no PC GPU does; R11G11B10_FLOAT (26) holds unsigned HDR in the same
     // 32 bits a texel. Without it the texture was refused and the device
-    // was lost with the first pipeline that named it.
-    const STAND_INS: [(u32, u32); 3] = [(86, 28), (115, 28), (67, 26)];
-    let Some(i) = STAND_INS.iter().position(|&(f, _)| f == format) else {
+    // was lost with the first pipeline that named it. `VICTORY_HDR_STANDIN=10` gives
+    // R16G16B16A16_FLOAT instead (see [`hdr_stand_in`]).
+    let Some(i) = stand_ins().iter().position(|&(f, _)| f == format) else {
         return format;
     };
     #[cfg(windows)]
@@ -305,7 +305,7 @@ pub(crate) fn target_format(format: u32) -> u32 {
         use windows::Win32::Graphics::Direct3D12::*;
         static REFUSED: std::sync::OnceLock<[bool; 3]> = std::sync::OnceLock::new();
         let refused = REFUSED.get_or_init(|| {
-            STAND_INS.map(|(f, to)| {
+            stand_ins().map(|(f, _)| {
                 let Some(host) = crate::host::host() else {
                     return false;
                 };
@@ -331,10 +331,32 @@ pub(crate) fn target_format(format: u32) -> u32 {
             })
         });
         if refused[i] {
-            return STAND_INS[i].1;
+            return stand_ins()[i].1;
         }
     }
     format
+}
+
+/// The title's format and the stand-in it gets where the host refuses it (see [`target_format`]).
+fn stand_ins() -> [(u32, u32); 3] {
+    [(86, 28), (115, 28), (67, hdr_stand_in())]
+}
+
+/// The stand-in of R9G9B9E5 (67): R11G11B10_FLOAT (26) by default, which keeps 6 bits of
+/// mantissa for red and green and 5 for blue; `VICTORY_HDR_STANDIN=10` gives
+/// R16G16B16A16_FLOAT (10), 11 bits each at 8 bytes a texel (more card memory and bandwidth,
+/// the precision of the title's bright gradients). A host that renders takes either.
+fn hdr_stand_in() -> u32 {
+    static TO: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *TO.get_or_init(|| parse_hdr_stand_in(std::env::var("VICTORY_HDR_STANDIN").ok().as_deref()))
+}
+
+/// Reads `VICTORY_HDR_STANDIN`: `10` or `26`; anything else is the default.
+fn parse_hdr_stand_in(value: Option<&str>) -> u32 {
+    match value.map(str::trim) {
+        Some("10") => 10,
+        _ => 26,
+    }
 }
 
 /// Whether the host copy of the title texture `this` is in a stand-in
@@ -3270,6 +3292,14 @@ static RESOURCE_FUNCTIONS: Table<32> = {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_hdr_stand_in_follows_its_switch() {
+        assert_eq!(super::parse_hdr_stand_in(None), 26);
+        assert_eq!(super::parse_hdr_stand_in(Some("26")), 26);
+        assert_eq!(super::parse_hdr_stand_in(Some(" 10 ")), 10);
+        assert_eq!(super::parse_hdr_stand_in(Some("garbage")), 26);
+    }
+
     #[test]
     fn slot_eviction_need_is_the_excess_capped_by_the_rate() {
         assert_eq!(super::slot_need(1000, 900, 80, 50), 50);

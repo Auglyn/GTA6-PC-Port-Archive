@@ -1886,6 +1886,51 @@ pub(crate) fn copy_changed() -> bool {
     *ON.get_or_init(|| std::env::var_os("VICTORY_COPY_CHANGED").is_some_and(|v| v == "1"))
 }
 
+/// (fps-neptune) `VICTORY_COPY_COALESCE=<bytes>` (0, off, by default; 256 suggested): changed
+/// runs of one refresh that lie fewer bytes apart than this are sent up as one range. The bytes
+/// between them are the same on the CPU side and the card (nothing of the stretch is being written
+/// by shaders: `update` cut those ranges out), so sending them again changes nothing; what it saves
+/// is ranges (27,661 a frame for 51 MB in run main-neptune-2258).
+fn copy_coalesce_gap() -> usize {
+    static GAP: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *GAP.get_or_init(|| std::env::var("VICTORY_COPY_COALESCE").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(0))
+}
+
+/// `runs` (offset, bytes; in order) with those at most `gap` bytes apart joined.
+fn coalesce_runs(runs: &[(usize, usize)], gap: usize) -> Vec<(usize, usize)> {
+    let mut out: Vec<(usize, usize)> = Vec::with_capacity(runs.len());
+    for &(r, m) in runs {
+        match out.last_mut() {
+            Some(last) if gap > 0 && r <= last.0 + last.1 + gap => last.1 = (r + m).max(last.0 + last.1) - last.0,
+            _ => out.push((r, m)),
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod coalesce_tests {
+    use super::coalesce_runs;
+
+    #[test]
+    fn zero_gap_changes_nothing() {
+        let runs = [(0, 4), (8, 4), (100, 4)];
+        assert_eq!(coalesce_runs(&runs, 0), runs.to_vec());
+    }
+
+    #[test]
+    fn near_runs_join_far_ones_stay() {
+        let runs = [(0, 4), (8, 4), (100, 4), (300, 4)];
+        assert_eq!(coalesce_runs(&runs, 16), vec![(0, 12), (100, 4), (300, 4)]);
+        assert_eq!(coalesce_runs(&runs, 100), vec![(0, 104), (300, 4)]);
+    }
+
+    #[test]
+    fn touching_and_contained_runs() {
+        assert_eq!(coalesce_runs(&[(0, 8), (8, 4), (2, 2)], 1), vec![(0, 12)]);
+    }
+}
+
 /// (Neptune) Whether windows outside buffers with a card side keep no CPU side
 /// (`VICTORY_CARD_WINDOW_UPLOAD=1`; off by default): the pages the title changed are copied
 /// at refresh into pooled upload memory (`crate::windowup`) and sent from there. Such a
@@ -3548,8 +3593,9 @@ impl Shadow {
         let Some(card) = &self.card else {
             return;
         };
+        let merged = coalesce_runs(runs, copy_coalesce_gap());
         let mut dirty = card.dirty.lock().unwrap_or_else(|e| e.into_inner());
-        for &(r, m) in runs {
+        for &(r, m) in &merged {
             let (from, to) = (at + r, at + r + m);
             match dirty.last_mut() {
                 Some(last) if from <= last.1 && to >= last.0 => *last = (last.0.min(from), last.1.max(to)),

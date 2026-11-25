@@ -7,6 +7,7 @@ model. No game data is used. Builds the translator's example emitters first.
 """
 import argparse
 import json
+import os
 from pathlib import Path
 import re
 import shutil
@@ -115,6 +116,33 @@ def command_for(name, emitters, tools, host, work):
     return command + ["--work", str(work / name), "--output", str(work / f"{name}.json")]
 
 
+def vulkan_device_name(adapter, summary):
+    """The device name `vulkaninfo --summary` lists for a PCI vendor:device ID, or None."""
+    wanted = tuple(int(part, 16) for part in adapter.split(":"))
+    for block in re.split(r"^GPU\d+:\s*$", summary, flags=re.MULTILINE)[1:]:
+        fields = dict(re.findall(r"^\s*(vendorID|deviceID|deviceName)\s*=\s*(.+?)\s*$", block, re.MULTILINE))
+        if (int(fields.get("vendorID", "-1"), 16), int(fields.get("deviceID", "-1"), 16)) == wanted:
+            return fields.get("deviceName")
+    return None
+
+
+def select_adapter(adapter):
+    """Have vkd3d-proton and DXVK expose only the requested adapter.
+
+    The guests create their device on the default adapter, so on a machine
+    with several GPUs they would otherwise run on whichever one comes first.
+    """
+    try:
+        summary = subprocess.run(["vulkaninfo", "--summary"], capture_output=True, text=True,
+                                 timeout=60).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    name = vulkan_device_name(adapter, summary)
+    if name:
+        os.environ.update(VKD3D_FILTER_DEVICE_NAME=name, DXVK_FILTER_DEVICE_NAME=name)
+    return name
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
     for name in ("provider", "proton", "prefix", "compiler-dir", "dxc", "work"):
@@ -135,6 +163,9 @@ def main(argv=None):
         ap.error("choose a fresh work directory")
     work.mkdir(parents=True)
     emitters = build_emitters()
+    device = select_adapter(a.adapter)
+    print(f"adapter {a.adapter.lower()}: {device or 'default Vulkan device (vulkaninfo did not list it)'}",
+          flush=True)
     host = {"provider": a.provider.resolve(), "proton": a.proton.resolve(), "prefix": a.prefix.resolve(),
             "compiler-dir": a.compiler_dir.resolve(), "adapter": a.adapter.lower()}
     results = []

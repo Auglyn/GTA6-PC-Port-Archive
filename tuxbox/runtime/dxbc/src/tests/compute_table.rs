@@ -187,11 +187,13 @@ fn multi_table_raster_buffer_views_follow_psv() {
     ]));
     // PSV must confirm the view type: a raw UAV named typed is refused.
     assert_eq!(root_bindings(&raster_shader(0, &user, &used, &[[6, 1, 2, 2], [3, 2, 3, 3]]), 0, &root), None);
-    // Under a single-table root the same typed SRV buffer keeps its old result.
+    // A single-table root reads the same typed SRV buffer; root-less callers do not.
     let single = tables_then(&[RootParamKind::Table(Vec::new()),
         RootParamKind::Constants { register: 500, space: 0, num32: 1 }]);
     let typed = raster_shader(0, &[[3, 16, 1, 3, 0x008]], &[[0x300, 16, 3, 4, 0x0804]], &[[3, 2, 3, 3]]);
-    assert_eq!(root_bindings(&typed, 0, &single), None);
+    assert_eq!(root_bindings(&typed, 0, &single), Some(vec![
+        Binding { table: 0, kind: 0, register: 3, space: 2, slot: 2 },
+    ]));
     assert_eq!(bindings(&typed, 0), None);
     let uav = raster_shader(0, &[[3, 8, 1, 2, 0x008]], &[[0x303, 8, 2, 1, 0x0804]], &[[7, 1, 2, 2]]);
     assert_eq!(root_bindings(&uav, 0, &single), None);

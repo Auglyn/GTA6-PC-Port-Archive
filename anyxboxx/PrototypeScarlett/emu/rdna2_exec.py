@@ -96,6 +96,8 @@ class Wave:
     def write_scalar(self, code, value, width=1):
         if code == NULL:
             return
+        if code + width > SCALAR_REGISTERS:     # ex. : masque wave64 dans s127, s128 n'existe pas
+            raise Untranslated(f"écriture de {32 * width} bits au-delà de s127 (s{code})")
         self.s[code] = value & MASK32
         if width == 2:
             self.s[code + 1] = (value >> 32) & MASK32

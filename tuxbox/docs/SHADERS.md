@@ -140,6 +140,12 @@ On November 25, 2026, preparation compiled 20,583 of 25,079 recorded requests an
 
 The counts are per recorded request, so they overstate what a live run loses: a request recorded without its root signature can't be translated offline. Rank failures by the pipelines a run lost with the [pipeline failure record](PROJECTSCARLETT.md#finding-why-pipelines-fail).
 
+### Block dispatcher
+
+When a program's loops can't be nested, the translator puts its basic blocks into one loop in which each thread runs the block it is at. The blocks are tested in program order on the thread's current block, so one pass follows every forward jump and only a jump back needs another. One test skips 24 blocks.
+
+Such programs are compiled without DXC's lifetime markers, or at `-O0` when that fails or the target is `cs_6_6`. At the default level with the markers, RADV (Mesa 26.1.8) spent 130 seconds and 20 GB on one ProjectScarlett pixel program. Without them it took 0.1 seconds.
+
 ### Whole-wave branches
 
 The console branches once per wave, but the translator normally branches once per thread. Where its targeted checks can't show that this is safe around a wave operation, it now branches with the whole wave: branches on EXEC and VCC vote across the wave, as do the condition codes set by mask operations ([analysis](../tools/shader-compiler/src/hlsl/lockstep.rs)). It refuses programs that use a lane mask as a number, or a number as a lane mask. Ray tracing resolve programs, which already keep whole masks, also translate now when their loops go through the block dispatcher.
