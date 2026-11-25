@@ -91,8 +91,7 @@ enum NeutralIdentity {
     // v_add_nc_u32 (0) and v_add_f32 (0.0 == 0x00000000). Accept ConstInt or
     // Literal encodings of the same bits.
     Immediate(i64),
-    // Neutral held in a VGPR: floating extrema materialize +/-inf with a
-    // literal move (v_mov_b32) before the AND and CNDMASK.
+    // Exact literal bits, used directly or materialized by a preceding v_mov_b32.
     LiteralBits(u32),
 }
 
@@ -107,6 +106,9 @@ fn masked_prologue(insns: &[Insn], first: usize, identity: NeutralIdentity) -> O
         }
         (NeutralIdentity::Immediate(v), Opnd::Literal(k)) if k == v as u32 => {
             (Opnd::Literal(k), None, None)
+        }
+        (NeutralIdentity::LiteralBits(bits), Opnd::Literal(k)) if k == bits => {
+            (ident, None, None)
         }
         (NeutralIdentity::LiteralBits(bits), Opnd::Vgpr(reg)) => {
             (Opnd::Vgpr(reg), Some(reg), Some(bits))
@@ -152,10 +154,12 @@ fn masked_prologue(insns: &[Insn], first: usize, identity: NeutralIdentity) -> O
 
 fn masked_identity(operation: &str) -> Option<NeutralIdentity> {
     match operation {
-        "v_or_b32" | "v_max_u32" => Some(NeutralIdentity::Immediate(0)),
+        "v_or_b32" | "v_xor_b32" | "v_max_u32" => Some(NeutralIdentity::Immediate(0)),
         "v_and_b32" | "v_min_u32" => Some(NeutralIdentity::Immediate(-1)),
         "v_add_nc_u32" => Some(NeutralIdentity::Immediate(0)),
         "v_add_f32" => Some(NeutralIdentity::Immediate(0)),
+        "v_min_i32" => Some(NeutralIdentity::LiteralBits(i32::MAX as u32)),
+        "v_max_i32" => Some(NeutralIdentity::LiteralBits(i32::MIN as u32)),
         "v_min_f32" => Some(NeutralIdentity::LiteralBits(f32::INFINITY.to_bits())),
         "v_max_f32" => Some(NeutralIdentity::LiteralBits(f32::NEG_INFINITY.to_bits())),
         _ => None,
@@ -237,13 +241,28 @@ pub(super) fn lower(insns: &mut [Insn], first: usize) -> Result<(u32, usize), &'
 
     // The first three DPP8 shuffles accumulate pairs, quads and octets.
     // DPP16 row_mirror combines the two octets in each 16-lane row.
-    let controls = [0xde54c1, 0x936012, 0x000924, 0xff0940];
-    for (i, (&ctrl, ins)) in controls.iter().zip(&block[2..6]).enumerate() {
-        let selector = if i == 3 { 250 } else { 233 };
-        if &ins.mnemonic != operation
-            || ins.dst != [Opnd::Vgpr(acc)]
-            || ins.src != [Opnd::Raw(selector), Opnd::Vgpr(acc)]
-            || ins.raw.get(1) != Some(&(ctrl << 8 | u32::from(acc)))
+    for (step, ins) in block[2..6].iter().enumerate() {
+        let [Opnd::Raw(selector), rhs] = ins.src[..] else {
+            return Err("unrecognized DPP reduction shuffle");
+        };
+        let Some(&word) = ins.raw.get(1) else {
+            return Err("missing DPP reduction control");
+        };
+        // SAVEEXEC enabled every lane, so FI has no effect.
+        let valid = if step == 3 {
+            // ROW_MIRROR also stays in bounds. Preserve the row/bank masks and modifiers.
+            selector == 250 && (word & !((1 << 18) | (1 << 19))) >> 8 == 0xff0140
+        } else {
+            // Each lane holds a partial for its half. The selected lane must hold
+            // the complementary half of the same pair, quad or octet.
+            let selectors = word >> 8;
+            matches!(selector, 233 | 234) && (0..8).all(|lane| {
+                let partner = (selectors >> (3 * lane)) & 7;
+                (partner >> step) == ((lane >> step) ^ 1)
+            })
+        };
+        if !valid || word as u8 != acc || rhs != Opnd::Vgpr(acc)
+            || &ins.mnemonic != operation || ins.dst != [Opnd::Vgpr(acc)]
         {
             return Err("unrecognized DPP reduction shuffle");
         }
@@ -502,6 +521,13 @@ fn execz_forward_guard(
             if op.enc == Enc::Sopp && (Emitter::branch_cond(op.op).is_some() || op.op == 1) {
                 let from = op.offset as i64;
                 let target_edge = from + 4 + 4 * op.aux.imm;
+                // An earlier EXECZ or SCC branch past the whole region is a
+                // decision of the whole wave: `check_control_flow` checks it
+                // as a skip of this region in its own right, and votes it if
+                // it is an EXECZ. So the wave still arrives here together.
+                if from < pc && target_edge > reduction_end as i64 && matches!(op.op, 4 | 5 | 8) {
+                    continue;
+                }
                 // Every invocation must reach the guard's wave vote. A forward
                 // rejoin at the guard is safe; bypasses and enclosing loops are not.
                 if (from < pc && target_edge > pc)
@@ -776,7 +802,7 @@ pub(super) fn check_control_flow(insns: &[Insn], width: u32) -> Result<BTreeSet<
 
 // Only a complete, single guest wave64 may use group rendezvous. Every
 // branch must be proven group-uniform and every collective must be one of the
-// exact recognized integer reductions. All other programs keep the native path.
+// exact recognized reductions. All other programs keep the native path.
 pub(super) fn portable_single_wave(insns: &[Insn]) -> bool {
     let mut covered = vec![false; insns.len()];
     let mut masks = Vec::new();
@@ -789,20 +815,17 @@ pub(super) fn portable_single_wave(insns: &[Insn]) -> bool {
         let Some(block) = insns.get(start..start + 12) else { return false };
         // The same group-shared exchange works for the already verified
         // extrema pattern, but only with the direct saved-EXEC predicate.
-        // A floating identity move belongs to the protected region too.
+        // A materialized identity belongs to the protected region too.
         let operation = i.mnemonic.as_str();
-        if !matches!(operation, "v_add_nc_u32" | "v_min_u32" | "v_max_u32" |
-            "v_min_f32" | "v_max_f32") { return false; }
-        let floating = matches!(operation, "v_min_f32" | "v_max_f32");
-        let Some(covered_start) = start.checked_sub(usize::from(floating)) else { return false };
+        if !matches!(operation, "v_add_nc_u32" | "v_add_f32" | "v_min_u32" | "v_max_u32" | "v_min_i32" | "v_max_i32" |
+            "v_and_b32" | "v_or_b32" | "v_xor_b32" | "v_min_f32" | "v_max_f32") { return false; }
+        let Some((covered_start, _, _)) = masked_identity(operation)
+            .and_then(|identity| masked_prologue(insns, first, identity)) else { return false };
+        if covered_start != start && !(covered_start + 1 == start && block[0].mnemonic == "v_mov_b32") {
+            return false;
+        }
         let save = &insns[covered_start];
         let [Opnd::Sgpr(saved)] = save.dst[..] else { return false };
-        if floating {
-            let identity = if operation == "v_min_f32" { 0x7f800000 } else { 0xff800000 };
-            if block[0].mnemonic != "v_mov_b32" || block[0].src != [Opnd::Literal(identity)]
-                || block[0].dst.len() != 1 || block[1].src.first() != block[0].dst.first()
-            { return false; }
-        }
         if saved >= 105 || saved % 2 != 0 || save.mnemonic != "s_or_saveexec_b64"
             || save.src != [Opnd::ConstInt(-1)]
             || block[1].mnemonic != "v_cndmask_b32"
@@ -866,8 +889,9 @@ pub(super) fn portable_single_wave(insns: &[Insn]) -> bool {
         let lane_local = matches!(i.mnemonic.as_str(),
             "v_mov_b32" | "v_add_nc_u32" | "v_sub_nc_u32" | "v_subrev_nc_u32"
             | "v_and_b32" | "v_or_b32" | "v_xor_b32" | "v_lshlrev_b32"
-            | "v_lshrrev_b32" | "v_mul_lo_u32" | "v_add_f32" | "v_mul_f32"
+            | "v_lshrrev_b32" | "v_mul_lo_u32" | "v_add_f32" | "v_mul_f32" | "v_ldexp_f32"
             | "s_mov_b32" | "s_movk_i32" | "s_add_u32" | "s_sub_u32"
+            | "s_getpc_b64" | "s_lshl_b32" | "s_bitcmp0_b32" | "s_bitcmp1_b32" | "s_cselect_b32"
             | "s_cmp_eq_u32" | "s_cmp_lg_u32" | "s_cmp_gt_u32" | "s_cmp_ge_u32"
             | "s_cmp_lt_u32" | "s_cmp_le_u32" | "s_cmp_eq_i32" | "s_cmp_lg_i32"
             | "s_cmp_gt_i32" | "s_cmp_ge_i32" | "s_cmp_lt_i32" | "s_cmp_le_i32")
@@ -1038,6 +1062,87 @@ mod tests {
     }
 
     #[test]
+    fn row_mirror_reduction_accepts_either_bound_ctrl_with_full_masks() {
+        for width in [32, 64] {
+            let (mut shader, mut words, _) = fixture::shader(width);
+            let reference = super::super::translate(&shader).unwrap();
+            for word in &mut words {
+                if *word == 0xff09_4002 { *word = 0xff01_4002; }
+            }
+            shader.isa = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+            shader.isa_data = shader.isa.clone();
+            let translated = super::super::translate(&shader).unwrap();
+            assert_eq!(translated.hlsl, reference.hlsl);
+            assert_eq!(translated.required_wave_size, reference.required_wave_size);
+
+            for bit in [1 << 24, 1 << 28] {
+                let mut ops = crate::rdna2::disassemble(&shader.isa);
+                let mirror = ops.iter().position(|i| i.raw.get(1) == Some(&0xff01_4002)).unwrap();
+                ops[mirror].raw[1] ^= bit;
+                assert!(lower(&mut ops, mirror - 3).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn full_exec_reduction_ignores_fetch_inactive_at_each_shuffle() {
+        for width in [32, 64] {
+            let (mut shader, words, _) = fixture::shader(width);
+            let expected = super::super::translate(&shader).unwrap();
+            // Three DPP8 selectors followed by the DPP16 ROW_MIRROR control word.
+            for word_index in [3, 5, 7, 10] {
+                let mut changed = words.clone();
+                if word_index == 10 {
+                    changed[word_index] |= 1 << 18;
+                } else {
+                    changed[word_index] += 1; // DPP8 FI=1 uses selector 234 instead of 233.
+                }
+                shader.isa = changed.iter().flat_map(|w| w.to_le_bytes()).collect();
+                shader.isa_data = shader.isa.clone();
+                let translated = super::super::translate(&shader).unwrap();
+                assert_eq!(translated.hlsl, expected.hlsl);
+                assert_eq!(translated.required_wave_size, expected.required_wave_size);
+
+                let mut ops = crate::rdna2::disassemble(&shader.isa);
+                ops[0].src = vec![Opnd::ConstInt(0)];
+                assert!(lower(&mut ops, 2).is_err(), "reduction requires full EXEC");
+            }
+        }
+    }
+
+    #[test]
+    fn dpp8_reductions_read_from_the_complementary_subgroup() {
+        for width in [32, 64] {
+            let (mut shader, mut words, _) = fixture::shader(width);
+            // Each lane picks its XOR-2 partner, then its XOR-4 partner.
+            words[6] = 0xb3e2_1a02;
+            words[8] = 0x688f_ac02;
+            shader.isa = words.iter().flat_map(|word| word.to_le_bytes()).collect();
+            shader.isa_data = shader.isa.clone();
+            let translated = super::super::translate(&shader).unwrap();
+            let lane = if width == 32 { "WaveGetLaneIndex()" } else { "gtid.x" };
+            for distance in [2, 4] {
+                assert!(translated.hlsl.contains(&format!("{lane} ^ {distance}u")));
+            }
+
+            // An asymmetric table must retain its individual source lanes.
+            words[8] = 0x4c1d_e502; // [5, 4, 7, 6, 1, 0, 3, 2]
+            shader.isa = words.iter().flat_map(|word| word.to_le_bytes()).collect();
+            shader.isa_data = shader.isa.clone();
+            let mixed = super::super::translate(&shader).unwrap();
+            assert!(mixed.hlsl.contains(&format!("0x4c1de5u >> (3u * ({lane} & 7u))")));
+
+            // One destination reading its own half would double-count a partial sum.
+            for (word_index, distance) in [(4, 1), (6, 2), (8, 4)] {
+                let mut invalid = words.clone();
+                invalid[word_index] ^= distance << 8;
+                let isa = invalid.iter().flat_map(|word| word.to_le_bytes()).collect::<Vec<_>>();
+                assert!(lower(&mut crate::rdna2::disassemble(&isa), 2).is_err());
+            }
+        }
+    }
+
+    #[test]
     fn translates_two_native_reductions_with_a_uniform_scc_guard() {
         for width in [32, 64] {
             // GFX1030 instructions assembled with llvm-mc, with the four DPP
@@ -1081,8 +1186,58 @@ mod tests {
     }
 
     #[test]
+    fn bitwise_and_float_sum_reductions_use_shared_memory_only_for_a_single_wave64() {
+        for (opcode, neutral, combine) in [
+            (0x36, 0xc1, ") & v2;"), (0x38, 0x80, ") | v2;"),
+            (0x3a, 0x80, ") ^ v2;"), (0x06, 0x80, ")) + asfloat(v2))"),
+        ] {
+            let (mut shader, mut words, end) = fixture::shader(64);
+            words.truncate(end);
+            words[2] = (words[2] & !0xff) | neutral;
+            for word in &mut words {
+                if *word >> 24 == 0x4a { *word = (opcode << 24) | (*word & 0xffffff); }
+            }
+            words.push(0xbf81_0000);
+            shader.isa = words.iter().flat_map(|word| word.to_le_bytes()).collect();
+            shader.isa_data = shader.isa.clone();
+            let single = super::super::translate(&shader).unwrap();
+            assert_eq!(single.required_wave_size, None);
+            assert!(single.hlsl.lines().any(|line| line.contains("tb_reduction_read(gtid.x")
+                && line.contains(combine)));
+
+            shader.isa_preamble = [0, 128, 1, 1];
+            let multi = super::super::translate(&shader).unwrap();
+            assert_eq!(multi.required_wave_size, Some(64));
+        }
+    }
+
+    #[test]
+    fn portable_wave_can_scale_its_result_from_an_embedded_table() {
+        let (mut shader, mut words, end) = fixture::shader(64);
+        words.truncate(end);
+        words.extend([
+            0xbe9a1f00, 0xbf0d8005, 0x851c8084, // GETPC; bit-test group ID; choose offset 4 or 0
+            0xf400074d, 0x38000028, 0xbf8cc07f, // load exponent into s29 and wait
+            0x7e0c0207, 0xd7620006, 0x00003b06, // move reduction result s7; LDEXP v6,v6,s29
+            0x8f1e8805, 0xbf810000,             // scale group ID for output addressing; endpgm
+        ]);
+        shader.isa = words.iter().flat_map(|word| word.to_le_bytes()).collect();
+        shader.isa_data = shader.isa.clone();
+        shader.isa_data.extend([u32::MAX, 2].into_iter().flat_map(u32::to_le_bytes));
+        assert_eq!(super::super::translate(&shader).unwrap().required_wave_size, None);
+        shader.isa_preamble = [0, 128, 1, 1];
+        assert_eq!(super::super::translate(&shader).unwrap().required_wave_size, Some(64));
+
+        let mut ops = crate::rdna2::disassemble(&shader.isa);
+        super::super::lower_wave_reductions(&mut ops).unwrap();
+        let load = ops.iter_mut().find(|i| i.mnemonic == "s_load_dword").unwrap();
+        load.raw[1] &= 0x01ffffff; // SOFFSET s0 would expose the saved EXEC mask.
+        assert!(!portable_single_wave(&ops));
+    }
+
+    #[test]
     fn portable_extrema_requires_direct_exec_and_no_mask_escape() {
-        for operation in ["umin", "umax", "fmin", "fmax"] {
+        for operation in ["umin", "umax", "smin", "smax", "fmin", "fmax"] {
             let ex = fixture::extrema(64, operation);
             let translated = super::super::translate(&ex).unwrap();
             assert_eq!(translated.required_wave_size, None);
@@ -1095,7 +1250,7 @@ mod tests {
             let mut altered = ops.clone();
             altered[select].src[2] = Opnd::Sgpr(8);
             assert!(!portable_single_wave(&altered));
-            if operation.starts_with('f') {
+            if matches!(operation, "smin" | "smax" | "fmin" | "fmax") {
                 let mut altered = ops.clone();
                 altered[select-1].src[0] = Opnd::Literal(0);
                 assert!(!portable_single_wave(&altered));
@@ -1106,6 +1261,41 @@ mod tests {
             assert!(!portable_single_wave(&altered));
             let native = fixture::extrema(32, operation);
             assert_eq!(super::super::translate(&native).unwrap().required_wave_size, Some(32));
+        }
+    }
+
+    #[test]
+    fn extrema_accept_the_same_identity_as_a_direct_literal() {
+        for op in ["smin", "smax", "fmin", "fmax"] {
+            let mut shader = fixture::extrema(64, op);
+            let mut words: Vec<u32> = shader.isa.chunks_exact(4)
+                .map(|b| u32::from_le_bytes(b.try_into().unwrap())).collect();
+            // Replace the literal move and register CNDMASK with a literal CNDMASK.
+            let select = [words[3], (words[4] & !0x1ff) | 0xff, words[2]];
+            words.splice(1..5, select);
+            shader.isa = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+            shader.isa_data = shader.isa.clone();
+            let translated = super::super::translate(&shader).unwrap();
+            assert_eq!(translated.required_wave_size, None);
+            assert!(translated.hlsl.contains("tb_reduction_read(gtid.x"));
+
+            words[3] ^= 1;
+            let isa = words.iter().flat_map(|w| w.to_le_bytes()).collect::<Vec<_>>();
+            assert!(lower(&mut crate::rdna2::disassemble(&isa), 2).is_err());
+        }
+    }
+
+    #[test]
+    fn signed_extrema_with_an_unproven_shuffle_cannot_become_lane_local() {
+        for operation in ["smin", "smax"] {
+            let mut shader = fixture::extrema(64, operation);
+            let mut words: Vec<u32> = shader.isa.chunks_exact(4)
+                .map(|b| u32::from_le_bytes(b.try_into().unwrap())).collect();
+            let shuffle = words.iter_mut().find(|w| **w == 0xde54_c102).unwrap();
+            *shuffle ^= 1 << 8; // Lane zero now reads itself instead of its partner.
+            shader.isa = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+            shader.isa_data = shader.isa.clone();
+            assert!(super::super::translate(&shader).is_err());
         }
     }
 
@@ -1254,6 +1444,41 @@ mod tests {
             ops.push(nop());
             edge(&mut ops, 1, after, 8);
             assert_eq!(check_control_flow(&ops, width).unwrap(), BTreeSet::from([1]));
+        }
+    }
+
+    #[test]
+    fn execz_forward_skip_accepts_earlier_skips_of_the_whole_region() {
+        // The shape compilers emit for nested conditions: an outer skip, then
+        // the guard, both leaving past the reduction.
+        for width in [32, 64] {
+            for (outer, extra) in [(8, 0), (8, 1), (5, 0)] {
+                let mut ops = vec![nop(), branch(outer), nop(), branch(8)];
+                ops.extend(masked_reduction(width, 7));
+                let after = ops.len();
+                ops.extend([nop(), nop()]);
+                edge(&mut ops, 1, after + extra, outer);
+                edge(&mut ops, 3, after, 8);
+                // Each EXECZ is voted on by the whole wave.
+                let voted = if outer == 8 { BTreeSet::from([1, 3]) } else { BTreeSet::from([3]) };
+                assert_eq!(check_control_flow(&ops, width).unwrap(), voted, "outer {outer} width {width}");
+            }
+        }
+    }
+
+    #[test]
+    fn execz_forward_skip_rejects_earlier_branches_it_cannot_vote_on() {
+        for width in [32, 64] {
+            // A divergent skip, and an outer skip that lands inside the region.
+            for (outer, inside) in [(6, false), (7, false), (9, false), (8, true), (5, true)] {
+                let mut ops = vec![nop(), branch(outer), nop(), branch(8)];
+                ops.extend(masked_reduction(width, 7));
+                let after = ops.len();
+                ops.push(nop());
+                edge(&mut ops, 1, if inside { 7 } else { after }, outer);
+                edge(&mut ops, 3, after, 8);
+                assert!(check_control_flow(&ops, width).is_err(), "outer {outer} width {width}");
+            }
         }
     }
 

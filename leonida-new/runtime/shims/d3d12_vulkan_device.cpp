@@ -34,6 +34,7 @@
 #include "../src/gfx10_descriptors.h"
 #include "../src/depth24_fragment.h"
 #include "../src/rgba4_fragment.h"
+#include "../src/dual_source_fragment.h"
 #include "../src/rect_list_geometry.h"
 #include "../src/uav_clear.h"
 #include "../src/vulkan_bindless.h"
@@ -8326,6 +8327,22 @@ public:
                 packed_color_mask|=1u<<i;
             }
         }
+        // Dual-source blending (RT-DUAL-SOURCE-BLEND): a SRC1 factor reads the pixel shader's SV_Target1, which the
+        // translator declares at Location 1 and Vulkan takes from Location 0, Index 1 (dual_source_fragment.h).
+        bool dual_source = false;
+        for (UINT i = 0; i < desc.NumRenderTargets; ++i) {
+            const auto& b = desc.BlendState.RenderTarget[desc.BlendState.IndependentBlendEnable ? i : 0];
+            const auto src1 = [](D3D12_BLEND f) {
+                return f == D3D12_BLEND_SRC1_COLOR || f == D3D12_BLEND_INV_SRC1_COLOR || f == D3D12_BLEND_SRC1_ALPHA ||
+                       f == D3D12_BLEND_INV_SRC1_ALPHA;
+            };
+            if (b.BlendEnable &&
+                (src1(b.SrcBlend) || src1(b.DestBlend) || src1(b.SrcBlendAlpha) || src1(b.DestBlendAlpha)))
+                dual_source = true;
+        }
+        // Kept for a lazy pipeline too: build() makes the fragment words again through rewrite_fragment().
+        rgba4_mask_ = packed_color_mask;
+        dual_source_ = dual_source;
         bool uses_bindless = false;  // a stage declares set-0 bindings: the layout holds the device's set 0
         std::vector<VkPipelineShaderStageCreateInfo> stage_infos;
         // Chained from stage_infos, which the recipe keeps for variants built at draw time: so they live in the recipe.
@@ -8423,7 +8440,15 @@ public:
                 code_stage = &stage;
             }
             stage.words = library->spirv(*stage.entry);
-            if(stage.bit==VK_SHADER_STAGE_FRAGMENT_BIT && packed_color_mask && !leonida::rgba4::quantize(stage.words,packed_color_mask)) return E_INVALIDARG;
+            if (stage.bit == VK_SHADER_STAGE_FRAGMENT_BIT) {
+                std::string why;
+                if (!rewrite_fragment(stage.words, why)) {
+                    if (why.rfind("has no second colour output", 0) == 0)
+                        return stream_unsupported("a SRC1 blend factor needs the pixel shader's second colour output; "
+                                                  "this module's outputs do not fit Location 0 Index 1; stage", 0);
+                    return E_INVALIDARG;
+                }
+            }
             if (stage.words.empty()) return E_FAIL;
             const auto inner = leonida::conservative_raster::inner_coverage_requirements(stage.words);
             if (!inner.valid) return E_INVALIDARG;
@@ -9447,6 +9472,21 @@ private:
     // stages (VS or MS, GS, PS) read again, the f16 halves linked, the D24 fragment patch, then the generated stages
     // (the rectangle-list geometry stage from the vertex stage, the depth-only fragment stage). False with `why` when
     // a file went missing since.
+    // The rewrites a pixel shader's words get for this pipeline, the same at creation and in a lazy build():
+    // quantising B4G4R4A4 targets stored as RGBA8, then moving SV_Target1 to Location 0, Index 1 for a SRC1 blend
+    // factor (RT-DUAL-SOURCE-BLEND).
+    bool rewrite_fragment(std::vector<std::uint32_t>& words, std::string& why) const {
+        if (rgba4_mask_ && !leonida::rgba4::quantize(words, rgba4_mask_)) {
+            why = "could not be quantised for a B4G4R4A4 target stored as RGBA8";
+            return false;
+        }
+        if (dual_source_ && !leonida::dual_source::remap(words)) {
+            why = "has no second colour output at Location 1 for a SRC1 blend factor";
+            return false;
+        }
+        return true;
+    }
+
     bool stage_words(std::vector<std::vector<std::uint32_t>>& words, std::string& why) const {
         const leonida::ShaderLibrary* library = device_.library();
         if (!library) {
@@ -9463,8 +9503,8 @@ private:
                 why = source.entry->name + ".spv is missing or not SPIR-V";
                 return false;
             }
-            if (source.slot == 2 && rgba4_mask_ && !leonida::rgba4::quantize(words[i], rgba4_mask_)) {
-                why = source.entry->name + " could not be quantised for a B4G4R4A4 target stored as RGBA8";
+            if (source.slot == 2 && !rewrite_fragment(words[i], why)) {
+                why = source.entry->name + ": " + why;
                 return false;
             }
             if (source.slot == 0) vs = i;
@@ -9529,6 +9569,7 @@ private:
     bool f16_linked_ = false; // graphics: the VS and PS words had their f16 halves linked
     leonida::Depth24Bias depth24_bias_{};
     unsigned rgba4_mask_ = 0;  // graphics: the B4G4R4A4 targets stored as RGBA8 that the pixel shader is quantised for
+    bool dual_source_ = false; // graphics: a SRC1 blend factor; the pixel shader's SV_Target1 is Location 0, Index 1
     std::vector<StageSource> sources_;
     struct Request { VkPipeline handle{}; unsigned long long skips = 0; };
     using Requests = std::map<std::uint32_t, Request>;

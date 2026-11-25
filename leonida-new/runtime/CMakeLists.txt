@@ -690,7 +690,8 @@ if(WIN32 AND LEONIDA_BUILD_WINDOWS_RUNTIME)
   endif()
   if(NOT (LEONIDA_SDL3 AND TARGET SDL3::SDL3-static))
     # Nothing served gameinput.dll in a build without SDL3, so the loader fell through to the host's gameinput.dll and
-    # that one answers GameInputCreate with a null interface the title dereferences. Keep the object identity honest.
+    # that one answers GameInputCreate with a null interface the title dereferences. Keep the object identity honest,
+    # and with LEONIDA_INPUT_SCRIPT serve one pad driven by the script (shims/gameinput_script.h, shared with SDL3's).
     target_sources(gta6rt PRIVATE shims/gameinput_no_sdl.cpp)
     add_executable(gameinput_no_sdl_test
       test/gameinput_no_sdl_test.cpp
@@ -1389,8 +1390,19 @@ if(BUILD_TESTING)
   add_test(NAME descriptor_table COMMAND descriptor_table_test)
   add_executable(shader_library_test test/shader_library_test.cpp)
   add_test(NAME shader_library COMMAND shader_library_test)
+  add_executable(native_pso_blend_test test/native_pso_blend_test.cpp)
+  add_test(NAME native_pso_blend COMMAND native_pso_blend_test)
+  add_executable(native_pso_depth_test test/native_pso_depth_test.cpp)
+  add_test(NAME native_pso_depth COMMAND native_pso_depth_test)
+  if(WIN32)
+    # The slot 57 factory retries only a pipeline that blends a B4G4R4A4 stand-in target (d3d12.h types).
+    add_executable(native_pso_fallback_test test/native_pso_fallback_test.cpp)
+    add_test(NAME native_pso_fallback COMMAND native_pso_fallback_test)
+  endif()
   add_executable(spirv_f16_halves_test test/spirv_f16_halves_test.cpp)
   add_test(NAME spirv_f16_halves COMMAND spirv_f16_halves_test)
+  add_executable(dual_source_fragment_test test/dual_source_fragment_test.cpp)
+  add_test(NAME dual_source_fragment COMMAND dual_source_fragment_test)
   # Optional: skips unless LEONIDA_SHADERS names a translated work folder (<work>/shaders/spirv).
   add_executable(shader_library_corpus_test test/shader_library_corpus_test.cpp)
   add_test(NAME shader_library_corpus COMMAND shader_library_corpus_test)
@@ -1657,6 +1669,8 @@ if(BUILD_TESTING)
   add_test(NAME active_input COMMAND active_input_test)
   if(WIN32 AND TARGET gameinput_no_sdl_test)
     add_test(NAME gameinput_no_sdl COMMAND gameinput_no_sdl_test)
+    # LEONIDA_INPUT_SCRIPT without SDL3: the scripted pad, its device callbacks and its readings on a fake clock.
+    add_test(NAME gameinput_no_sdl_script COMMAND gameinput_no_sdl_test --input-script)
   endif()
   if(WIN32 AND TARGET gameinput_test)
     add_test(NAME gameinput COMMAND gameinput_test)
@@ -3179,17 +3193,18 @@ if(TARGET Vulkan::Headers)
       get_filename_component(LEONIDA_SPIRV_TOOLS_DIR ${LEONIDA_SPIRV_AS} DIRECTORY)
       file(TO_NATIVE_PATH "${LEONIDA_SPIRV_TOOLS_DIR}" LEONIDA_SPIRV_TOOLS_NATIVE)
       set(LEONIDA_M15_FILES ${LEONIDA_M15_DIR}/spirv/index.json ${LEONIDA_M15_DIR}/fssm/vs_m15.fssm
-                            ${LEONIDA_M15_DIR}/fssm/ps_m15.fssm)
+                            ${LEONIDA_M15_DIR}/fssm/ps_m15.fssm ${LEONIDA_M15_DIR}/fssm/ps_m15_dual.fssm)
       add_custom_command(
         OUTPUT ${LEONIDA_M15_FILES}
         COMMAND ${CMAKE_COMMAND} -E remove_directory ${LEONIDA_M15_DIR}
         COMMAND ${CMAKE_COMMAND} -E env "LLVM_MC=${LEONIDA_LLVM_MC}" "LEONIDA_SPIRV_TOOLS=${LEONIDA_SPIRV_TOOLS_NATIVE}"
                 $<TARGET_FILE:Python3::Interpreter> -I ${CMAKE_CURRENT_SOURCE_DIR}/test/shaders/build.py
-                ${LEONIDA_M15_DIR} vs_m15 ps_m15
+                ${LEONIDA_M15_DIR} vs_m15 ps_m15 ps_m15_dual
         DEPENDS ${LEONIDA_TRANSLATOR_DEPS}
                 ${CMAKE_CURRENT_SOURCE_DIR}/test/shaders/vs_m15.asm
                 ${CMAKE_CURRENT_SOURCE_DIR}/test/shaders/ps_m15.asm
-        COMMENT "Translating vs_m15 and ps_m15 for the translated draw test"
+                ${CMAKE_CURRENT_SOURCE_DIR}/test/shaders/ps_m15_dual.asm
+        COMMENT "Translating vs_m15, ps_m15 and ps_m15_dual for the translated draw test"
         VERBATIM)
       add_executable(d3d12_translated_draw_test test/d3d12_translated_draw_test.cpp shims/d3d12_xs_device.cpp shims/d3d12_xs_pso_stream.cpp
                      ${LEONIDA_M15_FILES})
@@ -3203,6 +3218,11 @@ if(TARGET Vulkan::Headers)
       add_test(NAME xbox_derived_mask_restore COMMAND d3d12_translated_draw_test --derived-restore)
 
       set_tests_properties(d3d12_translated_draw PROPERTIES SKIP_RETURN_CODE 77)
+      # Dual-source blending (RT-DUAL-SOURCE-BLEND): with lazy pipelines (the default) and built at creation.
+      add_test(NAME d3d12_dual_source_draw COMMAND d3d12_translated_draw_test --dual-source)
+      add_test(NAME d3d12_dual_source_draw_eager COMMAND d3d12_translated_draw_test --dual-source)
+      set_tests_properties(d3d12_dual_source_draw d3d12_dual_source_draw_eager PROPERTIES SKIP_RETURN_CODE 77)
+      set_tests_properties(d3d12_dual_source_draw_eager PROPERTIES ENVIRONMENT "LEONIDA_LAZY_PIPELINES=0")
 
       # The console's rectangle and quad lists (src/rect_list_geometry.h), through the same translated vs_m15 / ps_m15.
       # The files are d3d12_translated_draw_test's: a second target that lists them runs the translation a second

@@ -1,57 +1,59 @@
-# Contribuer à AnyXboxX
+# Contributing to AnyXboxX
 
-Merci de ton intérêt. Ces règles s'appliquent à toute personne autre que le mainteneur.
+Thanks for your interest. These rules apply to everyone except the maintainer.
 
-Discussion, aide et rapports de test : [Discord](https://discord.gg/TcX42vRyPU)
+Discussion, help and test reports: [Discord](https://discord.gg/TcX42vRyPU)
 
-**Ta copie du jeu est la bienvenue en local.** Tu peux lancer, mesurer, déboguer et analyser ta propre copie de l'exécutable et du build du jeu pour orienter tes PR. Ce qui reste interdit : ajouter au dépôt des fichiers du jeu ou de la console (voir « Ce qui est refusé »).
+**Write issues, pull requests and commit messages in English.**
 
-## Règle principale : tout passe par une pull request
+**Your copy of the game is welcome locally.** You may launch, measure, debug and analyse your own copy of the game's executable and build to steer your pull requests. What stays forbidden: adding game or console files to the repository (see "What is refused").
 
-La branche `main` est protégée. **Personne ne peut y pousser directement.** Pour proposer un changement :
+## Main rule: everything goes through a pull request
 
-1. Fais un fork du dépôt.
-2. Crée une branche depuis `main` : `git checkout -b feat/ma-fonction`.
-3. Ajoute tes commits, avec des messages au format `type: description` (`feat`, `fix`, `docs`, `test`, `refactor`, `chore`).
-4. Lance les tests : `python -m pytest`, puis `python -m ruff check --select W605,F,E9 PrototypeScarlett tests tools`. Tout doit passer.
-5. Ouvre une pull request vers `main` et remplis le modèle proposé : les commandes lancées et leur résultat exact.
+The `main` branch is protected. **Nobody can push to it directly.** To propose a change:
 
-Une pull request n'est fusionnée qu'après la relecture et l'accord du mainteneur, et quand les deux checks de la CI passent :
+1. Fork the repository.
+2. Create a branch from `main`: `git checkout -b feat/my-feature`.
+3. Add your commits, with messages in the form `type: description` (`feat`, `fix`, `docs`, `test`, `refactor`, `chore`).
+4. Run the tests: `python -m pytest`, then `python -m ruff check --select W605,F,E9 PrototypeScarlett tests tools`. Everything must pass.
+5. Open a pull request against `main` and fill in the template: the commands you ran and their exact result.
 
-- `lint` (Linux, ~1 min) : ruff et cohérence des README dans les 9 langues ;
-- `pytest` (Windows) : build du runtime C++ et du Rust, puis toute la suite. Elle vérifie aussi que le nombre de tests annoncé dans les README est exact.
+A pull request is merged only after the maintainer's review and approval, and once both CI checks pass:
 
-### Bonnes pratiques
+- `lint` (Linux, ~1 min): ruff and consistency of the READMEs in the 9 languages;
+- `pytest` (Windows): build of the C++ runtime and the Rust code, then the whole suite. It also checks the test count stated in the READMEs: the hundred below, followed by "+" (806 tests → "800+"). Only change it if your PR crosses a hundred.
 
-- **Une PR = un comportement.** Deux corrections indépendantes vont dans deux PR, plus faciles à relire.
-- **Conflit avec `main`** : fais un rebase (`git fetch && git rebase origin/main`), garde les deux versions quand elles se complètent, relance les tests, puis `git push --force-with-lease`.
-- **Check en échec sans rapport avec ta PR** (test GPU sur WARP, par exemple) : signale-le dans la PR, avec le nom du test et la ligne d'erreur ; le mainteneur relancera le job.
-- **Aide d'une IA** : indique-le dans la description de la PR.
+### Good practice
+
+- **One PR = one behaviour.** Two independent fixes go in two PRs, which are easier to review.
+- **Conflict with `main`**: rebase (`git fetch && git rebase origin/main`), keep both versions when they complement each other, rerun the tests, then `git push --force-with-lease`.
+- **A failing check unrelated to your PR** (a GPU test on WARP, for example): say so in the PR, with the test name and the error line; the maintainer will rerun the job.
+- **AI assistance**: say so in the PR description.
 
 ## Issues
 
-Avant d'écrire du code, tu peux ouvrir une issue :
+Before writing code, you can open an issue:
 
-- **Bogue** : ce que tu as lancé, ce que tu attendais, ce qui s'est passé, le journal ou le rapport `--rapport`.
-- **Fonction à émuler** : le nom exact de la fonction (`dll!Fonction`), sa documentation GDK et le programme qui l'appelle.
-- **Idée** : le problème que l'idée règle.
+- **Bug**: what you ran, what you expected, what happened, the log or the `--rapport` report.
+- **Function to emulate**: the exact function name (`dll!Function`), its GDK documentation and the program that calls it.
+- **Idea**: the problem the idea solves.
 
-Pour un changement important, ouvre d'abord une issue pour en discuter.
+For a large change, open an issue first to discuss it.
 
-## Sources et usage de ta copie du jeu
+## Sources and use of your copy of the game
 
-L'implémentation s'appuie sur des sources publiques : documentation ISA RDNA 2 d'AMD, Microsoft Learn (GDK, Win32, D3D12), tests de LLVM, et code libre sous licence compatible, crédité dans [THIRD_PARTY.md](THIRD_PARTY.md).
+The implementation relies on public sources: AMD's RDNA 2 ISA documentation, Microsoft Learn (GDK, Win32, D3D12), LLVM's tests, and open-source code under a compatible licence, credited in [THIRD_PARTY.md](THIRD_PARTY.md).
 
-Tu peux utiliser ta propre copie de l'exécutable et du build du jeu : le lancer (natif, VIctory via `tools/lancer_victory.ps1`, AnyXboxX), mesurer, déboguer, l'analyser statiquement et dynamiquement, et t'en servir pour orienter tes PR. Les mesures et constats tirés de l'exécution (journaux résumés, comptes, identifiants techniques comme des empreintes de shaders ou des noms de passes, résultats de tests) peuvent être cités dans les PR et dans la doc, avec la manière dont ils ont été obtenus (mesuré, lu statiquement, supposé). La limite : aucun fichier, code ni asset du jeu ou de la console dans le dépôt. Trois choses tirées du jeu sont autorisées, comme dans la politique de VIctory (`docs/asset-policy.md` de VIctory) : les signatures d'octets (motifs courts écrits par nous, avec masques) qui localisent des fonctions ou des données dans l'exécutable, les offsets par build des fonctions qu'on intercepte (sous des noms qu'on choisit), et l'empreinte du build (hash de l'exe, GUID/âge CodeView).
+You may use your own copy of the game's executable and build: launch it (native, VIctory through `tools/lancer_victory.ps1`, AnyXboxX), measure, debug, analyse it statically and dynamically, and use what you learn to steer your PRs. Measurements and findings drawn from running it (summarised logs, counts, technical identifiers such as shader hashes or pass names, test results) may be cited in PRs and in the docs, with how they were obtained (measured, read statically, assumed). The limit: no file, code or asset of the game or the console in the repository. Three things drawn from the game are allowed, as in VIctory's policy (VIctory's `docs/asset-policy.md`): byte-pattern signatures (short patterns written by us, with masks) that locate functions or data in the executable, the per-build offsets of the functions we hook (under names we choose), and the build identity (hash of the executable, CodeView GUID/age).
 
-## Ce qui est refusé
+## What is refused
 
-- Tout fichier du jeu ou de la console ajouté au dépôt : exécutables, DLL, archives `.rpf`, shaders extraits, textures, sons, sauvegardes, dumps, clés, même partiels et même dans les tests.
-- Du code du jeu (sections, routines, code décompilé ou désassemblé au-delà des signatures autorisées) ou des assets copiés du jeu, même relevés sur une copie légitime.
-- Les tables de données propriétaires, sauf exception décidée par le mainteneur : seules des tables constantes sans lesquelles un format ne peut pas être décodé et qu'on ne peut pas recalculer (comme les tables BCPack de VIctory) peuvent être ajoutées, chacune listée nommément dans le registre d'exceptions de `THIRD_PARTY.md`, et la licence du dépôt ne les couvre pas.
-- Les liens vers des copies illégales de jeux.
-- Le code sans test pour une nouvelle fonction émulée.
+- Any game or console file added to the repository: executables, DLLs, `.rpf` archives, extracted shaders, textures, sounds, saves, dumps, keys, even partial ones and even in tests.
+- Game code (sections, routines, decompiled or disassembled code beyond the allowed signatures) or assets copied from the game, even taken from a legitimate copy.
+- Proprietary data tables, unless the maintainer decides an exception: only constant tables without which a format cannot be decoded and that cannot be recomputed (like VIctory's BCPack tables) may be added, each one named in the exceptions register of `THIRD_PARTY.md`, and the repository licence does not cover them.
+- Links to illegal copies of games.
+- Code without a test for a new emulated function.
 
-## Ajouter une fonction émulée
+## Adding an emulated function
 
-Ajoute un gestionnaire décoré par `@hle(...)` dans `PrototypeScarlett/emu/hle/` et un test dans `tests/test_hle.py`. Cite la signature publique de la fonction (documentation Microsoft GDK ou Win32) en commentaire.
+Add a handler decorated with `@hle(...)` in `PrototypeScarlett/emu/hle/` and a test in `tests/test_hle.py`. Quote the function's public signature (Microsoft GDK or Win32 documentation) in a comment.

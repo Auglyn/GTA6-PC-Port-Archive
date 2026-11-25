@@ -26,6 +26,7 @@ pub(crate) struct PipelineData {
     pub(crate) reflected: Option<std::sync::Arc<ComputeTable>>,
     pub(crate) raster_table: Option<std::sync::Arc<ComputeTable>>,
     pub(crate) null_usage: Option<std::sync::Arc<crate::diagnostics::null_usage::Tag>>,
+    pub(crate) compute_threads: Option<[u32; 3]>,
 }
 
 const _: () = assert!(
@@ -211,6 +212,7 @@ unsafe fn create_pipeline_x_inner(
         Ok(layout) => layout,
         Err(error) => return error.code(),
     };
+    let guest_threads = tuxbox_dxbc::shader_compute_threads(bytes);
     let (translation, reflected) = match layout {
         Some(TableLayout::Reflected(table)) => {
             // Embedded RTS0 cannot be replaced. The translator reads that original
@@ -220,7 +222,7 @@ unsafe fn create_pipeline_x_inner(
             let Some(code) = code else {
                 super::compute_table::capture_stage_root(bytes, &table.original);
                 crate::diagnostics::compute_failure(bytes, E_NOTIMPL.0);
-                return unsafe { null_compute(this, root.map(|p| &p.native), desc, out) }.unwrap_or(E_NOTIMPL);
+                return unsafe { null_compute(this, root.map(|p| &p.native), desc, guest_threads, out) }.unwrap_or(E_NOTIMPL);
             };
             (Some(code), Some(table))
         }
@@ -231,6 +233,15 @@ unsafe fn create_pipeline_x_inner(
             super::shader_cache::compute_with_root(bytes, root?.state.payload())
         }), None),
     };
+    let compute_threads = guest_threads
+        .or_else(|| translation.as_deref().and_then(tuxbox_dxbc::shader_compute_threads));
+    let code = translation.as_deref().unwrap_or(bytes);
+    if let Some(refusal) = unsupported_wave_size(this, code) {
+        crate::diagnostics::compute_wave_failure(bytes, &refusal.detail);
+        crate::failures::refusal("CS", &refusal.tag);
+        return unsafe { null_compute(this, root.map(|p| &p.native), desc, compute_threads, out) }
+            .unwrap_or(E_INVALIDARG);
+    }
     let scene_root = if let Some(translated) = &translation {
         match super::compute_scene::private_root(
             &this.native,
@@ -245,7 +256,6 @@ unsafe fn create_pipeline_x_inner(
     } else {
         None
     };
-    let code = translation.as_deref().unwrap_or(bytes);
     let label = super::shader_cache::source_digest(bytes)
         .map(|hash| format!("CS {}", &hash[..8]))
         .unwrap_or_else(|| "CS".to_string());
@@ -310,7 +320,7 @@ unsafe fn create_pipeline_x_inner(
             crate::big_stack::PipelineWait::Deferred => {
                 // The original guest shader would be a second long driver compile.
                 unsafe { ManuallyDrop::drop(&mut host.pRootSignature) };
-                return unsafe { null_compute(this, root.map(|p| &p.native), desc, out) }.unwrap_or(E_NOTIMPL);
+                return unsafe { null_compute(this, root.map(|p| &p.native), desc, compute_threads, out) }.unwrap_or(E_NOTIMPL);
             }
         }
     };
@@ -321,7 +331,7 @@ unsafe fn create_pipeline_x_inner(
             crate::big_stack::PipelineWait::Ready(result) => result,
             crate::big_stack::PipelineWait::Deferred => {
                 unsafe { ManuallyDrop::drop(&mut host.pRootSignature) };
-                return unsafe { null_compute(this, root.map(|p| &p.native), desc, out) }.unwrap_or(E_NOTIMPL);
+                return unsafe { null_compute(this, root.map(|p| &p.native), desc, compute_threads, out) }.unwrap_or(E_NOTIMPL);
             }
         };
     }
@@ -329,7 +339,7 @@ unsafe fn create_pipeline_x_inner(
     if let Err(error) = &native {
         if let Some(root) = root { super::compute_table::capture_stage_root(bytes, &root.state); }
         crate::diagnostics::compute_failure(bytes, error.code().0);
-        if let Some(status) = unsafe { null_compute(this, root.map(|p| &p.native), desc, out) } {
+        if let Some(status) = unsafe { null_compute(this, root.map(|p| &p.native), desc, compute_threads, out) } {
             return status;
         }
     } else if let Some(table) = &reflected {
@@ -346,6 +356,7 @@ unsafe fn create_pipeline_x_inner(
             PipelineData {
                 scene_root,
                 reflected,
+                compute_threads,
                 ..Default::default()
             },
             out,
@@ -404,7 +415,8 @@ fn owned_compile(
 
 /// Create a resource-free compute pipeline on the guest root (see `fallback`).
 unsafe fn null_compute(
-    this: &Device, root: Option<&ID3D12RootSignature>, desc: &D3D12_COMPUTE_PIPELINE_STATE_DESC, out: Out,
+    this: &Device, root: Option<&ID3D12RootSignature>, desc: &D3D12_COMPUTE_PIPELINE_STATE_DESC,
+    compute_threads: Option<[u32; 3]>, out: Out,
 ) -> Option<HRESULT> {
     use super::fallback::{Stage, bytecode, enabled, shader, substituted};
     if !enabled() { return None; }
@@ -428,5 +440,68 @@ unsafe fn null_compute(
         })
     });
     substituted("compute");
-    Some(unsafe { wrap_pageable(native, &PIPELINE, this, PipelineData { null_usage, ..Default::default() }, out) })
+    Some(unsafe { wrap_pageable(native, &PIPELINE, this, PipelineData { null_usage, compute_threads, ..Default::default() }, out) })
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct WaveRefusal {
+    pub(super) detail: String,
+    pub(super) tag: String,
+}
+
+/// Returns `Some(WaveRefusal)` when `required` `[min, max]` has no overlap with `host`.
+pub(super) fn check_wave_range(required: (u32, u32), host: (u32, u32)) -> Option<WaveRefusal> {
+    let (req_min, req_max) = required;
+    let (host_min, host_max) = host;
+    if host_min == 0 || host_max < host_min || req_min > req_max {
+        return None;
+    }
+    if req_min <= host_max && host_min <= req_max {
+        return None;
+    }
+    let (detail, tag) = if req_min == req_max {
+        (
+            format!("host lacks wave{req_min} (supported wave range [{host_min}, {host_max}])"),
+            format!("host-lacks-wave{req_min}"),
+        )
+    } else {
+        (
+            format!(
+                "host wave range [{host_min}, {host_max}] excludes WaveSize [{req_min}, {req_max}]"
+            ),
+            format!("host-wave-range-{host_min}-{host_max}-excludes-{req_min}-{req_max}"),
+        )
+    };
+    Some(WaveRefusal { detail, tag })
+}
+
+/// Returns a refusal if `shader` is portable DXIL whose required wave size is
+/// unsupported by `device`'s `D3D12_FEATURE_D3D12_OPTIONS1` wave lane range.
+pub(super) fn unsupported_wave_size(device: &Device, shader: &[u8]) -> Option<WaveRefusal> {
+    let required = super::shader_cache::portable_wave_range(shader)?;
+    let host = super::dxgi::wave_range(device)?;
+    check_wave_range(required, host)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wave_range_compatibility_checks_interval_overlap() {
+        let wave64_refusal = check_wave_range((64, 64), (32, 32)).unwrap();
+        assert_eq!(wave64_refusal.tag, "host-lacks-wave64");
+        assert!(wave64_refusal.detail.contains("host lacks wave64"));
+        assert_eq!(check_wave_range((64, 64), (32, 64)), None);
+        assert_eq!(check_wave_range((64, 64), (64, 64)), None);
+        assert_eq!(check_wave_range((32, 32), (32, 32)), None);
+        assert_eq!(check_wave_range((32, 32), (32, 64)), None);
+        assert_eq!(check_wave_range((32, 64), (32, 32)), None);
+        let wave32_refusal = check_wave_range((32, 32), (64, 64)).unwrap();
+        assert_eq!(wave32_refusal.tag, "host-lacks-wave32");
+        let range_refusal = check_wave_range((64, 128), (32, 32)).unwrap();
+        assert_eq!(range_refusal.tag, "host-wave-range-32-32-excludes-64-128");
+        assert_eq!(check_wave_range((64, 64), (0, 0)), None);
+        assert_eq!(check_wave_range((64, 64), (64, 32)), None);
+    }
 }

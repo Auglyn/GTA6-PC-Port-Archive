@@ -14,7 +14,7 @@ Depuis `80d58f8` (branche `anyxboxx/fork-7b0-lot9-murs`), l'épinglage porte aus
 
 - Trois commits à nous, `xg:` (`1f0fe1d`, puis les versions reprises des commits `4466d2e` et `a16f040` du fork) : le HLE de `xg_xs.dll` répond maintenant exactement comme la DLL de Microsoft (mips de queue en mode parent avec position ; tuilage 64 Kio indexé par sous-ressource, mips empaquetés à zéro, compte = mips standard dans la place donnée). Un test de `victory-hle` compare 54 descriptions avec la vraie DLL quand `VICTORY_XG_DLL` est posé. Mesuré en jeu par le mainteneur : 0 écart avec la DLL. La DLL n'est donc plus nécessaire pour ce gain ; le lanceur garde `-XgDll` comme oracle.
 - Précompilation hors ligne, portage de la pull request #282 de `fxceless/victory-fork` (t4l03) : `victory translate --cache --pipelines [--used-pipelines] <shaders.rpf> <exe> <dlls>` traduit les shaders et construit les pipelines avant le jeu. La clé du cache ne dépend plus de l'exécutable. Un commit d'adaptation à nous retire `shader_opt` de la clé (le commit `1684989` du fork n'est pas dans notre base). Le lanceur la lance avec `-Precompile`.
-- Sept pull requests du fork, reprises avec `cherry-pick -x` (auteurs dans [THIRD_PARTY.md](../THIRD_PARTY.md)) : #349, #355, #396, #386, #358 (2 commits), #353, #374, plus un commit d'adaptation des tests de #353.
+- Sept pull requests du fork, reprises avec `cherry-pick -x` (auteurs dans [THIRD_PARTY.md](../../THIRD_PARTY.md)) : #349, #355, #396, #386, #358 (2 commits), #353, #374, plus un commit d'adaptation des tests de #353.
 
 | Pull request du fork | Auteur | Effet |
 | --- | --- | --- |

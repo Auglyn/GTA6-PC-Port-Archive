@@ -1,26 +1,26 @@
-name: Bogue
-description: Signaler un comportement incorrect de l'émulateur
+name: Bug
+description: Report incorrect behaviour of the emulator (please write in English)
 labels: [bogue]
 body:
   - type: textarea
     id: etapes
     attributes:
-      label: Étapes pour reproduire
-      description: Commande lancée ou bouton utilisé.
+      label: Steps to reproduce
+      description: Command run or button used.
     validations:
       required: true
   - type: textarea
     id: attendu
     attributes:
-      label: Résultat attendu et résultat obtenu
+      label: Expected result and actual result
     validations:
       required: true
   - type: textarea
     id: journal
     attributes:
-      label: Journal ou rapport de compatibilité
+      label: Log or compatibility report
       render: text
   - type: input
     id: version
     attributes:
-      label: Version de Windows et de Python
+      label: Windows and Python version

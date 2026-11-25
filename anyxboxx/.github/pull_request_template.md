@@ -1,36 +1,36 @@
-## Changement
+## Change
 
-<!-- Le comportement observable qui change, et pourquoi. Une seule chose relisible par PR. -->
+<!-- Please write in English. The observable behaviour that changes, and why. One reviewable thing per PR. -->
 
-Issue liée : Fixes # / Refs #
+Linked issue: Fixes # / Refs #
 
-## Vérification
+## Verification
 
-<!-- Pour chaque vérification : la commande exacte et son résultat (copie la dernière ligne).
-     GPU : carte ou WARP, et la première différence s'il y en a une.
-     Si tu n'as pas pu lancer une vérification, dis-le et nomme ce qui manquait. -->
+<!-- For each check: the exact command and its result (copy the last line).
+     GPU: card or WARP, and the first difference if there is one.
+     If you could not run a check, say so and name what was missing. -->
 
 ```
 python -m pytest                → … passed
 python -m ruff check --select W605,F,E9 PrototypeScarlett tests tools → All checks passed!
 ```
 
-## Oracle et données de test
+## Oracle and test data
 
-<!-- Décodeur : comparé aux tables LLVM (`tools/rdna2_mnemonics.py … --verifier`).
-     Traduction HLSL : comparée à l'interpréteur de référence, octet par octet.
-     Nouvelles données de test : d'où elles viennent (construites dans les tests, LLVM…) et leur licence.
-     Cas d'échec : quel test échoue sans ce changement ? -->
+<!-- Decoder: compared with the LLVM tables (`tools/rdna2_mnemonics.py … --verifier`).
+     HLSL translation: compared with the reference interpreter, byte for byte.
+     New test data: where it comes from (built in the tests, LLVM…) and its licence.
+     Failure case: which test fails without this change? -->
 
-## Liste de contrôle
+## Checklist
 
-- [ ] La PR couvre un seul comportement relisible.
-- [ ] Un test échoue sans ce changement et passe avec.
-- [ ] Les commandes et résultats de chaque vérification sont indiqués ci-dessus.
-- [ ] Une fonction non implémentée renvoie une erreur (`E_NOTIMPL`), jamais un faux succès.
-- [ ] README : la même modification dans les 9 langues (le test `test_readme_sync.py` le vérifie).
-- [ ] Aucun fichier de jeu, de console ou de SDK, aucune clé, aucun dump, aucun lien de téléchargement.
-- [ ] Constats tirés d'un titre : limités à ce que permet la règle 2 d'`AGENTS.md` (noms, slots, formes d'arguments, valeurs de flags, HRESULT, IID, comptes), avec la manière dont ils ont été obtenus ; aucune adresse ni RVA.
-- [ ] Code repris d'un autre projet : licence compatible et crédit dans `THIRD_PARTY.md`.
+- [ ] The PR covers a single reviewable behaviour.
+- [ ] A test fails without this change and passes with it.
+- [ ] The commands and results of each check are given above.
+- [ ] An unimplemented function returns an error (`E_NOTIMPL`), never a fake success.
+- [ ] README: the same change in all 9 languages (`test_readme_sync.py` checks it).
+- [ ] No game, console or SDK file, no key, no dump, no download link.
+- [ ] Findings drawn from a title: limited to what rule 2 of `AGENTS.md` allows (names, slots, argument shapes, flag values, HRESULTs, IIDs, counts), with how they were obtained; no address or RVA.
+- [ ] Code taken from another project: compatible licence and credit in `THIRD_PARTY.md`.
 
-<!-- Si ce changement a été fait avec l'aide d'une IA, indique-le ici. -->
+<!-- If this change was made with AI assistance, say so here. -->

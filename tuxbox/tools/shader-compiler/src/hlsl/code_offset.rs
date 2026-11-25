@@ -41,6 +41,17 @@ pub(super) fn possible_bits(ops: &[Insn], targets: &std::collections::BTreeSet<i
     match (ins.mnemonic.as_str(), ins.src.as_slice()) {
         ("s_mov_b32", [a]) => bits(a),
         ("s_and_b32", [a,b]) => Some(bits(a)? & bits(b)?),
+        // Any bit possible in either operand may survive XOR or the SCC selection.
+        ("s_or_b32" | "s_xor_b32" | "s_cselect_b32", [a,b]) => {
+            Some(bits(a).unwrap_or(u32::MAX) | bits(b).unwrap_or(u32::MAX))
+        }
+        ("s_bfe_u32", [data, control]) => {
+            let Some(field) = literal(control) else { return Some(u32::MAX); };
+            let offset = field & 31;
+            let width = (field >> 16) & 127;
+            let mask = if width >= 32 { u32::MAX } else { (1u32 << width) - 1 };
+            Some((bits(data).unwrap_or(u32::MAX) >> offset) & mask)
+        }
         ("s_lshl_b32", [a,b]) => Some(bits(a)? << (literal(b)? & 31)),
         ("s_lshr_b32", [a,b]) => Some(bits(a)? >> (literal(b)? & 31)),
         _ => Some(u32::MAX),

@@ -30,7 +30,8 @@ SUITES = (*BASE_SUITES, "d3d12-mesh", *OPTIONAL_PROVIDERS)
 # The scenarios of `lanes.exe --selftest`, one gate each.
 LANES_SCENARIOS = ("labels", "cross-queue", "compute-frame", "skipped-command", "copy-memory", "shared-texture",
                    "indirect-dispatch", "texture-readback",
-                   "ray-tracing-builder")
+                   "ray-tracing-builder", "thread-dimensions",
+                   "descriptor-reclaim")
 
 
 class LanesShader:
@@ -267,6 +268,18 @@ def screen_capture_problem(display=None, library=None, xauthority=None):
     return ROOTLESS_X if errors else None
 
 
+def missing_provider_imports(modules, provider, expected):
+    """Return missing expected static imports, resolving #ordinal imports via provider exports."""
+    found = {symbol for mod in modules if mod["module"].lower() == provider.name.lower()
+             for symbol in mod["symbols"]}
+    ordinals = [int(symbol[1:]) for symbol in found if symbol.startswith("#") and symbol[1:].isdigit()]
+    if ordinals and not set(expected).issubset(found):
+        slots, _ = export_table(provider)
+        for ordinal in ordinals:
+            found.update(slots.get(ordinal, ()))
+    return sorted(set(expected) - found)
+
+
 def verify(host, output, adapter, selected=None, samples=1):
     if adapter and not re.fullmatch(r"[0-9a-fA-F]{4}:[0-9a-fA-F]{4}", adapter):
         raise ValueError("Adapter must be a PCI vendor:device pair in hexadecimal")
@@ -316,11 +329,9 @@ def verify(host, output, adapter, selected=None, samples=1):
                             raise ValueError("Expected device creation from desktop d3d12.dll")
                     for dll, symbols in providers.items():
                         provider = stage(dll, folder)
-                        found = {symbol for mod in modules if mod["module"].lower() == provider.name.lower()
-                                 for symbol in mod["symbols"]}
-                        missing = set(symbols) - found
+                        missing = missing_provider_imports(modules, provider, symbols)
                         if missing:
-                            raise ValueError(f"Missing static guest imports from {provider.name}: {sorted(missing)}")
+                            raise ValueError(f"Missing static guest imports from {provider.name}: {missing}")
                 for dependency in dependencies:
                     stage(dependency, folder)
                 if config:
@@ -694,6 +705,8 @@ GATE_LABELS = {
     "lanes-selftest-texture-readback": "A guest texture copied back to title memory",
     "lanes-benchmark": "Lanes frame, submission, fence handover, copy and pipeline timings",
     "lanes-selftest-ray-tracing-builder": "Single, copied and batched builds through XboxBvhBuilder",
+    "lanes-selftest-thread-dimensions": "Slot 80 thread-dimension dispatch converted using the bound PSO group size",
+    "lanes-selftest-descriptor-reclaim": "Shader-visible descriptor slot reclamation across completed, in-flight, ClearState, and OOM lists",
     "lanes-shader-cache-prepared": "A console shader translated before launch, loaded from the prepared cache",
     "lanes-shader-cache-compiled": "A console shader translated by the host worker while the game runs",
     "lanes-shader-cache-reused": "The worker's translation reused on the next launch without compiling",

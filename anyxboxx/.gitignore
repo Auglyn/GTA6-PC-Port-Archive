@@ -5,10 +5,12 @@ __pycache__/
 *.pyc
 .coverage
 .pytest_cache/
+.ruff_cache/
 /runtime/build/
 
 # Rust
 rust/target/
 
-# Paramètres Claude Code personnels
+# Paramètres et worktrees Claude Code personnels
 .claude/settings.local.json
+.claude/worktrees/

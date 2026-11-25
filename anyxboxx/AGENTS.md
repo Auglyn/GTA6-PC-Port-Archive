@@ -1,6 +1,6 @@
 # AGENTS.md — AnyXboxX
 
-Guide for AI coding agents and contributors working in this repository. Human contribution rules (fork, pull request, review) are in [CONTRIBUTING.md](CONTRIBUTING.md), in French.
+Guide for AI coding agents and contributors working in this repository. Human contribution rules (fork, pull request, review) are in [CONTRIBUTING.md](CONTRIBUTING.md). Issues, pull requests and commit messages are written in English.
 
 ## What the project is
 
@@ -14,12 +14,14 @@ AnyXboxX is a GPL-3.0-or-later prototype that runs Xbox Series X (GDK, "Scarlett
 | `PrototypeScarlett/emu/` | Python: PE loader, Unicorn machine, HLE handlers (`hle/`), native mode (`native/`), reports |
 | `PrototypeScarlett/emu/rdna2*.py` | RDNA 2: decoder, operands, reference interpreter (`rdna2_exec*`), HLSL recompiler (`rdna2_hlsl*`), GPU runner glue (`rdna2_gpu.py`) |
 | `PrototypeScarlett/emu/rdna2_ops.py`, `rdna2_shapes.py` | **Generated** from LLVM's public encoding tests by `tools/rdna2_mnemonics.py` and `tools/rdna2_shapes.py`. Never edit by hand. |
-| `runtime/` | C++ runtime DLLs (`xgameruntime`, `xmem`, `d3d12_xs`, `kernelx`, `anyxboxx_tls`), native launcher `anyxboxx.exe`, GPU runner `anyxboxx_gpu_run.exe` |
+| `runtime/` | C++ runtime DLLs (`xgameruntime`, `xmem`, `d3d12_xs`, `kernelx`, `anyxboxx_tls`), native launcher `anyxboxx.exe`, GPU runner `anyxboxx_gpu_run.exe`. `runtime/third_party/libhttpclient-task/` is Microsoft's MIT `Task` module, kept as is. |
 | `rust/` | Rust workspace. `anyxboxx-rdna2` bridges to TomBox's RDNA 2 decoder; `anyxboxx-texture` decodes BC7 and GFX10 `SW_4K_S` tiles (ported from Xbox2Windows); `anyxboxx-audio` decodes XMA2 with TomBox's FFmpeg port. |
 | `third_party/tombox/` | Git submodule: [omonkeyz/xbox-emulator](https://github.com/omonkeyz/xbox-emulator) (TomBox continuation, GPL-3.0-or-later since its commit `51f5319`, MIT OR Apache-2.0 before), pinned commit. Do not edit; propose changes upstream. |
 | `third_party/leonida/` | Unchanged frozen copies of Leonida's translators, called by `PrototypeScarlett`. The Leonida project was deleted on 2026-11-24 and its submodule removed; nothing tracks it any more. |
-| `tools/` | Generators and comparison tools (GDK interface table, kernelx exports, RDNA 2 tables, TomBox comparison) |
-| `tests/` | pytest suite (about 220 tests) |
+| `third_party/xbox2windows/` | Unchanged copies of [R0Y00/Xbox2Windows](https://github.com/R0Y00/Xbox2Windows) tools (MIT, DXIL retarget), commit in its README; refreshed by `tools/sync_voisins.py`. |
+| `tools/` | Generators (GDK interface table, kernelx exports, RDNA 2 tables), comparison and measurement tools (TomBox, FSSM, Xbox compiler probe, GPU check), `jour_j.py`, the VIctory launcher `lancer_victory.ps1`, neighbour watch (`sync_voisins.py`, `veille.py`) |
+| `site/` | GitHub Pages site, published as is by `.github/workflows/pages.yml` |
+| `tests/` | pytest suite (the README table holds the current test count) |
 | `docs/` | Research notes and logs, in English. `docs/fr/` holds the French version of each document (same tree). `docs/i18n/` holds the 8 README translations. |
 
 ## Setup and commands
@@ -48,8 +50,8 @@ cargo build --release --manifest-path rust/Cargo.toml
 3. **No fake success.** An unimplemented function returns `E_NOTIMPL` (or the console's error) and is logged; an untranslated instruction raises an error that names it.
 4. **Verify against an oracle.** Decoder changes are checked against the LLVM tables (`python tools/rdna2_mnemonics.py <llvm .s folder> --verifier`); every HLSL translation is checked against the reference interpreter, byte for byte, on GPU or WARP.
 5. **Tests with every change.** New behaviour comes with a test that fails without it.
-6. **README in 9 languages.** `README.md` (English) and `docs/i18n/README.*.md` must stay in sync: same table rows, same test count, same images. Image text is in English.
-7. **Git**: `main` is protected; work on a branch and open a pull request; CI (`.github/workflows/tests.yml`) must pass. Commit messages: `type: description` (`feat`, `fix`, `docs`, `test`, `refactor`, `chore`), written in French like the history.
+6. **README in 9 languages.** `README.md` (English) and `docs/i18n/README.*.md` must stay in sync: same table rows, same test count (rounded down to the hundred, written `800+`, checked by `tests/test_readme_sync.py`), same images. Image text is in English.
+7. **Git**: `main` is protected; work on a branch and open a pull request; CI (`.github/workflows/tests.yml`) must pass. Commit messages: `type: description` (`feat`, `fix`, `docs`, `test`, `refactor`, `chore`), written in English (older history is in French).
 8. **Code style**: small focused files (under about 400 lines), small functions, explicit error handling, no hidden mutation of shared state, constants instead of magic numbers where it helps reading.
 9. **Native mode runs code unsandboxed.** Only run trusted test programs with `--natif` or `anyxboxx.exe`.
 

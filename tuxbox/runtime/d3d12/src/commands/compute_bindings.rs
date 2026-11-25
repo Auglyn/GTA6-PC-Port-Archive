@@ -69,7 +69,7 @@ impl SceneCheck {
 }
 
 pub(super) enum Pipeline {
-    Regular(ID3D12PipelineState, Option<SceneRoot>, Option<Arc<ComputeTable>>, Option<Arc<ComputeTable>>),
+    Regular(ID3D12PipelineState, Option<SceneRoot>, Option<Arc<ComputeTable>>, Option<Arc<ComputeTable>>, Option<[u32; 3]>),
     Ray(ID3D12StateObject),
 }
 
@@ -109,7 +109,7 @@ pub(super) enum Argument {
 
 impl From<&GuestPipeline> for Pipeline {
     fn from(p: &GuestPipeline) -> Self {
-        Self::Regular(p.native.clone(), p.state.scene_root.clone(), p.state.reflected.clone(), p.state.raster_table.clone())
+        Self::Regular(p.native.clone(), p.state.scene_root.clone(), p.state.reflected.clone(), p.state.raster_table.clone(), p.state.compute_threads)
     }
 }
 
@@ -245,16 +245,24 @@ impl Bindings {
         }
     }
 
+    pub(super) fn compute_threads(&self) -> Option<[u32; 3]> {
+        match self.pipeline.as_ref() {
+            Some(Pipeline::Regular(.., threads)) => *threads,
+            _ => None,
+        }
+    }
+
     pub(super) fn reflected_table<const COMPUTE: bool>(&self) -> Option<&ComputeTable> {
         match &self.pipeline {
-            Some(Pipeline::Regular(_, _, compute, raster)) => if COMPUTE { compute.as_deref() } else { raster.as_deref() },
+            Some(Pipeline::Regular(_, _, compute, raster, _)) => if COMPUTE { compute.as_deref() } else { raster.as_deref() },
             _ => None,
         }
     }
 
     pub(super) fn with_reflected_table<const COMPUTE: bool>(
         &self, table: &ComputeTable, guest: &super::List,
-        arena: Option<&crate::device::descriptor_paging::Arena>,
+        arena: Option<&Arc<crate::device::descriptor_paging::Arena>>,
+        leases: &mut crate::device::descriptor_paging::DescriptorLeases,
         heap: Option<&super::descriptors::ResourceHeap>, reads: &mut Vec<std::ops::Range<usize>>,
         resources: &crate::device::MediaResources, dispatch: impl FnOnce(),
     ) -> Result<()> {
@@ -271,7 +279,7 @@ impl Bindings {
                 table
             } else { self.graphics_tables.get(&slot).ok_or(E_INVALIDARG)? };
             bases[index] = Some(match arena.filter(|a| a.contains(bound.logical.ptr)) {
-                Some(arena) => arena.gpu_table(bound.logical.ptr, length, table.layout.inline_ranges(index))?,
+                Some(arena) => arena.gpu_table(bound.logical.ptr, length, table.layout.inline_ranges(index), leases)?,
                 None => bound.native,
             });
         }
@@ -280,7 +288,7 @@ impl Bindings {
             // Global indices originate in shader data. Any resident SRV can
             // sample placed textures and needs the usual pre-submit upload.
             super::descriptors::include_range(reads, heap.cpu.clone());
-            Some((binding.slot, heap.index_map(guest, arena, resources)?))
+            Some((binding.slot, heap.index_map(guest, arena.map(Arc::as_ref), resources)?))
         } else {
             if table.layout.direct_resources {
                 super::descriptors::include_range(reads, heap.cpu.clone());
@@ -334,7 +342,7 @@ impl Bindings {
 
     pub(super) fn scene_root(&self) -> Option<&SceneRoot> {
         match self.pipeline.as_ref() {
-            Some(Pipeline::Regular(_, root, _, _)) => root.as_ref(),
+            Some(Pipeline::Regular(_, root, _, _, _)) => root.as_ref(),
             _ => None,
         }
     }
@@ -374,7 +382,9 @@ impl Bindings {
     }
 
     pub(super) fn refresh_inline_tables<const COMPUTE: bool>(
-        &self, arena: Option<&crate::device::descriptor_paging::Arena>,
+        &self,
+        arena: Option<&Arc<crate::device::descriptor_paging::Arena>>,
+        leases: &mut crate::device::descriptor_paging::DescriptorLeases,
     ) -> Result<()> {
         let Some(arena) = arena.filter(|arena| arena.uses_inline_records()) else {
             return Ok(());
@@ -392,7 +402,7 @@ impl Bindings {
                 self.graphics_tables.get(&slot)
             };
             if let Some(bound) = bound.filter(|bound| arena.contains(bound.logical.ptr)) {
-                arena.gpu_table(bound.logical.ptr, *length, self.inline_ranges::<COMPUTE>(slot as usize))?;
+                arena.gpu_table(bound.logical.ptr, *length, self.inline_ranges::<COMPUTE>(slot as usize), leases)?;
             }
         }
         Ok(())
@@ -516,7 +526,7 @@ impl Bindings {
                 host.SetGraphicsRootDescriptorTable(slot, base.native);
             }
             match self.pipeline.as_ref() {
-                Some(Pipeline::Regular(pso, _, _, _)) => host.SetPipelineState(pso),
+                Some(Pipeline::Regular(pso, _, _, _, _)) => host.SetPipelineState(pso),
                 Some(Pipeline::Ray(pso)) => host.SetPipelineState1(pso),
                 None => {}
             }
