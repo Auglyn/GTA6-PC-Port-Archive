@@ -25,10 +25,15 @@ def _interpolate(wave, name, fields):
 
     if fields["attr"] >= graphics.PARAMETER_COUNT:
         raise Untranslated(f"{name} : attribut {fields['attr']} au-delà de param{graphics.PARAMETER_COUNT - 1}")
-    address = graphics.parameter_address(wave.primitive, fields["attr"], fields["chan"])
-    p0, p10, p20 = wave.memory.read_words(address, 3)
+    primitives = getattr(wave, "primitives", None)
+    cache = {}
     destination, source = wave.v[fields["vdst"]], fields["vsrc"]
     for lane in wave.active():
+        primitive = primitives.get(lane, wave.primitive) if primitives is not None else wave.primitive
+        if primitive not in cache:
+            address = graphics.parameter_address(primitive, fields["attr"], fields["chan"])
+            cache[primitive] = wave.memory.read_words(address, 3)
+        p0, p10, p20 = cache[primitive]
         if name == "v_interp_p1_f32":
             destination[lane] = _multiply_add(p10, wave.v[source][lane], p0)
         elif name == "v_interp_p2_f32":
@@ -78,11 +83,38 @@ def run_vertex(data, vertex, sgprs, memory):
     return {target: lanes[0] for target, lanes in wave.exports.items()}
 
 
-def run_pixel(data, i_bits, j_bits, primitive, sgprs, memory):
-    """Exports {cible: [4 mots]} du pixel shader pour un pixel (v0 = i, v1 = j)."""
+def run_pixel_wave(data, pixels, primitive, sgprs, memory, exec_mask=None):
+    """Exports {cible: {ligne: [4 mots]}} du pixel shader pour un wave32 (1 à 32 pixels).
+
+    `pixels` : liste [(i, j), ...] (lignes 0..n-1) ou dict {ligne: (i, j)}.
+    `primitive` : indice de primitive commun (int), ou par ligne (dict {ligne: prim} ou liste).
+    `exec_mask` : masque EXEC initial (par défaut les bits des lignes présentes dans `pixels`)."""
     from emu import rdna2_exec
 
-    wave = _single_lane_wave(sgprs, memory)
-    wave.v[0][0], wave.v[1][0], wave.primitive = i_bits, j_bits, primitive
+    mapping = pixels if isinstance(pixels, dict) else dict(enumerate(pixels))
+    if not mapping or any(not 0 <= lane < rdna2_exec.LANES for lane in mapping):
+        raise ValueError(f"un wave de pixels contient entre 1 et {rdna2_exec.LANES} lignes valides")
+    wave = rdna2_exec.Wave()
+    wave.memory.write(0, memory)
+    default_mask = 0
+    for lane, (i_bits, j_bits) in mapping.items():
+        wave.v[0][lane], wave.v[1][lane] = i_bits, j_bits
+        default_mask |= 1 << lane
+    wave.s[rdna2_exec.EXEC_LO] = default_mask if exec_mask is None else (exec_mask & 0xFFFF_FFFF)
+    for number, value in (sgprs or {}).items():
+        wave.s[number] = value
+    wave.exports = {}
+    if isinstance(primitive, dict):
+        wave.primitive, wave.primitives = 0, dict(primitive)
+    elif isinstance(primitive, (list, tuple)):
+        wave.primitive, wave.primitives = 0, dict(enumerate(primitive))
+    else:
+        wave.primitive, wave.primitives = primitive, None
     rdna2_exec.run(data, wave)
-    return {target: lanes[0] for target, lanes in wave.exports.items()}
+    return {target: dict(lanes) for target, lanes in wave.exports.items()}
+
+
+def run_pixel(data, i_bits, j_bits, primitive, sgprs, memory):
+    """Exports {cible: [4 mots]} du pixel shader pour un pixel (v0 = i, v1 = j)."""
+    exports = run_pixel_wave(data, [(i_bits, j_bits)], primitive, sgprs, memory)
+    return {target: lanes[0] for target, lanes in exports.items()}
