@@ -152,6 +152,21 @@ FETCH_FORMATS = {
     'BUF_FMT_32_FLOAT': (None, ['{0}.Load(a)', '0u', '0u', 'U(1.0)'])}
 
 
+# gfx10 buffer-descriptor FORMAT field (word 3, bits 12..18) for each FETCH_FORMATS entry: the same unified
+# numbers as the tbuffer `format:` operand (tools/disasm_rdna2.py MTBUF_FORMATS; 1 is the omitted default).
+# A MUBUF buffer_load_format_* has no format operand, so its translation switches on this field at run time.
+# A FORMAT the draw should have refused reaches the switch default: every component becomes this NaN pattern
+# (never a finite zero), so a missed validation shows in the readback instead of passing as black.
+DESC_FORMAT_UNKNOWN = 0x7fc0f0f0
+DESC_FORMAT_CODES = {
+    'BUF_FMT_8_UNORM': 1, 'BUF_FMT_8_UINT': 5, 'BUF_FMT_8_8_UNORM': 14, 'BUF_FMT_32_FLOAT': 22,
+    'BUF_FMT_16_16_UNORM': 23, 'BUF_FMT_16_16_SNORM': 24, 'BUF_FMT_16_16_UINT': 27, 'BUF_FMT_16_16_FLOAT': 29, 'BUF_FMT_8_8_8_8_UNORM': 56, 'BUF_FMT_8_8_8_8_UINT': 60,
+    'BUF_FMT_32_32_FLOAT': 64, 'BUF_FMT_16_16_16_16_FLOAT': 71, 'BUF_FMT_32_32_32_FLOAT': 74,
+    'BUF_FMT_32_32_32_32_FLOAT': 77}
+DESC_FORMAT_SHIFT, DESC_FORMAT_MASK = 12, 127
+# Integer formats read a DST_SEL constant 1 as the integer 1, every other format as 1.0.
+DESC_ONE_INTEGER = ('BUF_FMT_8_UINT', 'BUF_FMT_8_8_8_8_UINT')
+
 def starts_with_fetch_call(code):
     return len(code) >= 4 and struct.unpack_from('<I', code)[0] == FETCH_CALL
 
@@ -1664,6 +1679,11 @@ class Stage:
             self.pinned_low16_v = set() # low16_only_v live across basic-block boundaries
             self.whole_read_v = set()   # VGPRs read outside a proven low-16-bit consumer
             self.has_branches = bool(targets)
+            self.entry_table_pointers = {
+                reg: sym[1] for reg, sym in init_sym.items()
+                if isinstance(reg, int) and sym[0] == 'ptr' and sym[1][0] == 'table'
+            }
+            self.descriptor_block_first = 0
             self.uniform_expr = {}    # proven VGPR -> uniform HLSL expression over scalars that defined it
             self.since_join = None    # SGPRs proven uniform since the last branch target (None: none reached)
             self.defined_uniform_s = set(init_entry_uniform)
@@ -1679,12 +1699,14 @@ class Stage:
             start = 0
             raised_unsupported = None
 
-            for off, n, name, asm in self.ins:
+            for instruction_index, (off, n, name, asm) in enumerate(self.ins):
                 if off in targets and off != start:
                     self.pinned_low16_v.update(self.low16_only_v)
                     self.blocks.append((start, self.lines, None))
                     self.lines, start = [], off
+                    self.descriptor_block_first = instruction_index
                 self.pc = off
+                self.descriptor_instruction_index = instruction_index
                 self.scc_effect = None
                 # Before the first branch target or terminator every path has run exactly the instructions above, so
                 # the program-order tracking is exact there even in a program with branches. Code after s_endpgm in a
@@ -1791,6 +1813,7 @@ class Stage:
                     self.pinned_low16_v.update(self.low16_only_v)
                     self.blocks.append((start, self.lines, term))
                     self.lines, start = [], off + n
+                    self.descriptor_block_first = instruction_index + 1
 
             new_bad = self.bad_sgprs - force_unproven
             new_at = {k: v - force_at.get(k, set()) for k, v in bad_at_target.items() if v - force_at.get(k, set())}
@@ -2161,10 +2184,8 @@ class Stage:
             return self.set_v(reg_range(ops[0])[1], text.format(*args))
         if base in SCA:
             return self.scalar(base, ops)
-        if base in ('buffer_load_format_x', 'buffer_load_format_xy',
-                    'buffer_load_format_xyz', 'buffer_load_format_xyzw'):
-            # MUBUF formatted loads take both fields from V# word 3. The startup request carries
-            # the root signature layout, while the descriptor table is supplied at draw time.
+        if base == 'buffer_load_format_xyzw':
+            # Not translated: the four-component form has no startup request that needs it yet.
             raise Unsupported('%s requires descriptor FORMAT and DST_SEL' % base)
         raise Unsupported(base)
 
@@ -3001,6 +3022,47 @@ class Stage:
     def op_buffer_load_dwordx4(self, ops, mods):
         self.op_buffer_load_dword(ops, mods, 4)
 
+    def op_buffer_store_vs(self, ops, mods, count):
+        # Vertex-stage store in the `off` form: scalar byte offset plus the 12-bit immediate, through a
+        # descriptor read from a fixed root-table slot, written to a RWByteAddressBuffer (issue #1723).
+        # The manifest carries the `uav` line the runtime binds; a descriptor may not also be loaded.
+        if self.kind != 'vs':
+            raise Unsupported('buffer store in the %s stage' % self.kind)
+        offset = 0
+        for m in mods:
+            if m.startswith('offset:') and re.fullmatch(r'0x[0-9a-f]+|\d+', m[7:]):
+                offset += int(m[7:], 0)
+            else:
+                raise Unsupported('buffer store modifier %s' % m)
+        if len(ops) != 4 or ops[1] != 'off':
+            raise Unsupported('buffer store without the off address form')
+        src = reg_range(ops[0])
+        if not src or src[0] != 'v' or src[2] - src[1] != count - 1 or src[2] > 255:
+            raise Unsupported('buffer store data %s' % ops[0])
+        key = self.descriptor(ops[2])
+        if key[0][0] != 'table' or key[1] is None:
+            raise Unsupported('buffer store through %s' % (key,))
+        if key in self.pipe.modified:
+            raise Unsupported('buffer store through a modified descriptor')
+        if re.fullmatch(r'0x[0-9a-f]+|\d+', ops[3]):
+            offset += int(ops[3], 0)
+            soffset = ''
+            if offset % 4:
+                raise Unsupported('buffer store at unaligned byte offset %d' % offset)
+        else:
+            sreg = reg_range(ops[3])
+            if not sreg or sreg[0] != 's' or sreg[1] != sreg[2] or sreg[1] > 105:
+                raise Unsupported('buffer soffset %s' % ops[3])
+            if offset % 4:
+                raise Unsupported('buffer store at unaligned immediate offset %d' % offset)
+            soffset = '%s + ' % self.S(sreg[1])
+        uav = self.pipe.uav(key, 'raw')
+        words = ', '.join(self.u('v%d' % n) for n in range(src[1], src[2] + 1))
+        store = '%s.Store%s(a, %s);' % (uav, '' if count == 1 else str(count), 'uint%d(%s)' % (count, words) if count > 1 else words)
+        # Store* needs a multiple of four: the immediate is checked above; a register offset is rounded down.
+        self.emit('a = (%s%d) & 0xfffffffcu;' % (soffset, offset) if soffset else 'a = %d;' % offset)
+        self.emit(store if self.exec_known else 'if (exec & 1) %s' % store)
+
     def store_descriptor(self, tok, words, what, stride0_ok=False):
         """Resource key of a store's descriptor operand: all its words must still be the loaded words of one
         descriptor at a fixed table offset. A moved, overwritten or modified word (stride, num_records, format)
@@ -3019,8 +3081,8 @@ class Stage:
             raise Unsupported('%s through a modified descriptor' % what)
         return key
 
-    def raw_table_uav_store(self, kind_label, ops, mods, data_count, *, allow_glc=False):
-        """Validate a fixed-table raw UAV descriptor, data range, offen address, soffset, and 4-byte alignment."""
+    def raw_table_uav_store(self, kind_label, ops, mods, data_count, *, allow_glc=False, allow_scalar_address=False):
+        """Validate a fixed-table raw UAV descriptor, data range, byte address, and 4-byte alignment."""
         offset = 0
         glc = False
         for m in mods:
@@ -3030,17 +3092,21 @@ class Stage:
                 glc = True
             elif m != 'offen':
                 raise Unsupported('%s modifier %s' % (kind_label, m))
-        if len(ops) != 4 or 'offen' not in mods:
+        offen = 'offen' in mods
+        if len(ops) != 4 or (not offen and not (allow_scalar_address and glc and ops[1] == 'off')):
             raise Unsupported('%s without the offen address form' % kind_label)
         data = reg_range(ops[0])
         if not data or data[0] != 'v' or data[2] - data[1] != data_count - 1 or data[2] > 255:
             raise Unsupported('%s data %s' % (kind_label, ops[0]))
-        vaddr = reg_range(ops[1])
-        if not vaddr or vaddr[0] != 'v' or vaddr[1] != vaddr[2] or vaddr[1] > 255:
-            raise Unsupported('%s vaddr %s for offen' % (kind_label, ops[1]))
+        if offen:
+            vaddr = reg_range(ops[1])
+            if not vaddr or vaddr[0] != 'v' or vaddr[1] != vaddr[2] or vaddr[1] > 255:
+                raise Unsupported('%s vaddr %s for offen' % (kind_label, ops[1]))
         key = self.store_descriptor(ops[2], 4, kind_label, stride0_ok=True)
-        terms = [self.u(ops[1])]
+        terms = [self.u(ops[1])] if offen else []
         if re.fullmatch(r'0x[0-9a-f]+|\d+', ops[3]):
+            if not offen:
+                raise Unsupported('%s off requires a scalar register soffset' % kind_label)
             offset += int(ops[3], 0)
         else:
             sreg = reg_range(ops[3])
@@ -3049,13 +3115,16 @@ class Stage:
             terms.append(self.S(sreg[1]))
         if offset % 4:
             raise Unsupported('%s at unaligned immediate offset %d' % (kind_label, offset))
-        return data, self.pipe.uav(key), '(%s + %d) & 0xfffffffcu' % (' + '.join(terms), offset), glc
+        terms.append(str(offset))
+        return data, self.pipe.uav(key), '(%s) & 0xfffffffcu' % ' + '.join(terms), glc
 
     def op_buffer_store_dword(self, ops, mods, count=1):
         # Compute-stage store in the offen form: per-lane byte VGPR plus the scalar offset and the 12-bit immediate,
         # through a descriptor read from a fixed root-table slot, to a RWByteAddressBuffer (manifest `uav` line).
         # Like the loads, this assumes a raw descriptor (no swizzle or stride). Out-of-range stores: assumes a future
         # runtime sizes the view to the descriptor's range so both sides drop them; nothing binds or checks that yet.
+        if self.kind == 'vs':
+            return self.op_buffer_store_vs(ops, mods, count)
         if self.kind != 'cs':
             raise Unsupported('buffer_store_dword' + ('x%d' % count if count > 1 else ''))  # the unknown-op refusal
         src, uav, address, _ = self.raw_table_uav_store('buffer store', ops, mods, count)
@@ -3068,11 +3137,12 @@ class Stage:
         self.emit(store if self.exec_known else 'if (exec & 1) %s' % store)
 
     def buffer_atomic(self, name, ops, mods):
-        """Lower 32-bit compute MUBUF atomics in offen mode with optional glc pre-atomic return."""
+        """Lower 32-bit compute MUBUF atomics with optional glc pre-atomic return."""
         if self.kind != 'cs':
             raise Unsupported(name)
         method, signed, is_sub, data_count = MUBUF_ATOMIC_OPS[name]
-        data, uav, address, glc = self.raw_table_uav_store('buffer atomic', ops, mods, data_count, allow_glc=True)
+        data, uav, address, glc = self.raw_table_uav_store(
+            'buffer atomic', ops, mods, data_count, allow_glc=True, allow_scalar_address=name == 'buffer_atomic_add')
         words = [self.u('v%d' % n) for n in range(data[1], data[2] + 1)]
         self.emit('a = %s;' % address)
         if not isinstance(getattr(self, 'used_atomic', None), set):
@@ -3142,6 +3212,128 @@ class Stage:
             self.emit('a = (vid + ud%d) * ud%d + %d;' % (base, stride, e['offset']))
             self.load_format(FETCH_DXGI[e['format']][0], buf, e['vgpr'], e['count'])
         self.fetched = True
+
+    @staticmethod
+    def descriptor_scalar_writes(name, ops):
+        regs = set()
+        for token in destinations(name, ops):
+            if token in ('vcc', 'vcc_lo', 'vcc_hi'):
+                regs.update((106, 107))
+            parsed = reg_range(token)
+            if parsed and parsed[0] == 's':
+                regs.update(range(parsed[1], parsed[2] + 1))
+        if name.startswith('v_cmp') and len(ops) == 2:
+            regs.update((106, 107))
+        return regs
+
+    def formatted_pointer_reaches(self, pointer, before):
+        """Refuse a write to the original root pointer on any predecessor path of this read."""
+        if not hasattr(self, 'descriptor_predecessors'):
+            by_offset = {off: i for i, (off, *_rest) in enumerate(self.ins)}
+            self.descriptor_predecessors = [[] for _ in self.ins]
+            self.descriptor_writes_by_instruction = []
+            for index, (_, _, name, asm) in enumerate(self.ins):
+                _, args, _ = parse(asm)
+                self.descriptor_writes_by_instruction.append(self.descriptor_scalar_writes(name, args))
+                if index + 1 < len(self.ins) and name not in ('s_branch', 's_endpgm'):
+                    self.descriptor_predecessors[index + 1].append(index)
+                if name == 's_branch' or name.startswith('s_cbranch_'):
+                    target = by_offset.get(int(args[0].split('_')[1], 16))
+                    if target is not None:
+                        self.descriptor_predecessors[target].append(index)
+        seen = set()
+        pending = list(self.descriptor_predecessors[before])
+        while pending:
+            earlier = pending.pop()
+            if earlier in seen:
+                continue
+            seen.add(earlier)
+            if pointer in self.descriptor_writes_by_instruction[earlier]:
+                return False
+            pending.extend(self.descriptor_predecessors[earlier])
+        return True
+
+    def formatted_descriptor_from_block(self, reg, first):
+        """Require one untouched local load and a table pointer that no incoming path can rewrite."""
+        start, end = self.descriptor_block_first, self.descriptor_instruction_index
+        block = self.ins[start:end]
+        words = set(range(reg[1], reg[2] + 1))
+        for index in range(len(block) - 1, -1, -1):
+            _, _, name, asm = block[index]
+            _, args, _ = parse(asm)
+            if not (self.descriptor_scalar_writes(name, args) & words):
+                continue
+            m = re.fullmatch(r's_load_dwordx(4|8|16)', name)
+            load = reg_range(args[0])
+            if not m or not load or load[1] + first[3] != reg[1] or int(m.group(1)) < first[3] + 4:
+                return False
+            base = reg_range(args[1])
+            if not base or base[0] != 's':
+                return False
+            pointer = base[1]
+            read = start + index
+            for previous in range(index - 1, -1, -1):
+                _, _, earlier, prior = block[previous]
+                _, src, _ = parse(prior)
+                if pointer not in self.descriptor_scalar_writes(earlier, src):
+                    continue
+                copied_from = reg_range(src[1]) if earlier == 's_mov_b32' and len(src) == 2 else None
+                if not copied_from or copied_from[0] != 's' or copied_from[1] != copied_from[2]:
+                    return False
+                pointer = copied_from[1]
+                read = start + previous
+                break
+            return self.entry_table_pointers.get(pointer) == first[1] and self.formatted_pointer_reaches(pointer, read)
+        return False
+
+    def mubuf_format(self, ops, mods, count):
+        """buffer_load_format_x/xy/xyz: FORMAT and DST_SEL come from word 3 of the descriptor, known at draw time.
+
+        The runtime passes that word as an entry constant. Each supported format becomes one case of a switch
+        on the FORMAT field that decodes the four components as the tbuffer path does; DST_SEL then picks, for
+        each destination register, a component or the constant 0 or 1. The draw validates FORMAT and descriptor
+        availability before submission, so the generated switch only sees the supported cases.
+        """
+        if self.kind not in ('vs', 'ps'):
+            raise Unsupported('formatted buffer load requires a graphics draw')
+        dst = reg_range(ops[0])
+        buf, address = self.buffer_address(ops, mods)
+        # FORMAT and DST_SEL are read from the table word, so word 3 must still be the loaded one.
+        r = reg_range(ops[2])
+        first = self.sym.get(r[1]) if r else None
+        if not r or r[2] - r[1] != 3 or not first or first[0] != 'desc' or any(
+                self.sym.get(r[1] + i) != ('desc', first[1], first[2], first[3] + i) for i in range(4)):
+            raise Unsupported('formatted buffer load through a descriptor whose words were rewritten')
+        if first[1][0] != 'table':
+            raise Unsupported('formatted buffer load requires a hardware table descriptor')
+        if self.past_entry and not self.formatted_descriptor_from_block(r, first):
+            raise Unsupported('formatted buffer load requires descriptor words proven in the entry block or a local table load')
+        word3 = 'ud%d' % self.pipe.ud(('descword3', self.pipe.resources[self.descriptor(ops[2])]['index']))
+        self.emit('a = %s;' % address)
+        self.emit('{ uint c0 = 0, c1 = 0, c2 = 0, c3 = 0, one = U(1.0);')
+        self.emit('switch ((%s >> %d) & %du) {' % (word3, DESC_FORMAT_SHIFT, DESC_FORMAT_MASK))
+        for fmt, code in sorted(DESC_FORMAT_CODES.items(), key=lambda kv: kv[1]):
+            load, comps = FETCH_FORMATS[fmt]
+            body = ['w = %s;' % load.format(buf)] if load else []
+            body += ['c%d = %s;' % (i, comps[i].format(buf)) for i in range(4)]
+            if fmt in DESC_ONE_INTEGER:
+                body.append('one = 1u;')
+            self.emit('case %du: %s break;' % (code, ' '.join(body)))
+        self.emit('default: c0 = c1 = c2 = c3 = %du; break; }' % DESC_FORMAT_UNKNOWN)
+        pick = ('((%s >> %d) & 7u)' % (word3, 3 * i) for i in range(count))
+        for i, sel in enumerate(pick):
+            self.set_v(dst[1] + i, '%s == 4u ? c0 : %s == 5u ? c1 : %s == 6u ? c2 : %s == 7u ? c3 : %s == 1u ? one : 0u'
+                       % (sel, sel, sel, sel, sel))
+        self.emit('}')
+
+    def op_buffer_load_format_x(self, ops, mods):
+        self.mubuf_format(ops, mods, 1)
+
+    def op_buffer_load_format_xy(self, ops, mods):
+        self.mubuf_format(ops, mods, 2)
+
+    def op_buffer_load_format_xyz(self, ops, mods):
+        self.mubuf_format(ops, mods, 3)
 
     def op_tbuffer_load_format_x(self, ops, mods):
         self.tbuffer(ops, mods, 1)
@@ -3689,6 +3881,18 @@ class Stage:
         shift = '((%s & 3u) << 3u)' % select
         self.set_v(dst[1], '((%s & ~(0xffu << %s)) | ((uint(clamp(F(%s), 0.0, 255.0)) & 0xffu) << %s))'
                    % (rest, shift, value, shift))
+
+    def op_s_ff1_i32_b32(self, ops, mods):
+        if self.kind != 'cs' or mods or len(ops) != 2 or ops[1] != 'exec_lo':
+            raise Unsupported('s_ff1_i32_b32 requires compute exec_lo')
+        dst = reg_range(ops[0])
+        if not dst or dst[0] != 's' or dst[1] != dst[2] or dst[1] > 105:
+            raise Unsupported('s_ff1_i32_b32 requires one SGPR destination')
+        if self.past_entry or not self.exec_known:
+            raise Unsupported('s_ff1_i32_b32 requires the compute entry EXEC mask')
+        # At dispatch entry even the last partial wave starts at lane zero.
+        # FF1 reports its index and leaves SCC unchanged.
+        self.set_s(dst[1], '0u', ('const', 0))
 
     def op_v_mbcnt_lo_u32_b32(self, ops, mods, high=False):
         name = 'v_mbcnt_%s_u32_b32' % ('hi' if high else 'lo')
@@ -4733,10 +4937,10 @@ FLOAT32_RTVS = frozenset((2, 6, 16, 41))
 D16_FLOAT_EXACT_SRV_FORMATS = frozenset((2, 6, 16, 21, 28, 41, 49, 61, 65, 87, 88))
 D16_UNORM16_SRV_FORMATS = frozenset((11, 35, 56))
 D16_EXACT_SRV_FORMATS = D16_FLOAT_EXACT_SRV_FORMATS | D16_UNORM16_SRV_FORMATS
-# The formats whose channels are all 32 bits wide: the export words are the stored words, so one integer
-# signature serves them. Narrower integer formats stay refused until a readback shows how they truncate.
-VERIFIED_UINT_RTVS = frozenset((3, 17, 42))   # R32G32B32A32, R32G32, R32
-VERIFIED_SINT_RTVS = frozenset((4, 18, 43))
+# Uncompressed exports keep their 32-bit shader values. RGBA8 integer RTVs clamp each
+# channel to the destination range in the output merger.
+VERIFIED_UINT_RTVS = frozenset((3, 17, 30, 42))
+VERIFIED_SINT_RTVS = frozenset((4, 18, 32, 43))
 
 
 class Pipeline:
@@ -4920,7 +5124,7 @@ class Pipeline:
         for key, r in sorted(self.resources.items(), key=lambda kv: kv[1]['index']):
             out.append('%s r%d : register(t%d);' % ({'buf': 'ByteAddressBuffer', 'tex1d': 'Texture1D<float4>', 'tex2d': 'Texture2D<float4>', 'tex2da': 'Texture2DArray<float4>', 'tex3d': 'Texture3D<float4>'}[r['kind']], r['index'], r['index']))
         for key, r in sorted(self.stored_images().items(), key=lambda kv: kv[1]['index']):
-            out.append('%s w%d : register(u%d);' % ({'tex2d': 'RWTexture2D<float4>'}[r['kind']], r['index'], r['index']))
+            out.append('%s %s%d : register(u%d);' % ({'tex2d': 'RWTexture2D<float4>', 'raw': 'RWByteAddressBuffer'}[r['kind']], 'u' if r['kind'] == 'raw' else 'w', r['index'], r['index']))
         for key, i in self.samplers.items():
             out.append('%s q%d : register(s%d);' % ('SamplerComparisonState' if key[0] == 'cmp' else 'SamplerState', i, i))
         if self.uses_sampler_heap:
@@ -5186,7 +5390,7 @@ def fnv(data, h=1469598103934665603):
 
 def pipeline_key(vs_code, ps_code, root_blob, layout=b''):
     """Hash the startup translation revision and the three blobs in runtime order, then a stream's input layout."""
-    key = fnv(root_blob, fnv(ps_code, fnv(vs_code, fnv(b'x2w-startup-shader-13'))))
+    key = fnv(root_blob, fnv(ps_code, fnv(vs_code, fnv(b'x2w-startup-shader-14'))))
     return fnv(layout, key) if layout else key
 
 
@@ -5195,7 +5399,7 @@ def compute_key(cs_code, data, root_blob, desc, state_a=b'', state_b=b''):
     graphics revision followed by "cs", then each part preceded by its length as a little-endian u64: the code,
     the words 7-8 blob, the root signature, the 12 description words with their pointers zeroed and the two
     state blocks."""
-    key = fnv(b'x2w-startup-shader-13cs')
+    key = fnv(b'x2w-startup-shader-14cs')
     for part in (cs_code, data, root_blob, desc, state_a, state_b):
         key = fnv(part, fnv(struct.pack('<Q', len(part)), key))
     return key

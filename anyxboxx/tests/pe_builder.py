@@ -175,6 +175,10 @@ class Asm:
     def _disp(self, target_rva, length):
         return struct.pack("<i", target_rva - (rva(self.here) + length))
 
+    def rip(self, opcode, offset, immediate=b""):
+        """Instruction à opérande [rip+disp32] visant `offset` du code : opcode, disp32, puis l'immédiat."""
+        return self.raw(opcode + self._disp(rva(offset), len(opcode) + 4 + len(immediate)) + immediate)
+
     def call_iat(self, iat_rva):
         return self.raw(b"\xff\x15" + self._disp(iat_rva, 6))
 

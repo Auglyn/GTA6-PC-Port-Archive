@@ -187,6 +187,10 @@ HRESULT WINAPI QueryApiImpl(const GUID* provider, const GUID* iid, void** out, v
   return result;
 }
 
+// Export interne que xgameruntime.lib résout par GetProcAddress : Microsoft Learn ne le documente
+// pas (XError.h n'y expose que XErrorCallback, XErrorSetCallback et XErrorSetOptions). Le titre
+// mesuré ne teste que le pointeur, et aucun type de retour public n'existe : il reste void plutôt
+// qu'inventé. (hr, msg) reprend les deux premiers paramètres documentés d'XErrorCallback.
 void WINAPI XErrorReport(HRESULT code, const char* message) {
   anyxboxx::Log("[XErrorReport] 0x%08lX %s", static_cast<unsigned long>(code),
                 message != nullptr ? message : "");

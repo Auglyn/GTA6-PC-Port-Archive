@@ -5750,14 +5750,13 @@ public:
         const VkDeviceSize alignment = device_.info.host_pointer_alignment;
         if (!device_.get_host_pointer_properties || !alignment) return E_NOTIMPL;
         const auto start = reinterpret_cast<std::uintptr_t>(address);
-        if (!address || !desc_.Width || desc_.Width > UINT64_MAX - 2 * alignment) return E_INVALIDARG;
+        if (start & 3) return E_NOTIMPL;  // byte-unaligned copies keep the ordinary-buffer fallback
+        if (!address || !desc_.Width || alignment > UINT64_MAX / 2 ||
+            (alignment & (alignment - 1)) || desc_.Width > UINT64_MAX - 2 * alignment) return E_INVALIDARG;
         const bool need_bda = device_.info.buffer_device_address || device_.arena.buffer != VK_NULL_HANDLE;
-        // Apply the same backing size rule to imports. The committed-range check and Vulkan bind requirements
-        // below cover the padding as well. The import never initializes or writes the caller's padding.
+        // Keep the device-address word padding, and include the host page prefix in the backing buffer.
         const VkDeviceSize backing_size = need_bda ? align_up(desc_.Width, sizeof(std::uint32_t)) : desc_.Width;
-        // The import starts at the page that holds `address`, and the buffer is bound at the offset inside it: the
-        // title places small buffers inside a page too (a 16-byte UAV at a 64-byte-aligned address on an RTX 5090,
-        // found in review), which an import of `address` itself would refuse.
+        // Bind at zero; replay and device addresses carry the logical buffer's prefix instead.
         const std::uintptr_t base = start & ~static_cast<std::uintptr_t>(alignment - 1);
         void* const base_address = reinterpret_cast<void*>(base);
         const VkDeviceSize offset = start - base;
@@ -5801,7 +5800,7 @@ public:
         VkExternalMemoryBufferCreateInfo external{VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO};
         external.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
         VkBufferCreateInfo info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, &external};
-        info.size = backing_size;
+        info.size = offset + backing_size;
         info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
                      VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
                      VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
@@ -5835,9 +5834,8 @@ public:
                                                 &host) != VK_SUCCESS)
             return decline(E_NOTIMPL);
         const std::uint32_t types = host.memoryTypeBits & requirements.memoryTypeBits;
-        // An offset off the buffer's own alignment cannot be bound: the fallback answers.
-        if (!types || (offset % requirements.alignment) || requirements.size > bytes - offset)
-            return decline(E_NOTIMPL);
+        // The binding is at zero; requirements cover the prefix as part of the buffer.
+        if (!types || requirements.size > bytes) return decline(E_NOTIMPL);
         VkImportMemoryHostPointerInfoEXT import{VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT};
         import.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
         import.pHostPointer = base_address;
@@ -5869,12 +5867,12 @@ public:
             if (memory_) break;
         }
         if (!memory_) return decline(E_OUTOFMEMORY);
-        if (vk.vkBindBufferMemory(device_.info.device, buffer_, memory_, offset) != VK_SUCCESS)
-            return decline(E_OUTOFMEMORY);
+        if (vk.vkBindBufferMemory(device_.info.device, buffer_, memory_, 0) != VK_SUCCESS) return decline(E_OUTOFMEMORY);
         if (need_bda && vk.vkGetBufferDeviceAddress) {
             VkBufferDeviceAddressInfo bda{VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO};
             bda.buffer = buffer_;
             buffer_va_ = vk.vkGetBufferDeviceAddress(device_.info.device, &bda);
+            if (buffer_va_) buffer_va_ += offset;
             gpu_va_ = buffer_va_;
         }
         // An import the driver put below the arena cannot be named by a V#: the V# keeps 48 bits of (device address
@@ -5913,6 +5911,7 @@ public:
         leonida::ResourceBinding binding{};
         binding.buffer = buffer_;
         binding.indirect_arguments = (info.usage & VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT) != 0;
+        binding.buffer_offset = offset;
         binding.size = desc_.Width;
         binding.host = static_cast<const std::uint8_t*>(address);
         binding.host_readable = true;
@@ -6218,7 +6217,7 @@ public:
             const char* value = std::getenv("LEONIDA_TITLE_IMAGE_STAGING");
             return !value || std::strcmp(value, "0");
         }();
-        // Keep placed movie planes with a known linear CPU layout on the host-copy path.
+        // Keep placed movie planes with a known linear CPU layout on the host-copy path, where there is one.
         // Map on a staged placement still returns the title's pages and participates in the refresh.
         std::uint32_t xg_layout = 0;
         const bool linear_placement = origin == TitleImageOrigin::placed &&
@@ -6240,17 +6239,24 @@ public:
                 shared_zero_ = device_.zero_sampled_image(desc_, format, footprint.size);
         }
         std::uint32_t plain_bits = 0;
-        if (stage_title && !shared_zero_ && allow_staged_title && origin != TitleImageOrigin::ordinary && !linear_placement &&
-            host_transfer_ && format.aspects == VK_IMAGE_ASPECT_COLOR_BIT && device_.image_requirements) {
+        // A device without host copies has no other way to fill a title image: a refresh before a submission may not
+        // use a staged copy through the queue (host_copy_now). Its linear movie planes are staged too.
+        const bool no_host_copy = !device_.copy_memory_to_image && cpu_visible() && samples == 1 &&
+                                  !format.d24_as_float && !format.rgb96;
+        if (stage_title && !shared_zero_ && allow_staged_title && origin != TitleImageOrigin::ordinary &&
+            (no_host_copy || (!linear_placement && host_transfer_)) && format.aspects == VK_IMAGE_ASPECT_COLOR_BIT &&
+            device_.image_requirements) {
             for (std::uint32_t i = 0; i < device_.memory.memoryTypeCount; ++i) {
                 const auto flags = device_.memory.memoryTypes[i].propertyFlags;
                 if ((flags & (VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)) ==
                     VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) plain_bits |= 1u << i;
             }
+            if (no_host_copy) plain_bits = UINT32_MAX;  // nothing to compare with: any memory type will do
             VkMemoryRequirements with{}, without{};
             auto staged = info;
             staged.usage &= ~VK_IMAGE_USAGE_HOST_TRANSFER_BIT_EXT;
-            if (plain_bits && device_.memory_requirements(info, with) && !(with.memoryTypeBits & plain_bits) &&
+            if (plain_bits && (no_host_copy || (device_.memory_requirements(info, with) &&
+                                                !(with.memoryTypeBits & plain_bits))) &&
                 device_.memory_requirements(staged, without) && (without.memoryTypeBits & plain_bits)) {
                 staged_title_ = true;
                 host_transfer_ = false;
@@ -11403,14 +11409,37 @@ public:
                 return false;
             }
         }
+        // With Resizable BAR, keep the arena where its buffer may still use DEVICE_LOCAL | HOST_VISIBLE memory
+        // A large buffer can exclude that type, or require more bytes than its heap can hold.
+        if (leonida::resizable_bar(state_.memory)) {
+            const VkDeviceSize asked = info.size;
+            const VkDeviceSize fitted = leonida::device_local_arena_bytes(asked, [&](VkDeviceSize bytes) {
+                if (bytes == asked) return leonida::device_local_arena_fits(state_.memory, requirements);
+                VkBufferCreateInfo probe = info;
+                probe.size = bytes;
+                VkBuffer buffer = VK_NULL_HANDLE;
+                if (vk.vkCreateBuffer(state_.info.device, &probe, nullptr, &buffer) != VK_SUCCESS) return false;
+                VkMemoryRequirements r{};
+                vk.vkGetBufferMemoryRequirements(state_.info.device, buffer, &r);
+                vk.vkDestroyBuffer(state_.info.device, buffer, nullptr);
+                return (!limits.max_allocation_size || r.size <= limits.max_allocation_size) &&
+                       leonida::device_local_arena_fits(state_.memory, r);
+            });
+            if (fitted != asked) {
+                vk.vkDestroyBuffer(state_.info.device, arena.buffer, nullptr);
+                info.size = fitted;
+                if (!create_buffer()) return false;
+                size.bytes = fitted;
+                size.capped |= leonida::arena_cap_bar;
+            }
+        }
         if (size.capped)
             std::fprintf(stderr, "[rt] d3d12: GPU address arena: %llu MiB of the %llu MiB asked for, capped by the "
                                  "device's %s\n",
                          static_cast<unsigned long long>(size.bytes >> 20),
                          static_cast<unsigned long long>(size.requested >> 20), leonida::arena_cap_name(size.capped));
-        arena.memory = state_.allocate(requirements,
-                                       VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                                       VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, nullptr, true, &arena.memory_type);
+        arena.memory = state_.allocate(requirements, leonida::kArenaRequiredMemory, leonida::kArenaPreferredMemory,
+                                       nullptr, true, &arena.memory_type);
         void* mapped = nullptr;
         if (!arena.memory || vk.vkBindBufferMemory(state_.info.device, arena.buffer, arena.memory, 0) != VK_SUCCESS ||
             vk.vkMapMemory(state_.info.device, arena.memory, 0, VK_WHOLE_SIZE, 0, &mapped) != VK_SUCCESS) {

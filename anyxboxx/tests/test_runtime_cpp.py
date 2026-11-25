@@ -309,6 +309,29 @@ def test_registry_presents_a_series_x(runtime_dir):
     assert runtime.AnyXboxX_RegCloseKey(real) == 0
 
 
+def test_registry_reg_open_key_variant_pins_console_mode_0x64(runtime_dir):
+    """RegOpenKeyW (la variante du titre, étape 9) : même clé simulée, ConsoleMode figé à 0x64."""
+    runtime = load(runtime_dir, "xgameruntime.dll")
+    hklm = ctypes.c_void_p(0xFFFFFFFF80000002)
+    runtime.AnyXboxX_RegOpenKeyW.argtypes = (ctypes.c_void_p, ctypes.c_wchar_p, ctypes.POINTER(ctypes.c_void_p))
+    runtime.AnyXboxX_RegQueryValueExW.argtypes = (ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_void_p,
+                                                  ctypes.POINTER(ctypes.c_uint32), ctypes.c_void_p,
+                                                  ctypes.POINTER(ctypes.c_uint32))
+    runtime.AnyXboxX_RegCloseKey.argtypes = (ctypes.c_void_p,)
+    for path in (r"Software\Microsoft\Windows NT\CurrentVersion\OEM", r"\SOFTWARE\Microsoft\Windows NT\CurrentVersion\oem"):
+        key, kind, value, size = ctypes.c_void_p(), ctypes.c_uint32(), ctypes.c_uint32(), ctypes.c_uint32(4)
+        assert runtime.AnyXboxX_RegOpenKeyW(hklm, path, ctypes.byref(key)) == 0
+        assert runtime.AnyXboxX_RegQueryValueExW(key, "ConsoleMode", None, ctypes.byref(kind), ctypes.byref(value),
+                                                 ctypes.byref(size)) == 0
+        assert (kind.value, value.value, size.value) == (4, 0x64, 4)        # REG_DWORD 0x64
+        small = ctypes.c_uint32(2)
+        assert runtime.AnyXboxX_RegQueryValueExW(key, "ConsoleMode", None, None, ctypes.byref(value),
+                                                 ctypes.byref(small)) == 234   # ERROR_MORE_DATA
+        assert small.value == 4
+        assert runtime.AnyXboxX_RegCloseKey(key) == 0
+    assert runtime.XSystemGetDeviceType() == XBOX_SCARLETT_ANACONDA        # 0x64 -> 7 dans xgameruntime.lib
+
+
 SYSTEM = ("E349BD1A-FC20-4E40-B99C-4178CC6B409F", "1861CF2E-E18B-4834-A9F5-B4A4E6EFB4CF")
 ANALYTICS = ("B884675D-B738-4A9C-815D-9A9A1E0C6C9B",) * 2
 GAME = ("973A344E-24BF-4D0F-8457-56C534892B29", "2549F142-6419-4A06-97B5-931AAB7C2F34")

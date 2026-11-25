@@ -18,8 +18,10 @@ import sys
 import time
 from collections import Counter, defaultdict
 from pathlib import Path
+from tempfile import mkdtemp
 
 import pefile
+import pso_inventory
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "PrototypeScarlett"))
@@ -143,17 +145,20 @@ def isolated_steps(target, output):
     return lines
 
 
-def native_step(target, duration):
+def native_step(target, duration, output):
     launcher = RUNTIME / "anyxboxx.exe"
     if not launcher.is_file():
         return ["## Lancement natif", "", f"`{launcher}` absent : compilez runtime/ avec CMake."]
-    environment = {**os.environ, "ANYXBOXX_TRACE": "1"}
+    output = output.resolve()
+    output.mkdir(parents=True, exist_ok=True)
+    log = Path(mkdtemp(prefix="tombox-", dir=output)) / "compat.log"
+    environment = {**os.environ, "ANYXBOXX_TRACE": "1", "TOMBOX_LOG": str(log)}
     if TOMBOX.is_dir():
         environment["ANYXBOXX_TOMBOX_DIR"] = str(TOMBOX)
     outcome, elapsed, tail = _run([str(launcher), str(target)], duration, environment)
     return ["## Lancement natif (anyxboxx.exe)", "", f"> {NATIVE_WARNING}", "",
             f"DLL TomBox : `{environment.get('ANYXBOXX_TOMBOX_DIR', 'non')}`. Résultat : {outcome}, {elapsed}.",
-            "", "```", tail, "```"]
+            "", "```", tail, "```", "", *pso_inventory.summary(log, output)]
 
 
 def report(target, output, native=False, duration=60):
@@ -168,7 +173,7 @@ def report(target, output, native=False, duration=60):
              "## Inventaire", "", *inventory_lines, "", "## Qui fournit chaque import", "", *coverage_lines, "",
              *isolated_steps(target, output)]
     if native:
-        lines += native_step(target, duration)
+        lines += native_step(target, duration, output)
     return "\n".join(lines) + "\n"
 
 

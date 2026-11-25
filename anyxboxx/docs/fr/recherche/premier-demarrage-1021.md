@@ -193,14 +193,14 @@ dessus.
 | W6 | **Non fait : demande d'abord le proxy de liste console (Leonida #7076), voir section 6.** Liste de commandes console : établir ce que sont les slots 131 et 132 de la liste, à partir de l'ABI de liste console de TomBox, avant d'écrire une enveloppe. Ne pas donner une liste PC brute au titre | arrêts 5, 6 | sens des slots inconnu |
 | W7 | **Fait, cette PR : `XCRDAPI.dll` minimal.** **`DStorageGetFactory`** manque chez AnyXboxX et TomBox. Une `XCRDAPI.dll` minimale doit écrire le pointeur de sortie, rendre 0, et exposer la méthode à `+0x40` rendant un HRESULT non négatif ; les lectures de fichier peuvent répondre `E_NOTIMPL` comme le fait #4348. #4348 de Leonida est en GPL-3.0, réutilisable avec crédit (règle 2) | statique, arrêt 24 | mesuré |
 | W8 | **Bloqué, voir section 6.** **`xg_xs`** : `XGSuggestSwizzleMode` manque. `XGCreateTextureComputer` doit rendre un objet dont le slot 8 existe même s'il n'écrit aucune donnée tuilée, et aucun stub ne doit laisser un pointeur de sortie non écrit. `anyxboxx-texture` (SW_4K_S) est le moteur naturel | arrêt 22 (KkelebekK) | mesuré par d'autres |
-| W9 | `xgameruntime` : `XErrorReport` est exporté avec un retour `void` (`runtime/xgameruntime/xgameruntime.def`) ; le titre ne teste que le pointeur, donc cela paraît sans effet. Ajouter un test du lanceur : les six noms de `GetProcAddress` se résolvent, les bits d'options `2`, `4`, `8` sont acceptés, et `xgameruntime.dll` se charge par chemin complet quand l'exécutable du jeu est dans un autre dossier | étapes 6 à 8 | innocuité du type de retour supposée |
-| W10 | `ConsoleMode` : `runtime/xgameruntime/registry.cpp` sert `0x64`, qui se convertit en 7 et passe le test du titre. Garder un test qui fige `0x64`, et la variante `RegOpenKeyW` (celle du titre) | étape 9 | mesuré et cohérent |
-| W11 | **TLS** : vérifier qu'`anyxboxx_tls.dll` appelle le callback 1 du titre avec la raison 2 pour chaque thread, existant ou nouveau, et que l'indice du fichier est écrasé. Le bloc (5 248 octets) tient dans la capacité de 256 Kio | étape 4 | taille mesurée ; couverture des threads non testée |
+| W9 | **Fait, cette PR : `tests/test_gdk_boot.py` ; type de retour gardé, voir section 7.** `xgameruntime` : `XErrorReport` est exporté avec un retour `void` (`runtime/xgameruntime/xgameruntime.def`) ; le titre ne teste que le pointeur, donc cela paraît sans effet. Ajouter un test du lanceur : les six noms de `GetProcAddress` se résolvent, les bits d'options `2`, `4`, `8` sont acceptés, et `xgameruntime.dll` se charge par chemin complet quand l'exécutable du jeu est dans un autre dossier | étapes 6 à 8 | innocuité du type de retour supposée |
+| W10 | **Fait, cette PR : voir section 7.** `ConsoleMode` : `runtime/xgameruntime/registry.cpp` sert `0x64`, qui se convertit en 7 et passe le test du titre. Garder un test qui fige `0x64`, et la variante `RegOpenKeyW` (celle du titre) | étape 9 | mesuré et cohérent |
+| W11 | **Fait, cette PR : nouveaux threads vérifiés ; les threads antérieurs à l'installation ne reçoivent pas la raison 2, comme sous Windows, voir section 7.** **TLS** : vérifier qu'`anyxboxx_tls.dll` appelle le callback 1 du titre avec la raison 2 pour chaque thread, existant ou nouveau, et que l'indice du fichier est écrasé. Le bloc (5 248 octets) tient dans la capacité de 256 Kio | étape 4 | taille mesurée ; couverture des threads non testée |
 | W12 | **Observabilité.** Le lanceur natif n'a aucun gestionnaire pour `0x80000003` : un `int3` du titre finit en simple code de sortie (arrêt 0). Ajouter un gestionnaire vectoriel qui journalise l'adresse du premier `int3` ou de la première exception et le module, pour qu'un bisect donne un arrêt et non un code de sortie | arrêt 0 | mesuré |
-| W13 | `GameInput.dll!#1` : AnyXboxX n'a pas de shim GameInput. L'unique appelant du titre se lie à la DLL de l'hôte. Choisir : servir l'ordinal 1 depuis le lanceur, ou documenter la dépendance à l'hôte | statique | mesuré ; version d'ABI non vérifiée |
+| W13 | **Fait, cette PR : dépendance à l'hôte documentée dans [jour-j.md](../jour-j.md), pas de shim, voir section 7.** `GameInput.dll!#1` : AnyXboxX n'a pas de shim GameInput. L'unique appelant du titre se lie à la DLL de l'hôte. Choisir : servir l'ordinal 1 depuis le lanceur, ou documenter la dépendance à l'hôte | statique | mesuré ; version d'ABI non vérifiée |
 | W14 | Audio (`chad` 5, `xapu` 5 chez TomBox, `AcpHal` 9) : manquant, mais non établi comme bloquant au démarrage, la chaîne d'appels étant indirecte. À traiter après W1 à W8 | section 2 | supposé |
-| W15 | Imports propres à l'hôte : `api-ms-win-core-psm-appnotify-*`, `ext-ms-win-rtcore-ntuser-*`, MFPlat, WS2_32 par ordinal. Le mode natif dépend d'un hôte Windows récent ; le noter dans [jour-j.md](../jour-j.md) | section 2 | mesuré sur Windows 11 seulement |
-| W16 | `__XMemAllocationHooks__` : le titre exporte un symbole de données qu'aucun source de Leonida ne lit. Si `XMemAlloc*` se comporte mal, vérifier si le runtime de la console le lit par `GetProcAddress` sur l'exécutable | table d'exports | rôle supposé |
+| W15 | **Fait, cette PR : noté dans [jour-j.md](../jour-j.md), section 3.** Imports propres à l'hôte : `api-ms-win-core-psm-appnotify-*`, `ext-ms-win-rtcore-ntuser-*`, MFPlat, WS2_32 par ordinal. Le mode natif dépend d'un hôte Windows récent ; le noter dans [jour-j.md](../jour-j.md) | section 2 | mesuré sur Windows 11 seulement |
+| W16 | **Non fait : aucune source publique, voir section 7.** `__XMemAllocationHooks__` : le titre exporte un symbole de données qu'aucun source de Leonida ne lit. Si `XMemAlloc*` se comporte mal, vérifier si le runtime de la console le lit par `GetProcAddress` sur l'exécutable | table d'exports | rôle supposé |
 
 W1, W3, W7, W8, W9, W10, W11 et W12 se font à partir de la documentation publique et de tests synthétiques. W5 et
 W6 n'ont besoin que des sources de TomBox. Aucun ne demande de relire le jeu.
@@ -228,6 +228,84 @@ W6 n'ont besoin que des sources de TomBox. Aucun ne demande de relire le jeu.
   (`crates/compat/xg_xs/src/lib.rs`, lignes 372 à 381) sort tôt pour une dimension supérieure à 4 et sur sa branche
   d'erreur sans écrire `*out`. Observé dans le source, pas mesuré sur le titre. La correction relève de l'amont, puisque
   `third_party/` n'est pas modifié ici.
+
+## 7. Résultats de W9, W10, W11, W13 et W15 (cette PR ; W12 est traité dans l'issue #113)
+
+- **W9.** `tests/test_gdk_boot.py` fabrique un titre (avec `tests/pe_builder.py`) dans son propre dossier, loin du
+  runtime et sans `xgameruntime.dll` à côté, et rejoue les étapes 6 à 8 : `GetModuleFileNameW(NULL)` avec le nom de
+  fichier remplacé par `xgameruntime.dll`, `LoadLibraryExW` de ce chemin complet avec `0xA00`, puis du nom seul avec
+  `0x800`, les six `GetProcAddress`, et les trois `Initialize*` avec les deux constantes et les options `2 | 4 | 8`.
+  Les deux chargements doivent rendre le même module d'AnyXboxX, les six noms doivent se résoudre, et chaque
+  initialiseur doit rendre `S_OK`. Le même programme tourne sous `anyxboxx.exe` et sous le mode natif Python. Sans
+  la redirection par chemin complet, le premier chargement échoue et le résultat tombe à 0 (vérifié en mutant le shim
+  Python). L'ordre des arguments des initialiseurs (constantes dans `rcx`, `rdx`, options dans `r8`) est supposé ; nos
+  initialiseurs ignorent leurs arguments quand le runtime de Windows est coupé, le test fige donc qu'aucun bit
+  d'option n'est refusé.
+  `XErrorReport` garde son retour `void`. Microsoft Learn ne documente aucun `XErrorReport` : la page
+  [XError members](https://learn.microsoft.com/en-us/gaming/gdk/docs/reference/system/xerror/xerror_members) ne
+  liste que `XErrorCallback`, `XErrorSetCallback`, `XErrorSetOptions` et `XErrorOptions`. C'est un export interne
+  que `xgameruntime.lib` résout par son nom : il n'existe aucune signature publique à laquelle le corriger, et le titre
+  ne teste que le pointeur (statique, section 3). Ses paramètres `(HRESULT, const char*)` reprennent les deux premiers
+  du [XErrorCallback](https://learn.microsoft.com/en-us/gaming/gdk/docs/reference/system/xerror/functions/xerrorcallback)
+  documenté. La décision est écrite à côté de la fonction dans `runtime/xgameruntime/xgameruntime.cpp`.
+- **W10.** `0x64` est figé deux fois. `tests/test_runtime_cpp.py` ouvre la clé OEM par `AnyXboxX_RegOpenKeyW`
+  (avec et sans barre oblique initiale, en toute casse) et lit `ConsoleMode` en `REG_DWORD` `0x64`, avec
+  `ERROR_MORE_DATA` et la taille 4 pour un tampon de 2 octets ; `XSystemGetDeviceType` reste à 7.
+  `tests/test_gdk_boot.py` fabrique un titre qui importe `ADVAPI32!RegOpenKeyW`, `RegQueryValueExW` et `RegCloseKey`,
+  comme le titre, et lit `0x64` sous `anyxboxx.exe` et sous le mode natif Python. Sans la redirection de
+  `RegOpenKeyW`, le même programme lit 0 sur un PC (vérifié en mutant la liste de redirections Python). La conversion
+  de `0x64` en 7 se fait dans le `xgameruntime.lib` du titre et n'est pas testable ici (lecture statique, section 3).
+- **W11.** `tests/test_native_tls_callbacks.py` charge un titre dont le callback TLS compte chaque raison, garde son
+  premier argument et, pour la seule raison 2, écrit un marqueur dans la copie TLS du thread appelant, comme le
+  `__dyn_tls_init` de MSVC le fait avec ses initialiseurs. Vérifié : le `_tls_index` de l'image est écrasé (il ne vaut
+  plus `0xFFFFFFFF`) ; le callback reçoit la base de l'image et `DLL_PROCESS_ATTACH` une fois, à l'installation ;
+  chaque nouveau thread l'exécute avec la raison 2 sur ce thread, après le remplissage de sa zone et avec le bon
+  indice (chacun de quatre threads lit le marqueur), et avec la raison 3 à sa sortie. Avec l'appel de raison 2
+  d'`anyxboxx_tls.dll` mis en commentaire, le test des nouveaux threads échoue (mutation du runtime C++, recompilé).
+  Aucun changement C++ n'a été nécessaire.
+  Deux threads ne reçoivent pas la raison 2 d'AnyXboxX, volontairement. Le thread qui installe l'image reçoit
+  `DLL_PROCESS_ATTACH`, comme Windows le donne au thread principal d'un exécutable ; le démarrage du CRT MSVC du titre
+  appelle ensuite lui-même son callback TLS dynamique avec `DLL_THREAD_ATTACH` pour ce thread (`exe_common.inl` et
+  `tlsdyn.cpp` dans les sources du CRT livrées avec Visual Studio). Un thread né avant l'installation reçoit le modèle
+  copié dans sa zone, mais aucun callback : Windows fait de même pour une DLL chargée après le démarrage de ses threads
+  ([DllMain](https://learn.microsoft.com/en-us/windows/win32/dlls/dllmain), `DLL_THREAD_ATTACH`), et le code compilé
+  avec [`/Zc:tlsGuards`](https://learn.microsoft.com/en-us/cpp/build/reference/zc-tlsguards) (actif par défaut depuis
+  Visual Studio 2019 16.5) initialise ses variables `thread_local` au premier usage sur ces threads, car le modèle
+  copié laisse la garde à faux. Exécuter du code sur un autre thread pour lui livrer la raison 2 demanderait de
+  détourner ce thread, ce que nous ne faisons pas. Que le titre soit compilé avec les gardes TLS est supposé (sa chaîne
+  d'outils est récente, section 1, mais la garde n'a pas été cherchée). Le lanceur installe la TLS avant le point
+  d'entrée du titre, sur le même thread : dans `anyxboxx.exe`, les threads antérieurs à l'installation sont seulement
+  ceux du lanceur et du chargeur de Windows.
+- **W13.** L'ordinal 1 est `GameInputCreate(IGameInput**)`. Sources : Microsoft Learn dit qu'en GameInput v0,
+  `GameInputCreate` est exporté par `GameInput.lib` et crée toujours l'interface v0, que les bibliothèques des
+  versions antérieures, « comme celle du GDK », continuent de l'appeler et sont relayées au runtime installé, et que
+  tout runtime accepte la v0 ([GameInputCreate](https://learn.microsoft.com/en-us/gaming/gdk/docs/reference/input/gameinput/functions/gameinputcreate),
+  [GameInputInitialize](https://learn.microsoft.com/en-us/gaming/gdk/docs/reference/input/gameinput/functions/gameinputinitialize),
+  [versions de l'API](https://learn.microsoft.com/en-us/gaming/gdk/docs/features/common/input/overviews/input-version-interop)).
+  La bibliothèque NuGet récente exporte `GameInputInitialize` à la place : un import de `GameInputCreate` par ordinal
+  correspond donc à la bibliothèque v0 du GDK. Mesuré sur notre hôte Windows 11 : `System32\GameInput.dll`
+  (0.2309.26100.9818) exporte `GameInputCreate` à l'ordinal 1, tout comme `System32\GameInputRedist.dll` (4.0.306.0,
+  avec `GameInputInitialize` à 2). La question d'ABI de la ligne est donc réglée pour la fabrique : v0, que tout runtime
+  hôte sert. Que la `GameInput.dll` de la console numérote aussi `GameInputCreate` 1 est supposé, d'après l'import
+  statique et la bibliothèque du GDK.
+  **Choix : pas de shim, l'hôte le sert.** Un `GameInputCreate` du runtime répondant `E_NOTIMPL` (règle 3) priverait
+  de vraies manettes un titre que l'hôte sert déjà, et un `GameInputCreate` fonctionnel doublerait le runtime de l'hôte.
+  `tests/test_launcher.py` vérifie qu'`anyxboxx.exe` lie `GameInput.dll!#1` à l'hôte et que l'appel rend `S_OK` avec un
+  objet (ignoré sur un hôte sans GameInput), et qu'une bibliothèque de l'hôte à laquelle manque un import par ordinal
+  arrête le lanceur en nommant l'import (`dll!#1`), jamais un thunk muet. `tests/test_native_services.py` vérifiait
+  déjà la même liaison en mode natif Python. [jour-j.md](../jour-j.md) dit quoi installer quand GameInput manque.
+- **W15.** [jour-j.md](../jour-j.md) liste désormais, sous « Ce que l'hôte Windows doit fournir », GameInput (W13) et
+  les imports propres à l'hôte de la section 2, avec ce qu'on en sait : mesurés sous Windows 11 seulement ; la
+  présence d'un API set se décide appareil par appareil, quel que soit le préfixe `api-` ou `ext-`
+  ([Windows API sets](https://learn.microsoft.com/en-us/windows/win32/apiindex/windows-apisets)) ;
+  `RegisterAppStateChangeNotification` est hébergé par `twinapi.core.dll` derrière
+  `api-ms-win-core-psm-appnotify-l1-1-0`/`-l1-1-1`
+  ([Microsoft Learn](https://learn.microsoft.com/en-us/windows/win32/api/appnotify/nf-appnotify-registerappstatechangenotification)) ;
+  les éditions N n'ont pas Media Foundation sans le Media Feature Pack. Documentation seulement, sans test.
+- **W16.** Non fait. Les pages de référence `xmem` du GDK (`XMemSetAllocationHooks` et la macro associée) ne sont
+  servies par Microsoft Learn qu'aux programmes de développeurs sous NDA (vérifié le 2026-11-24) : ce n'est donc pas une
+  source publique au sens de la règle 2, et aucune page publique ni aucun code open source trouvé ne lit cet export. La
+  ligne reste ouverte jusqu'à une source publique ou une mesure sur le titre.
 
 ## Sources et crédits
 

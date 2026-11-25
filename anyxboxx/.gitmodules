@@ -2,7 +2,3 @@
 	path = third_party/tombox
 	url = https://github.com/omonkeyz/xbox-emulator.git
 	ignore = dirty
-[submodule "third_party/victory"]
-	path = third_party/victory
-	url = https://github.com/LooperSalty/victory.git
-	ignore = dirty

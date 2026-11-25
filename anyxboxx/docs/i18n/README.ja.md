@@ -7,15 +7,17 @@
 > [!NOTE]
 > **現在地（2026-11-25）**
 >
-> i7-13700KF + RTX 4070 SUPER、Windows 11 で計測。VIctory のフォーク `LooperSalty/victory` のコミット `80d58f8` (branch `anyxboxx/fork-7b0-lot9-murs`)（サブモジュール `third_party/victory`）を `tools/lancer_victory.ps1 -GameDir <ゲームのフォルダー>` で起動しています。
+> i7-13700KF + RTX 4070 SUPER、Windows 11 で計測。VIctory のフォーク `LooperSalty/victory` のコミット `80d58f8` (branch `anyxboxx/fork-7b0-lot9-murs`)（`third_party/victory`）を `tools/lancer_victory.ps1 -GameDir <ゲームのフォルダー>` で起動しています。
 >
 > - ✅ GTA VI の Xbox Series 1.0.2.1 ビルドは PC で**起動します**。起動、プロフィール画面、初回設定、法的画面、ロード、ポーズメニューまで動作し、メニューは 30 fps です。
 > - ✅ **ワールドに到達して表示します**：キャラクターはプレイヤーの操作で動き、3D 画像が表示されます。約 4 分 20 秒の計測で 4.8〜5.4 フレーム/秒、1 フレームあたり約 6,550 ドロー（メンテナーが計測、Windows 11、RTX 4070 Super、VIctory ログ）。起動アニメーションはちらつきません（観察）。これまで一度も点灯していなかったイラディアンスキャッシュ（ムービーの 1 フレームの PIX キャプチャでディスパッチ 0 回）は、2 つのシェーディング用シェーダーが変換され、パイプラインがゲーム内で作成・バインドされるようになりました（観察）。
 > - ✅ **すべてのカットシーンが最後まで再生されます**（11 月 25 日、ランチャーの設定と固定コミット `80d58f8` でメンテナーが観察）。ただし一部の場所でまだグラフィックが欠けています（レイトレーシング構造ビルダーは無効）。メンテナーはカットシーン中に最大 9 fps、安定して 7〜8 fps を観察しました（ウィンドウのタイトル、11 月 25 日）。スクリプトによる実行では、ログから計測した中央値はシーンにより 2〜3 fps と低めでした。
 > - ✅ **最初の 2 つのミッションを最後までプレイ**：プロジェクトの協力者が約 2 fps で約 45 分間プレイし、最初の 2 つのミッションをクリアしました（11 月 25 日にメンテナーへ報告。私たちのログでの計測ではありません）。
+> - ✅ **Linux でプロローグを越えてチャプター 1 へ**（ボートの上のジェイソン）：11 月 25 日、Proton（GE-Proton11-12、wineserver のコミュニティ製パッチ適用）と AMD RX 9070 XT、コミット `890a83a` でプレイ。23 分間の起動でクラッシュなし、終始約 3〜5 fps（VIctory のログ：中央値 3.7 fps、80 % の時間が 2.2〜4.5）。影の部分と屋内は黒いまま（レイトレーシングなし）。
 > - ⛔ 現在の制限：変換できないシェーダーが 6 個残っています（以前は 9 個）。ドライバーに拒否されるパイプラインは 16 個です（フォークの issue #75 は RTX 3070 でさらに約 80 個と報告していますが、4070 Super では未確認）。レイトレーシングによる照明はありません（BVH ビルダーは無効のまま、1 フレームあたり約 350 ディスパッチを破棄）。`VICTORY_LATE_WAIT` 設定では最初の部屋の壁が透明になることがあります（フォークの issue #168、修正中：#191、#206）。長時間の安定性は約 4 分 20 秒の間、デバイス損失なしを計測したのみです。`VICTORY_RELAY` は既定でオフです。フォークの issue #89 によると、キャラクターの肌が消え、字幕が重なります。
 > - 👁 11 月 24 日の経過（メンテナーが計測または観察、VIctory ログ）：`d279e69` 約 4 fps、刑務所で 13 分後にデバイス喪失 → `7b0f736` + `VICTORY_RELAY=2` 約 4.5 fps → PR #172 のランチャー設定（DRED なし）約 5.5 fps → バッチ 4（pull request 3 件）`VICTORY_RELAY=2` で約 6.6 fps、起動時のちらつきを修正 → 今回のバッチ（pull request 7 件、`VICTORY_RELAY` なし）約 5.4 fps だが 1 フレーム 6,449 ドローで、これまでで最良の画像 → バッチ 8（バッチ 5 にプルリクエスト 1 件、#11 を追加）約 4.8〜5.4 fps、1 フレームあたり約 6,550 ドロー、イラディアンスキャッシュのシェーダーが変換可能に。
-> - 🆕 ブランチ `anyxboxx/fork-7b0-lot9-murs` のコミット `80d58f8` に固定：バッチ 8 に、独自の `xg:` コミット 3 件（`xg_xs.dll` の配置を Microsoft のライブラリとまったく同じように返す：親モードの末尾ミップと位置、サブリソースごとの 64 KiB タイリング。テストが本物の DLL と 54 件の記述を比較し、メンテナーはゲーム内で差 0 を計測したため、`-XgDll` は今や検証用の基準にすぎない）、シェーダーとパイプラインのオフライン事前コンパイル（フォーク `fxceless/victory-fork` のプルリクエスト #282、t4l03 の移植）：`victory translate --cache --pipelines`、ランチャーのスイッチ `-Precompile`（計測：25,689 個のシェーダーを約 4.5 分で変換、296 個は拒否、キャッシュ 13 GB）、そのフォークの他のプルリクエスト 7 件（#349、#355、#396、#386、#358、#353、#374）を加えたもの。メンテナーが計測（VIctory ログ、11 月 24 日から 25 日の夜）：4.8〜5.1 fps、1 フレームあたり約 12.7 % の draw が破棄（以前は 11〜14 %）。カットシーンはより良いと判断（観察）。さらにフォークの Yorivel による 2 件のコミット（`e49864a`、`bf870de`）：物理ページへの DirectStorage の書き込みが GPU 側に通知されるようになり（`VICTORY_DSTORAGE_NOTIFY=1`、ランチャーが設定）、最初の部屋の壁の古いコピーを保持しなくなりました。メンテナーが計測（VIctory ログ、11 月 25 日、02:41〜02:50 頃）：新しいセーブからワールドまで約 9 分、5.3〜6.9 fps、1 フレームあたり 4,200〜6,300 ドロー、デバイス損失なし。カットシーンは最後まで再生され、「信じられない」と評価（観察）。ただし一部の場所でまだグラフィックが欠けています。破棄されたドローの大半は無効化されたレイトレーシング構造ビルダーによるもので（あるログでは 15,444 件中 14,943 件）、NVIDIA が拒否する 15 個の wave64 コンピュートパイプライン（約 300 ドロー）ではありません。
+> - 🆕 VIctory はこのリポジトリ内にコピーされた（`third_party/victory`、サブモジュールではなくなった）。独自のコードとして扱い、同期や固定はしない：`80d58f8` に、Proton（Wine）と AMD カード向けの 57 コミットを追加（フォーク `fxceless/victory-fork`、VIctory、klbf-lab、JoshuuDev と myokex の `victory-amd`、および独自のもの。作者は THIRD_PARTY.md）。Linux のみで計測（Fedora 44、RX 9070 XT、RADV、コミュニティ製 wineserver パッチ入りの GE-Proton11-12、約 23 分の 1 回の実行の VIctory ログ）：約 3.7 fps（ワールドのフレーム中央値 266 ms）、クラッシュやデバイス消失なし。顔、肌、ジオメトリは完全（観察）。屋内と影の部分は黒く、レイトレーシングは動いていない。Windows ではまだ計測していない。起動スクリプトの設定は変わらない。既存のクローンでは pull の前に `git submodule deinit -f third_party/victory` を実行し、`third_party/victory` と `.git/modules/third_party/victory` を削除すること（ガイド参照）。
+> - 📌 ブランチ `anyxboxx/fork-7b0-lot9-murs` のコミット `80d58f8` に固定：バッチ 8 に、独自の `xg:` コミット 3 件（`xg_xs.dll` の配置を Microsoft のライブラリとまったく同じように返す：親モードの末尾ミップと位置、サブリソースごとの 64 KiB タイリング。テストが本物の DLL と 54 件の記述を比較し、メンテナーはゲーム内で差 0 を計測したため、`-XgDll` は今や検証用の基準にすぎない）、シェーダーとパイプラインのオフライン事前コンパイル（フォーク `fxceless/victory-fork` のプルリクエスト #282、t4l03 の移植）：`victory translate --cache --pipelines`、ランチャーのスイッチ `-Precompile`（計測：25,689 個のシェーダーを約 4.5 分で変換、296 個は拒否、キャッシュ 13 GB）、そのフォークの他のプルリクエスト 7 件（#349、#355、#396、#386、#358、#353、#374）を加えたもの。メンテナーが計測（VIctory ログ、11 月 24 日から 25 日の夜）：4.8〜5.1 fps、1 フレームあたり約 12.7 % の draw が破棄（以前は 11〜14 %）。カットシーンはより良いと判断（観察）。さらにフォークの Yorivel による 2 件のコミット（`e49864a`、`bf870de`）：物理ページへの DirectStorage の書き込みが GPU 側に通知されるようになり（`VICTORY_DSTORAGE_NOTIFY=1`、ランチャーが設定）、最初の部屋の壁の古いコピーを保持しなくなりました。メンテナーが計測（VIctory ログ、11 月 25 日、02:41〜02:50 頃）：新しいセーブからワールドまで約 9 分、5.3〜6.9 fps、1 フレームあたり 4,200〜6,300 ドロー、デバイス損失なし。カットシーンは最後まで再生され、「信じられない」と評価（観察）。ただし一部の場所でまだグラフィックが欠けています。破棄されたドローの大半は無効化されたレイトレーシング構造ビルダーによるもので（あるログでは 15,444 件中 14,943 件）、NVIDIA が拒否する 15 個の wave64 コンピュートパイプライン（約 300 ドロー）ではありません。
 > - 📌 ブランチ `anyxboxx/fork-7b0-lot8-xg` のコミット `19feca8` に固定：バッチ 8 に、テクスチャの配置を Microsoft 自身のライブラリに任せる独自のコミットを 1 件追加：`tools/lancer_victory.ps1 -GameDir <ゲームのフォルダー> -XgDll <xg_xs.dll のパス>`。`xg_xs.dll` はご自身の GDK に含まれるオフライン PC 版です（このリポジトリには決して含めません）。`-XgDll` がなければ何も変わりません。メンテナーが計測（VIctory ログ、11 月 25 日）：84 件のテクスチャ記述でライブラリの応答が VIctory と異なります（64 KiB テクスチャのテール mip、テクスチャ配列の 64 KiB タイリング。サイズとオフセットは一致）。ライブラリを使うとワールドは 5.4〜7.1 fps（使わない場合 5.1〜5.6）で、これまでで最良の実行と判断されました（観察）。`-XgMode compare` は VIctory の配置を保ったまま、差異をすべてログに記録します。
 > - 📌 私たちの VIctory フォーク `LooperSalty/victory` のブランチ `anyxboxx/fork-7b0-lot8` のコミット `d138351` に固定：バッチ 5（フォーク `fxceless/victory-fork` の `7b0f736` に 7 件のプルリクエストを加えたもの、ガイド参照）に、`cherry-pick -x` で取り込んだプルリクエスト 1 件を追加：#11（cxchhh、数命令離れた退避中のレーンマスクのペアを復元し、相対 VGPR 読み出しで退避中のレーンを保持。イラディアンスキャッシュの 2 つのシェーディング用シェーダーが変換可能に）。メンテナーが計測（VIctory ログ、PIX キャプチャ、`main` のランチャー設定）：4.8〜5.4 fps、1 フレームあたり約 6,550 ドロー、変換できないシェーダー 6 個（バッチ 5 では 9 個）、ドライバーに拒否されるパイプライン 16 個（バッチ 5 と同じ）、約 4 分 20 秒デバイス損失なし。既存のコピーは `git submodule sync third_party/victory` に続けて `git submodule update --init third_party/victory` を実行してください。サブモジュールの URL が PR #178 で変わりました。
 > - 必要なもの: ご自身のゲームのコピー、SM 6.6 とメッシュシェーダー対応の NVIDIA または AMD の GPU、Rust。このリポジトリにゲームファイルは含まれません。
@@ -25,7 +27,7 @@ AnyXboxX は Xbox GDK の実行ファイル（PE32+ x86-64 形式）を読み込
 
 ## 対象と現状
 
-AnyXboxX は 1 つのビルドに特化しています: **Xbox Series 版 Grand Theft Auto VI、バージョン 1.0.2.1**。このゲームが必要とするもの（インポートするシステム関数、使用するシェーダーと Direct3D 12.x メソッド）だけを変換します。ほかのゲームは、この変換が完了してから試します。本プロジェクトは同じビルドを対象とする [VIctory](https://github.com/Marvisak/VIctory)（Marvisak、GPL-3.0 以降）を土台にしています。VIctory は、フォーク `fxceless/victory-fork`（GPL-3.0）のコミット `7b0f736` に固定したサブモジュール `third_party/victory`です。Marvisak と各プルリクエストの作者に感謝します。個別のクレジットは [THIRD_PARTY.md](../../THIRD_PARTY.md) にあります。
+AnyXboxX は 1 つのビルドに特化しています: **Xbox Series 版 Grand Theft Auto VI、バージョン 1.0.2.1**。このゲームが必要とするもの（インポートするシステム関数、使用するシェーダーと Direct3D 12.x メソッド）だけを変換します。ほかのゲームは、この変換が完了してから試します。本プロジェクトは同じビルドを対象とする [VIctory](https://github.com/Marvisak/VIctory)（Marvisak、GPL-3.0 以降）を土台にしています。VIctory は `third_party/victory` にコピーされており、フォーク `fxceless/victory-fork`（GPL-3.0）のコミット `7b0f736` を出発点としています。Marvisak と各プルリクエストの作者に感謝します。個別のクレジットは [THIRD_PARTY.md](../../THIRD_PARTY.md) にあります。
 
 > [!IMPORTANT]
 > **ゲームはプレイできません。** 現在地はこのページ上部のボックスを参照してください。このリポジトリにはゲームファイル、鍵、実行ファイルは含まれず、その入手方法も説明しません。
@@ -41,7 +43,7 @@ AnyXboxX は 1 つのビルドに特化しています: **Xbox Series 版 Grand 
 ![Xbox Series X の変換の進捗](../images/traduction.svg)
 
 - **プロセッサ命令：100 %。** Series X は x86-64 の AMD Zen 2 を使っており、PC と同じ命令セットです。ネイティブモードでは、ゲームのコードは変換なしでそのまま実行されます。
-- **GPU 命令：61 %。** コンソール向けゲームのシェーダーは、Series X の RDNA 2 GPU 向けにコンパイルされています。1,487 個の RDNA 2 エンコーディングのうち 902 個がリファレンスインタープリターで動作し、RDNA 2 → DXIL の再コンパイラーはすでに最初の頂点シェーダーとピクセルシェーダーを D3D12 で描画しています。
+- **GPU 命令：70 %。** コンソール向けゲームのシェーダーは、Series X の RDNA 2 GPU 向けにコンパイルされています。1,490 個の RDNA 2 エンコーディングのうち 1,046 個がリファレンスインタープリターで動作し、RDNA 2 → DXIL の再コンパイラーはすでに最初の頂点シェーダーとピクセルシェーダーを D3D12 で描画しています。
 - **システム関数：66 %。** テスト用パッケージの DLL がインポートする 1 337 個の関数のうち、この割合が隔離モードで解決できています。
 - **コンソール固有の DLL**：`xmem.dll`（4/4）と `d3d12_xs.dll`（2/2）は、パッケージが使う関数について変換済みです。D3D12.X（デバイスと `ID3D12*` インターフェース）は TomBox の `d3d12_xs.dll` が提供していますが、まだゲームでは試していません。
 - **GDK ランタイム：396 個の関数のうち 210 個**は AnyXboxX 内に C++ で書かれています。対象はタスクキュー（`XTaskQueue`、`XAsync`、`XThread`）、ユーザー（`XUser`、オフラインのローカルプロファイル）、Xbox Series X の識別情報（`XSystem`、Title ID、アナリティクス、ランタイムの機能）、セーブデータ（`XGameSave`、`XGameSaveFiles`、`XPersistentLocalStorage`）、ゲームパッケージ（`XPackage`）、オフラインのストア（`XStore`）、そしてオフラインでの招待・アクティベーション・エラー報告（`XGameInvite`、`XGameActivation`、`XGameProtocol`、`XError`）、さらに PC の実際の HDR 状態とネットワーク接続（`XDisplayTryEnableHdrMode`、`XNetworkingGetConnectivityHint`）です。これらは AnyXboxX がランタイムを単独で管理するとき（Gaming Services がない場合、または `ANYXBOXX_SYSTEM_RUNTIME=0` を指定した場合）に使われます。Windows の GDK ランタイムがある場合は、その API が自前のキューしか受け付けないため、タスクキューを含むすべてのインターフェースをそちらが提供します。トレース（`ANYXBOXX_TRACE=1`）は、要求された各インターフェースの名前を出力します。
@@ -88,7 +90,7 @@ C++ ランタイムは、ゲームの DXGI スワップチェーンの `Present`
 | 396 個の GDK 関数の表：インターフェースとメソッド番号を `xgameruntime.lib` から抽出（`tools/gdk_interfaces.py`） | ✅ 完了 |
 | `XTaskQueue`、`XAsync`、`XThread` を AnyXboxX が提供：testgdk が Windows のランタイムなしで動作 | ✅ 完了 |
 | その他の GDK のインターフェース：Windows の GDK ランタイムに委譲し、トレースで名前を表示 | 🟡 進行中 |
-| 800+ 件の自動テスト | ✅ 完了 |
+| 1100+ 件の自動テスト | ✅ 完了 |
 | D3D12.X：`D3D12XboxCreateDevice`、コンソールの `ID3D12*` インターフェース、`DXGIXPresentArray` を TomBox の Rust 製 `d3d12_xs.dll`（MIT、実装済みエクスポート 48 個、`tools/build_tombox.py d3d12_xs` でビルド、`ANYXBOXX_D3D12_XS=<パス>` で読み込み）が提供。コンソール実行ファイルがないためここでは検証不可 | 🟡 進行中 |
 | AnyXboxX にないものを補う TomBox（Rust、GPL-3.0）のコンソールライブラリ：`xg_xs`（テクスチャレイアウト、エクスポート 23 個）と完全な `xmem`（エクスポート 38 個）、`ANYXBOXX_TOMBOX_DIR=<フォルダー>` で使用。`tools/build_tombox.py xg_xs xmem` でビルド | 🟡 進行中 |
 | オフラインの `XUser`：常にサインイン済みのローカルプロファイル、変更可能なゲーマータグ（`ANYXBOXX_GAMERTAG`）、testgdk のサインイン成功 | ✅ 完了 |
@@ -103,7 +105,7 @@ C++ ランタイムは、ゲームの DXGI スワップチェーンの `Present`
 | `kernelx.dll`（コンソールのカーネル）: 2,661 個の関数を Windows の `kernel32`/`kernelbase` へ転送 | ✅ 完了 |
 | ネイティブモードでのゲームの暗黙的 TLS（`thread_local`）：キャリア DLL `anyxboxx_tls.dll` により各スレッドが自分のコピーを持つ（最大 256 KiB） | ✅ 完了 |
 | Python なしの C++ ネイティブランチャー（`runtime/build/bin/anyxboxx.exe <game.exe \| フォルダー> [--fps]`）：SimpleTriangle と testgdk が約 12,000 fps | ✅ 完了 |
-| RDNA 2 GPU 逆アセンブラー：1,487 個のニーモニックと LLVM 構文のオペランド（スカラー、VOP1/VOP2/VOPC/VOP3/VOP3P/SDWA/DPP/SMEM/DS/EXP/MUBUF/MTBUF/MIMG/FLAT と修飾子）、LLVM の公開エンコーディング 35,088 件で検証：`scarlett.py --rdna2 <shader.bin> [--liste]` | 🟡 進行中 |
+| RDNA 2 GPU 逆アセンブラー：1,490 個のニーモニックと LLVM 構文のオペランド（スカラー、VOP1/VOP2/VOPC/VOP3/VOP3P/SDWA/DPP/SMEM/DS/EXP/MUBUF/MTBUF/MIMG/FLAT と修飾子）、LLVM の公開エンコーディング 38,999 件で検証：`scarlett.py --rdna2 <shader.bin> [--liste]` | 🟡 進行中 |
 | RDNA 2 逆アセンブラーのオペランドが LLVM のテキストと一致：スカラーと VOP1/VOPC 100 %、DS 100 %、EXP 100 %、SMEM 96.5 %（最大値：残りのエンコーディングは LLVM が 2 通りに書く） | ✅ 完了 |
 | 最初の RDNA 2 頂点シェーダーとピクセルシェーダーを D3D12 で描画（`anyxboxx_gpu_run.exe --draw`）：すべての頂点とピクセルがリファレンスインタープリターと一致（GPU と WARP） | ✅ 完了 |
 | 再コンパイルした RDNA 2 シェーダーのテクスチャ：T#/S# ディスクリプターと `image_sample`（2D、最近傍テクセル、wrap または clamp-to-edge、8_8_8_8_UNORM と 32_32_32_32_FLOAT）、テクスチャ付きピクセルシェーダーを含め GPU と WARP でリファレンスインタープリターと一致；ディスクリプターの配置は Leonida と Mesa による | ✅ 完了 |
@@ -113,9 +115,10 @@ C++ ランタイムは、ゲームの DXGI スワップチェーンの `Present`
 | プルリクエストのチェック：lint と 9 つの README の同期（行、画像、テスト数）をプルリクエストごとに確認 | ✅ 完了 |
 | Rust によるコンソールテクスチャ：Xbox2Windows（MIT）から移植した BC7 デコードと GFX10 `SW_4K_S` タイル解除、参照ダイジェストを再現；`anyxboxx_texture bc7 <blocks.bin> <幅> <高さ> <out.png> [--4k-s]` | 🟡 進行中 |
 | AnyXboxX が自前で書くその他の GDK のインターフェース（`XGameUi`、`XNetworking`…） | ⏳ 未着手 |
-| RDNA 2 → DXIL のシェーダー再コンパイラー：最初のプログラムを HLSL に変換し、DXIL にコンパイルして D3D12 で PC の GPU 上で実行（`--hlsl`、`anyxboxx_gpu_run.exe`、GPU がなければ WARP）、メモリは 1,487 エンコーディング中 902 を実行する wave32 リファレンスインタープリター（スカラー、VOP1/VOP2/VOPC/VOP3、メモリ：SMEM、LDS、GLOBAL、V# 境界付き MUBUF、アトミック、分岐、`exec` による分岐）の結果と一致；最初の頂点シェーダーとピクセルシェーダー（EXP エクスポート、VINTRP 補間）を D3D12 で描画し、頂点ごと・ピクセルごとに一致：`scarlett.py --rdna2 <shader.bin> --executer` | 🟡 進行中 |
+| RDNA 2 → DXIL のシェーダー再コンパイラー：最初のプログラムを HLSL に変換し、DXIL にコンパイルして D3D12 で PC の GPU 上で実行（`--hlsl`、`anyxboxx_gpu_run.exe`、GPU がなければ WARP）、メモリは 1,490 エンコーディング中 1,046 を実行する wave32 リファレンスインタープリター（スカラー、VOP1/VOP2/VOPC/VOP3/VOP3P、メモリ：SMEM、LDS、GLOBAL、V# 境界と型付きフォーマット付き MUBUF/MTBUF、アトミック、分岐、`exec` による分岐）の結果と一致；最初の頂点シェーダーとピクセルシェーダー（EXP エクスポート、VINTRP 補間）を D3D12 で描画し、頂点ごと・ピクセルごとに一致：`scarlett.py --rdna2 <shader.bin> --executer` | 🟡 進行中 |
+| 32 レーンの wave を持つ GPU 上での wave64 コンピュートプログラム（#70）：64 レーンの wave を 64 スレッドの 1 グループとして実行（レーンマスクとレーン読み出しは groupshared メモリ経由、`WaveSize` なし）、RTX（32 レーンの wave）と WARP でメモリが wave64 のリファレンスインタープリターと一致；DPP と SDWA 比較は名前付きで拒否 | 🟡 進行中 |
 | シェーダーキャッシュ：変換したシェーダーを一度だけ DXIL にコンパイルし、以後は dxc（22 ms）の代わりにディスク（1.4 ms）またはメモリ（0.8 ms）から再利用。`%LOCALAPPDATA%\AnyXboxX\shader-cache` または `ANYXBOXX_SHADER_CACHE`、サイズ上限あり | 🟡 進行中 |
-| VIctory 経由でのタイトルの Xbox Series 1.0.2.1 ビルド（`third_party/victory`、ブランチ `anyxboxx/fork-7b0-lot9-murs`、コミット `80d58f8`、フォーク `fxceless/victory-fork` に 16 件のプルリクエスト）：ワールドが表示され、4.8〜5.4 fps、1 フレームあたり約 6,550 ドローでプレイ可能（メンテナーが計測、Windows 11、RTX 4070 Super、VIctory ログ）。起動時のちらつきは修正済み。イラディアンスキャッシュのシェーダーが変換可能に。変換できないシェーダー 6 個、レイトレーシングによる照明なし。長時間の安定性は約 4 分 20 秒のみ計測 | 🟡 進行中 |
+| VIctory 経由でのタイトルの Xbox Series 1.0.2.1 ビルド（`third_party/victory`、このリポジトリにコピーした独自のコード。`80d58f8`（フォーク `fxceless/victory-fork` に 16 件のプルリクエスト）に 57 コミットを加えたもの。Windows の数値は `80d58f8` で計測）：ワールドが表示され、4.8〜5.4 fps、1 フレームあたり約 6,550 ドローでプレイ可能（メンテナーが計測、Windows 11、RTX 4070 Super、VIctory ログ）。起動時のちらつきは修正済み。イラディアンスキャッシュのシェーダーが変換可能に。変換できないシェーダー 6 個、レイトレーシングによる照明なし。長時間の安定性は約 4 分 20 秒のみ計測 | 🟡 進行中 |
 | x64 SEH 例外（`.pdata`）、マルチスレッド | ⏳ 未着手 |
 | 実行中の DLL の動的読み込み（`LoadLibrary` + `DllMain`） | ⏳ 未着手 |
 | D3D12.X から Direct3D 12 / Vulkan へのグラフィックス変換 | ⏳ 未着手 |

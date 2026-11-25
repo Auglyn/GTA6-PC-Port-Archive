@@ -1,4 +1,4 @@
-"""Épinglage de VIctory sur la branche anyxboxx/fork-7b0-lot9-murs de LooperSalty/victory (fork fxceless/victory-fork plus seize PR, dont la précompilation hors ligne, et la xg_xs.dll locale optionnelle comme oracle) et réglages par défaut du lanceur."""
+"""VIctory copié dans third_party/victory (la branche anyxboxx/fork-7b0-lot9-murs de LooperSalty/victory plus 57 commits pour Proton et les cartes AMD, rejoués avec leurs auteurs) et réglages par défaut du lanceur."""
 import configparser
 import os
 import re
@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 RACINE = Path(__file__).resolve().parents[1]
-COMMIT_FORK = "80d58f8fe2769d6c857eb27abc159b6cf64530a3"
+VICTORY = RACINE / "third_party" / "victory"
 REGLAGES = (
     "VICTORY_SHADER_LOOP_LIMIT", "VICTORY_LATE_WAIT", "VICTORY_WIDE_BACK",
     "VICTORY_CARD_BUFFERS_MIN_MB", "VICTORY_CARD_BUFFERS_MB", "VICTORY_DSTORAGE_NOTIFY",
@@ -33,19 +33,17 @@ def _variables_posees(texte):
     return noms | set(re.findall(r"\$env:(VICTORY_[A-Z0-9_]+)\s*=", texte))
 
 
-def test_gitmodules_points_victory_to_the_maintainers_fork():
+def test_gitmodules_no_longer_declares_victory():
     declares = configparser.ConfigParser()
     declares.read(RACINE / ".gitmodules", encoding="utf-8")
-    urls = {declares[s]["path"]: declares[s]["url"] for s in declares.sections()}
-    assert urls["third_party/victory"].removesuffix(".git") == "https://github.com/LooperSalty/victory"
+    assert all(declares[s]["path"] != "third_party/victory" for s in declares.sections())
 
 
-def test_gitlink_is_pinned_to_the_measured_commit():
+def test_victory_source_is_tracked_in_the_repository():
+    assert (VICTORY / "Cargo.toml").is_file() and (VICTORY / "LICENSE").is_file()
     sortie = subprocess.run(["git", "ls-files", "-s", "third_party/victory"], cwd=RACINE, capture_output=True,
                             text=True, check=False).stdout
-    if not sortie:
-        return                                           # arbre sans historique git : rien à vérifier
-    assert sortie.split()[1].startswith(COMMIT_FORK)
+    assert not any(ligne.startswith("160000 ") for ligne in sortie.splitlines())   # aucun gitlink
 
 
 def test_launcher_sets_the_tuned_settings_and_can_turn_them_off():
@@ -74,11 +72,8 @@ def test_launcher_turns_dred_on_only_when_asked():
 
 
 def test_every_variable_the_launcher_sets_is_read_by_victory():
-    victory = RACINE / "third_party" / "victory"
-    if not (victory / "Cargo.toml").is_file():
-        pytest.skip("sous-module third_party/victory non récupéré")
-    code = "\n".join(f.read_text(encoding="utf-8", errors="replace") for f in victory.rglob("*.rs")
-                     if "target" not in f.relative_to(victory).parts)
+    code = "\n".join(f.read_text(encoding="utf-8", errors="replace") for f in VICTORY.rglob("*.rs")
+                     if "target" not in f.relative_to(VICTORY).parts)
     for nom in sorted(_variables_posees(_lanceur()) - {"VICTORY_GAME_DIR", "VICTORY_SKIP_PIPELINES"}):
         assert f'"{nom}"' in code, nom
 
@@ -163,7 +158,7 @@ def _lancer(tmp_path, faux_outil, code_cargo=0, options=()):
 
 
 def test_launcher_rebuilds_and_passes_opt_in_card_rehash(tmp_path, faux_outil):
-    # Après un `git submodule update`, l'ancien victory.exe ignorait les réglages du commit épinglé : cargo décide.
+    # Après une mise à jour de third_party/victory, l'ancien victory.exe ignorait les réglages du commit épinglé : cargo décide.
     fini, appels, manifeste, jeu = _lancer(tmp_path, faux_outil)
     assert [a.split()[0] for a in appels] == ["cargo", "victory"], (appels, fini.stderr)
     assert appels[0] == f"cargo build --profile diag -p victory --features diagnostics --manifest-path {manifeste}"

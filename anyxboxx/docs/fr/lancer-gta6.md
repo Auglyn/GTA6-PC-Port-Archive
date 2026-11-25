@@ -4,11 +4,75 @@
 
 Ce guide explique comment installer et lancer le projet, et tout ce qu'il faut installer pour refaire nos essais sur le build Xbox Series 1.0.2.1 de GTA VI, jusqu'au point où nous en sommes : la première cinématique. Il ne fournit pas le jeu et n'explique pas comment l'obtenir : vous apportez votre propre copie. Ne mettez jamais de fichier du jeu dans ce dépôt et ne les joignez à aucune issue.
 
-Le lancement passe par [VIctory](https://github.com/Marvisak/VIctory) (Marvisak, GPL-3.0 ou ultérieure), suivi ici comme sous-module `third_party/victory`, épinglé sur la branche `anyxboxx/fork-7b0-lot9-murs` du fork du mainteneur [LooperSalty/victory](https://github.com/LooperSalty/victory), qui assemble le fork [fxceless/victory-fork](https://github.com/fxceless/victory-fork) (GPL-3.0) au commit `7b0f736`, huit de ses pull requests précédentes, sept nouvelles, le portage de la précompilation hors ligne de #282 et des commits à nous (disposition `xg_xs.dll` servie comme la bibliothèque de Microsoft, voir plus bas), au commit `80d58f8`. Le script `tools/lancer_victory.ps1` le compile et le lance sur votre dossier du jeu.
+Le lancement passe par [VIctory](https://github.com/Marvisak/VIctory) (Marvisak, GPL-3.0 ou ultérieure), copié dans ce dépôt sous `third_party/victory`, où il est notre code : rien n'est synchronisé ni épinglé. La copie part de la branche `anyxboxx/fork-7b0-lot9-murs` du fork du mainteneur [LooperSalty/victory](https://github.com/LooperSalty/victory), puis a reçu 57 commits pour Proton et les cartes AMD (voir plus bas). Cette branche assemble le fork [fxceless/victory-fork](https://github.com/fxceless/victory-fork) (GPL-3.0) au commit `7b0f736`, huit de ses pull requests précédentes, sept nouvelles, le portage de la précompilation hors ligne de #282 et des commits à nous (disposition `xg_xs.dll` servie comme la bibliothèque de Microsoft, voir plus bas), au commit `80d58f8`. Le script `tools/lancer_victory.ps1` le compile et le lance sur votre dossier du jeu.
 
-## Branche épinglée : lot 8 plus la disposition xg, la précompilation hors ligne et sept pull requests du fork (25 novembre)
+## Correctifs Proton et AMD (25 novembre)
 
-`third_party/victory` pointe maintenant sur la branche `anyxboxx/fork-7b0-lot9-murs` de [LooperSalty/victory](https://github.com/LooperSalty/victory), au commit `80d58f8fe2769d6c857eb27abc159b6cf64530a3` : le lot 8 (plus bas) plus 15 commits, listés par `git log --oneline 19feca8..80d58f8` de la branche :
+`third_party/victory` n'est plus un sous-module : il contient une copie de VIctory à l'épinglage précédent `80d58f8` (section suivante, inchangée), suivie dans l'historique de ce dépôt de 57 commits pour Proton et les cartes AMD (`git log -- third_party/victory`). Chaque commit nomme sa source ; un commit repris de quelqu'un d'autre se termine par les lignes `Source:` et `Co-authored-by:`. Chaque dépôt d'origine est listé dans [THIRD_PARTY.md](../../THIRD_PARTY.md).
+
+Une copie existante qui a le sous-module doit le retirer avant le pull, sinon le checkout s'arrête sur les fichiers déjà présents :
+
+```powershell
+git submodule deinit -f third_party/victory
+Remove-Item -Recurse -Force third_party\victory, .git\modules\third_party\victory
+git pull
+```
+
+Sous Linux, `rm -rf third_party/victory .git/modules/third_party/victory` remplace `Remove-Item`. Cela supprime aussi `third_party/victory/target` : la première compilation repart de zéro. La clé du cache des shaders dépend de la source du traducteur : un cache rempli avec `-Precompile` sur `80d58f8` est rempli de nouveau.
+
+Ce qu'apportent les 57 commits :
+
+- **Proton (Wine)** : le HLSL interne du runtime (clamp des arguments, comparaison sur la carte, passe du plan de profondeur) compile avec le d3dcompiler de Wine, signatures racines construites en Rust (fork #127, BitWuehler) ; une bibliothèque de pipelines est créée sous vkd3d-proton (Marvisak/VIctory #1722, Impre-visible) et la liste des pipelines précoces est gardée sans elle ; beaucoup moins d'appels à `GetWriteWatch`, `VirtualQuery` et `VirtualProtect` par image ; les gardes restent ouvertes pendant les écritures noyau du runtime dans la mémoire du titre, et une faute sous le verrou des gardes ne bloque plus ; les lectures DirectStorage brutes et `fread` arrivent dans un tampon puis sont recopiées en mode utilisateur (JoshuuDev/victory-amd, Joshua Odom).
+- **AMD (hôtes à 64 lanes, tas de vues de 2^21)** : les programmes de pixels wave32 sur un hôte à 64 lanes calculent ballots et réductions par demi-vague (PastiiJay/klbf-lab, PastiiJay) ; indices de vues bornés à la dernière case, nulle, du tas (fork #134, triippywhale, et #98, sillynocodecat) ; comparaisons d'entiers 64 bits sur leurs deux mots (fork #135, alexdeliu) ; sommes f16 sur une vague où toutes les lanes ne tournent pas, sur une vague de 64.
+- **Shaders** : `v_cvt_f32_f64` et sommes `v_add_f64` (fork #9, MartinIndra02), `v_permlane16_b32` et `v_permlanex16_b32` (fork #134, triippywhale), indices de sommets des primitives de maillage masqués à 9 bits (Marvisak/VIctory #1718, tjthebigbearcat-hub), `v_interp_p2_f16` avec `op_sel`, `omod` et clamp (Marvisak/VIctory #1696, Calvix2k), entrées de pixels interpolées comme le déclare le PSV0 du conteneur console (fork #150, wildheathen), garde NaN sur les exports de couleur et les écritures typées (PastiiJay/klbf-lab, PastiiJay), passes de nettoyage sur chaque module traduit (commit `1684989` du fork, fxceless).
+- **Vues mémoire et textures** : la garde des textures voit les écritures par toutes les vues de ses pages (fork #115, Spexivus ; correction de joroyt via myokex) ; enregistrements du tas et vues de tampon faits avec les octets recopiés à chaque soumission (portage de Marvisak/VIctory `86a5ed6b`, Marvisak) ; vues de textures placées en accès non ordonné recopiées sur des textures hôte (fork #114, Kaivyyy) ; les attentes tardives attendent aussi les écritures par alias et les tampons de transfert en vol (fork #191, gdawid9407, #206, AscilCH, #141, adritoyalser) ; copies propres des vues tenues dans un budget ; vues de textures placées distinguées par la mémoire de leurs mips, celles perdues remises dans la file, longues files de textures chargées plus vite pendant un temps borné, dispatchs de plus de 65 535 groupes faits en plusieurs parts, vues de tampons constants limitées à 64 Kio, tableaux de pages DirectStorage lus au moment de la requête (myokex/victory-amd, myokex).
+- **Pipelines** : un pipeline encore en création n'est attendu que dans la première image qui le demande ; attentes de pipelines pendant le chargement d'un monde bornées par lancement, programmes de résolution du ray tracing non créés tant que le constructeur de structures est coupé, liste des pipelines précoces fusionnée d'un lancement à l'autre (myokex).
+- **Diagnostics et tests** : compteurs par image, interrupteurs A/B, magenta pour les textures manquantes, test du pipeline de maillage ignoré sans mesh shaders (fork #14, oddiums).
+
+Variables lues par ce code. `tools/lancer_victory.ps1` n'en pose aucune : un lancement prend les valeurs par défaut.
+
+| Variable | Défaut | Rôle |
+| --- | --- | --- |
+| `VICTORY_SHADER_OPT` | toutes les passes | Passes de nettoyage des shaders traduits ; `0` les coupe. Fait partie de la clé du cache. |
+| `VICTORY_PS_HALVES` | active | Ballots et réductions par demi-vague, seulement sur un hôte dont les vagues de pixels ont 64 lanes (AMD) ; `0` coupe. |
+| `VICTORY_L6_HEAP_CLAMP` | active | Tas de vues de 2^21 et indices bornés, seulement sur un hôte qui accepte ces tas ; `0` coupe. |
+| `VICTORY_L6_NAN_GUARD`, `VICTORY_L6_PSV_INTERP`, `VICTORY_L6_PLACED_UAV`, `VICTORY_L6_NULL_LIBRARY`, `VICTORY_L6_PLANE_PASS` | actives | Garde NaN, interpolation PSV0, vues de textures placées en accès non ordonné, bibliothèque de pipelines à blob nul, passe du plan de profondeur ; `0` en coupe une. |
+| `VICTORY_L7_<NOM>` (`DYNAMIC_SLOTS`, `CB_SLOTS`, `VIEW_COPY_LRU`, `VIEW_ADDRESS`, `TEXTURE_SLOTS`), `VICTORY_L7_VIEW_COPY_MB` | actives, `512` | Cases et copies des vues ; `0` en coupe une. |
+| `VICTORY_L9_DSTORAGE_GUARDS`, `VICTORY_L9_GUARD_TITLE_VIEWS` | actives | Gardes ouvertes pendant les écritures noyau ; les gardes n'arment que les vues du titre. |
+| `VICTORY_TEXTURE_SWEEP` | active | Vues de textures placées perdues remises dans la file ; `0` coupe, `count` compte seulement. |
+| `VICTORY_TEXTURE_GATE_S`, `VICTORY_PIPELINE_GATE_S` | `60`, `120` | Secondes par lancement passées à charger une longue file de textures, ou à attendre des pipelines pendant le chargement d'un monde ; `0` jamais. |
+| `VICTORY_RT_RESOLVE` | non posée | Les programmes de résolution du ray tracing ne sont créés qu'avec `1` (ou `VICTORY_BVH_BUILDER=1`). |
+| `VICTORY_L9_ALIAS_UNCLEAN`, `VICTORY_HEAP_RECHECK` | coupées | `1` en active une. Coupées exprès : sous Linux, le lancement 28 (les deux actives) a perdu la géométrie des visages et le lancement 30 (`HEAP_RECHECK` active) a noirci la peau des visages (observé). |
+| `VICTORY_L7_ROLES`, `VICTORY_L7_SKIP`, `VICTORY_L7_UNLIT` | coupées | Diagnostic : draws sautés selon le rôle du shader. La table des rôles se construit en local depuis votre copie et n'entre jamais dans ce dépôt. |
+| `VICTORY_NULL_MAGENTA`, `VICTORY_CAPTURE_MENUS` | coupées | Diagnostic : magenta pour les textures manquantes ; captures dans les menus. |
+
+Mesuré sous Linux seulement, avec ce code (compilé comme `890a83a` avant la copie, même arbre ; Fedora 44, RX 9070 XT 16 Go, RADV via vkd3d-proton, GE-Proton11-12 avec un correctif communautaire « view-tree » du wineserver, journal VIctory du lancement 31, environ 23 min depuis le lancement, cache des shaders préparé hors ligne avec `victory translate --cache`) :
+
+- Monde : image médiane du monde de 266 ms, environ 3,7 i/s. Mesuré.
+- Aucun plantage, aucune perte du périphérique, aucun échec DirectStorage, aucune ligne `ERROR` dans le journal. Mesuré.
+- Visages, peau et géométrie complets, textures stables. Observé.
+- Les intérieurs et les zones à l'ombre sont noirs : le ray tracing ne tourne pas (le constructeur de structures est coupé et le lancement saute les passes de ray tracing, de GI et de reflets). Observé.
+- Avant, sur Proton sans correctif, le lot 6 tournait à 685 ms d'image médiane ; avec le correctif du wineserver et les réductions de write-watch de cette branche, le lancement 14 (un lot local qui portait déjà la plupart de ces commits) tournait à 274 ms. Mesuré.
+
+Réglages de ce lancement (non posés par le lanceur ; Linux seulement) :
+
+| Variable | Valeur | Pourquoi |
+| --- | --- | --- |
+| `VICTORY_LATE_WAIT`, `VICTORY_WIDE_BACK` | `0`, `0` | Avec les attentes tardives, le périphérique est perdu sur RADV (issue #184 du fork). |
+| `VICTORY_SHADER_LOOP_LIMIT` | `256` | Comme le lanceur. |
+| `VICTORY_PIPELINE_WAIT_MS` | `50` | Attente des pipelines côté hôte par image. |
+| `VICTORY_TEXTURE_BUDGET_MB` | `8192` | Budget de textures pour une carte de 16 Go. |
+| `VICTORY_TEXTURE_NO_WAIT` | `1` | Les rafraîchissements de textures n'attendent pas la mémoire du titre. |
+| `VICTORY_CARD_BUFFERS_MIN_MB`, `VICTORY_CARD_BUFFERS_MB` | `1`, `1024` | Comme le lanceur. |
+| `VKD3D_CONFIG` | `descriptor_heap` | Le titre demande 1 245 184 vues, plus que le plafond par défaut de vkd3d-proton. |
+| `VICTORY_SKIP_PIPELINES` | 9 empreintes de shaders | `7f05ddab771799a9`, `a53a7977fe762268`, `be14e72d86362031`, `32ed072b9f845048`, `a1b20bc47e3c9597`, `17829ac71aab4e8d`, `e8c962358d862e3f`, `559d9f0184e15fe3`, `afeea48bbb9913ad`. |
+| `VICTORY_L7_SKIP` | `rt,gi,reflections` | Avec une table des rôles locale (`VICTORY_L7_ROLES`) : ces passes coûtent du temps et ne dessinent rien tant que le ray tracing ne tourne pas. |
+
+Non mesuré : Windows. Les valeurs Windows du lanceur (`VICTORY_LATE_WAIT=3`, `VICTORY_WIDE_BACK=1`) ne changent pas et n'ont pas tourné avec ces 57 commits ; la plupart des nouveaux comportements sont actifs par défaut et valent pour tous les hôtes. La cible Windows compile sans avertissement (`cargo build --profile diag -p victory --features diagnostics`, compilation croisée sous Linux) et les tests de `victory-gpu` passent sous Proton (158 réussis, 2 ignorés).
+
+## Épinglage précédent : lot 8 plus la disposition xg, la précompilation hors ligne et sept pull requests du fork (25 novembre)
+
+`third_party/victory` pointait sur la branche `anyxboxx/fork-7b0-lot9-murs` de [LooperSalty/victory](https://github.com/LooperSalty/victory), au commit `80d58f8fe2769d6c857eb27abc159b6cf64530a3` : le lot 8 (plus bas) plus 15 commits, listés par `git log --oneline 19feca8..80d58f8` de la branche :
 
 Depuis `80d58f8` (branche `anyxboxx/fork-7b0-lot9-murs`), l'épinglage porte aussi deux commits de Yorivel venus du fork (`e49864a`, `bf870de`, issue #62 du fork) : les écritures DirectStorage dans des pages physiques sont signalées au côté GPU quand `VICTORY_DSTORAGE_NOTIFY=1`, que le lanceur pose. Mesuré par le mainteneur (journal VIctory, 25 novembre, vers 02:41 à 02:50, avec les réglages du lanceur ci-dessus) : d'une sauvegarde neuve jusque dans le monde en environ 9 minutes, 5,3 à 6,9 fps, 4 200 à 6 300 draws par image, pas de perte du périphérique ; cinématiques entières, jugé « incroyable » (observé) ; des graphismes manquent encore par endroits. La plupart des draws abandonnés viennent du constructeur des structures de ray tracing, coupé (14 943 sur 15 444 dans un journal ; mesuré).
 
@@ -65,8 +129,6 @@ Mesuré ou observé par le mainteneur (Windows 11, RTX 4070 Super), avec les ré
 - Avis du mainteneur : « cette version est très bien ».
 
 Limites. L'issue n°75 du fork signale environ 80 refus de pipeline de plus sur une RTX 3070 : cela n'a pas été observé sur la 4070 Super, attendez-vous donc à plus de refus sur d'autres cartes. L'éclairage par ray tracing est toujours absent (le constructeur BVH reste coupé, environ 350 dispatches jetés par image). Avec le réglage `LATE_WAIT` du lanceur, certains murs de la première salle peuvent être transparents (issue n°168 du fork, correctifs en cours : n°191, n°206). La tenue longue n'est mesurée que sur environ 4 min 20.
-
-**Mettre à jour une copie existante.** L'URL du sous-module a changé avec la PR n°178 (constaté le 24 novembre). Dans une copie d'AnyXboxX qui a déjà le sous-module, lancez `git submodule sync third_party/victory` puis `git submodule update --init third_party/victory`. Les auteurs sont crédités dans [THIRD_PARTY.md](../../THIRD_PARTY.md).
 
 ## Branche précédente : lot 5, fork plus sept pull requests (24 novembre, nuit)
 
@@ -155,7 +217,7 @@ Toutes sont des diagnostics : elles demandent le build `diag` (la fonctionnalit�
 | `VICTORY_CAPTURE_BUSY=<draws>[,<nombre>]` | Capture les images de plus de ce nombre de draws (2 images par défaut). | Pull request ouverte #638 |
 | `VICTORY_PRODUCERS=1` | Journalise une passe qui lit ce que seul du travail abandonné (non traduit ou sauté) écrit, avec le shader abandonné. | Pull request ouverte #638 |
 | `VICTORY_CAPPED_DYNAMIC=262144` | Plus d'emplacements de descripteurs dynamiques sur un tas plafonné (NVIDIA), au prix des plus hauts emplacements du titre. | Essai local, publié seulement sur notre fork (`anyxboxx/essai`, `anyxboxx/stable`) |
-| `VICTORY_SKIP_BVH_BUILDER=1` | Écarte les shaders du constructeur de BVH du titre. | Notre fork seulement (`anyxboxx/essai`), pas proposé en amont |
+| `VICTORY_SKIP_BVH_BUILDER=1` | Écarte les shaders du constructeur de BVH du titre. | Ancienne branche `anyxboxx/essai` seulement |
 | `VICTORY_PROFILE=<ms>` | Profileur à échantillonnage de tout le processus ; journalise les piles d'appels les plus fréquentes toutes les 5 s (période en ms, 4 par défaut). | Local, non publié |
 | `VICTORY_RT_MISS=1` | Tous les rayons manquent (diagnostic de ray tracing, désactivé par défaut). | Local, non publié |
 
@@ -166,7 +228,7 @@ Mesuré en lançant notre propre copie du build 1.0.2.1 sous VIctory, sur la bra
 - **Le mode Series S est plus rapide (mesuré).** `victory run --console series-s ...` donne environ 3,1 à 3,3 i/s dans le monde, contre environ 2,0 à 2,4 i/s en mode Series X (environ +50 %), avec le même symptôme d'image. Le jeu rend alors en interne en 1280x720 et présente en 1920x1080. Recommandé pour itérer.
 - **Diagnostic de l'image noire (mesuré).** La géométrie existe dans le G-buffer : les personnages de la cinématique sont visibles en 1440p et en 720p. La couleur finale est une teinte uniforme qui s'assombrit avec le temps (exposition), avec les sous-titres dessinés par-dessus. Presque toutes les passes d'éclairage différé sont traduites et liées. Une trace par passe (option locale `VICTORY_INDIRECT_TRACE`, non publiée) montre qu'environ 379 `ExecuteIndirect` de mesh partent avec des arguments à zéro, parce que les passes GPU qui produisent ces arguments ne sont pas encore traduites : le traducteur les refuse avec « an address from a phi » et « a lane mask holding lanes elsewhere read as data ». C'est le chantier en cours.
 - **Traduction (mesurée).** Shaders non traduits en jeu : environ 130 à 170 (compte en jeu). Sur le corpus (26 084 programmes, `victory translate`) : VS/PS 13 780 émis sur 14 038, CS 2 212, MS 8 654 sur 8 765 (comptes tels qu'affichés par l'outil).
-- **Correctifs publiés en amont** (`Marvisak/VIctory`) : #1215 (vitesse : écriture directe `NtWriteVirtualMemory`, copies sans `VirtualQuery`, profileur), #1225 (`readfirstlane` d'une adresse uniforme : ColorDownsample), #1231 (compteur de boucle uniforme : sondes de lumière). Des commentaires de mesures ont aussi été ajoutés sur #497, #320, #1074, #1198 et #841.
+- **Correctifs envoyés à `Marvisak/VIctory`** : #1215 (vitesse : écriture directe `NtWriteVirtualMemory`, copies sans `VirtualQuery`, profileur), #1225 (`readfirstlane` d'une adresse uniforme : ColorDownsample), #1231 (compteur de boucle uniforme : sondes de lumière). Des commentaires de mesures ont aussi été ajoutés sur #497, #320, #1074, #1198 et #841.
 - **Communauté.** Le projet a un serveur Discord (lien en haut du README).
 
 Variable ajoutée au tableau ci-dessus (diagnostic, build `diag`) :
@@ -187,19 +249,17 @@ Variable ajoutée au tableau ci-dessus (diagnostic, build `diag`) :
 ## Installation
 
 1. [Git](https://git-scm.com/).
-2. Rust via [rustup](https://rustup.rs/). La toolchain exacte est fixée par le `rust-toolchain.toml` du sous-module et s'installe seule à la première commande `cargo`.
+2. Rust via [rustup](https://rustup.rs/). La toolchain exacte est fixée par `third_party/victory/rust-toolchain.toml` et s'installe seule à la première commande `cargo`.
 3. Visual Studio 2022 ou 2026 Build Tools avec la charge « Développement Desktop en C++ » (MSVC).
 4. Windows SDK 10.0.26100 (fournit `dxc`).
 5. Optionnel : la fonctionnalité Windows « Graphics Tools » (couche de débogage D3D12, utile seulement pour `VICTORY_D3D12_DEBUG`).
 6. Python 3.12, seulement pour la suite de tests d'AnyXboxX (voir Tests).
 
-Récupérer le code avec son sous-module :
+Récupérer le code (VIctory est inclus) :
 
 ```powershell
-git clone --recurse-submodules https://github.com/LooperSalty/AnyXboxX.git
+git clone https://github.com/LooperSalty/AnyXboxX.git
 cd AnyXboxX
-# ou, dans un clone existant :
-git submodule update --init third_party/victory
 ```
 
 ## Compilation
@@ -230,9 +290,11 @@ Le script règle les variables ci-dessous (sauf avec `-NoTunedSettings`, qui ne 
 
 Les anciennes valeurs par défaut `VICTORY_RT_MISS`, `VICTORY_WAVE32_READFIRSTLANE`, `VICTORY_WAVE32_CROSSLANE`, `VICTORY_SKIP_BVH_BUILDER` et `VICTORY_CAPPED_DYNAMIC` sont retirées : aucun fichier du commit épinglé ne les lit (le constructeur BVH est coupé sauf avec `VICTORY_BVH_BUILDER=1`). `tests/test_lanceur_victory.py` vérifie maintenant que VIctory lit chaque variable posée par le lanceur.
 
+Ces valeurs ne changent pas depuis les 57 commits Proton et AMD : ce sont les réglages Windows du mainteneur, pas encore mesurés avec ces commits. Sous Linux avec RADV, `VICTORY_LATE_WAIT=3` fait perdre le périphérique (issue #184 du fork) ; les réglages du lancement Linux mesuré sont dans la section des correctifs Proton et AMD plus haut.
+
 `-Dred` pose `VICTORY_D3D12_DRED=1` (données de périphérique perdu) pour diagnostiquer une perte du périphérique. Il est coupé par défaut : VIctory l'active dès que la variable existe, et il note chaque opération des listes de commandes, ce qui ralentit chaque image.
 
-`-XgDll <chemin de xg_xs.dll>` pose `VICTORY_XG_DLL` : votre propre copie de la bibliothèque PC hors ligne de disposition des textures du GDK dispose les textures du jeu (voir la branche épinglée plus haut). `-XgMode compare` (`VICTORY_XG_MODE`) garde à la place les dispositions de VIctory et journalise chaque écart avec la bibliothèque ; `real` est la valeur par défaut. Ne copiez jamais la DLL dans ce dépôt.
+`-XgDll <chemin de xg_xs.dll>` pose `VICTORY_XG_DLL` : votre propre copie de la bibliothèque PC hors ligne de disposition des textures du GDK dispose les textures du jeu (voir la section du lot 8 et de la bibliothèque de disposition plus haut). `-XgMode compare` (`VICTORY_XG_MODE`) garde à la place les dispositions de VIctory et journalise chaque écart avec la bibliothèque ; `real` est la valeur par défaut. Ne copiez jamais la DLL dans ce dépôt.
 
 `-Precompile` lance d'abord `victory.exe translate --cache --pipelines --used-pipelines <dossier du jeu>\shaders.rpf <dossier du jeu>\game_scarlett_master.exe <dossier du jeu>\XboxBvhBuilder.dll <dossier du jeu>\amd_fidelityfx_upscaler_xbox.dll` avec les mêmes variables d'environnement que le jeu (la clé du cache en dépend), puis démarre le jeu. Sur la machine du mainteneur, cela a pris environ 4,5 min et rempli 13 Go de cache (mesuré) ; les lancements suivants le réutilisent. Le lanceur s'arrête avec un message clair si l'un de ces fichiers manque.
 
@@ -287,6 +349,8 @@ Ils demandent le build `diag`.
 | `VICTORY_LOG=<cible>=debug,...` | Sortie debug et trace. |
 
 Pour arrêter le jeu : `taskkill /F /IM victory.exe`. La commande `timeout` de Git Bash ne tue pas l'exécutable.
+
+Pour mesurer un lancement, envoyez le journal de VIctory (stderr) dans un fichier, par exemple `.\tools\lancer_victory.ps1 -GameDir <dossier> 2> victory.log`, puis résumez-le avec `python tools/resume_journal_victory.py victory.log`. Le script garde les lignes d'images du monde (100 draws par image ou plus, `--draws-min` change le seuil) et donne la médiane et l'étendue de chaque partie de l'image (préparation, copies, textures, GPU, copie de retour, draws, draws perdus faute de pipeline hôte), ainsi que le nombre d'avertissements (shaders qui ne se traduisent pas, pipelines refusés, périphérique perdu). Avec deux journaux (`avant.log apres.log`), il compare les médianes colonne par colonne, pour juger un changement sur la partie de l'image qu'il vise. `--markdown` écrit des tableaux à coller dans une issue. Seuls des comptes et des temps sont écrits.
 
 ## Anciennes branches
 
