@@ -123,11 +123,12 @@ FETCH_SLOTS = 8  # vertex-buffer slots the stand-in binds (D3D12_VERTEX_BUFFER_V
 FETCH_DXGI = {2: ('BUF_FMT_32_32_32_32_FLOAT', 16), 6: ('BUF_FMT_32_32_32_FLOAT', 12), 16: ('BUF_FMT_32_32_FLOAT', 8),
               41: ('BUF_FMT_32_FLOAT', 4), 28: ('BUF_FMT_8_8_8_8_UNORM', 4), 49: ('BUF_FMT_8_8_UNORM', 2),
               61: ('BUF_FMT_8_UNORM', 1), 34: ('BUF_FMT_16_16_FLOAT', 4), 35: ('BUF_FMT_16_16_UNORM', 4),
-              37: ('BUF_FMT_16_16_SNORM', 4)}
+              37: ('BUF_FMT_16_16_SNORM', 4), 30: ('BUF_FMT_8_8_8_8_UINT', 4)}
 # Typed buffer loads: (word load or None, the four component expressions). Components a format lacks read as
 # 0, 0, 0, 1 here, as in the existing tbuffer translation; that default is an assumption, not a measurement.
 FETCH_FORMATS = {
     'BUF_FMT_8_8_8_8_UNORM': ('ldu({0}, a)', ['U((w & 255) / 255.0)', 'U(((w >> 8) & 255) / 255.0)', 'U(((w >> 16) & 255) / 255.0)', 'U((w >> 24) / 255.0)']),
+    'BUF_FMT_8_8_8_8_UINT': ('ldu({0}, a)', ['w & 255u', '(w >> 8) & 255u', '(w >> 16) & 255u', 'w >> 24']),
     'BUF_FMT_8_8_UNORM': ('ldu({0}, a)', ['U((w & 255) / 255.0)', 'U(((w >> 8) & 255) / 255.0)', '0u', 'U(1.0)']),
     'BUF_FMT_8_UNORM': ('ldu({0}, a)', ['U((w & 255) / 255.0)', '0u', '0u', 'U(1.0)']),
     'BUF_FMT_8_UINT': ('{0}.Load(a & ~3u) >> ((a & 3u) * 8u)', ['w & 255u', '0u', '0u', '1u']),
@@ -1088,12 +1089,16 @@ class Stage:
         targets = set()
         skipped = []  # compute: (branch, target) of each s_cbranch_execz
         targets.update(target for target in self.calculated_pc.values() if target is not None)
+        # (branch, target) of every branch, the proven s_setpc_b64 jumps included
+        branches = [(pc, target) for pc, target in self.calculated_pc.items() if target is not None]
         for off, n, name, asm in self.ins:
             if name.startswith('s_cbranch') or name == 's_branch':
                 target = int(parse(asm)[1][0].split('_')[1], 16)
                 targets.add(target)
+                branches.append((off, target))
                 if name == 's_cbranch_execz' and self.kind == 'cs':
                     skipped.append((off, target))
+        join_writes = self.join_writes(branches)
         self.blocks = []          # (offset, [lines], terminator)
         self.uniform_v = set()
         self.varying_s = set()
@@ -1119,6 +1124,12 @@ class Stage:
                 # A join: another path can reach here with other VGPR, SGPR and SCC values, so no proof survives.
                 self.uniform_v.clear()
                 self.since_join, self.scc_uniform = set(), False
+                # A constant is only known here if no other path into the join writes the register: a loop counter
+                # set before the loop and incremented in it reaches the loop head with a new value on every pass.
+                # set_s also assigns constants at run time, so the register reads its real value once it is dropped.
+                for reg in join_writes.get(off, ()):
+                    if (self.sym.get(reg) or ('',))[0] == 'const':
+                        del self.sym[reg]
             try:
                 if any(branch < off < target or target <= off < branch for branch, target in skipped) and (
                         name.startswith(('s_', 'v_readlane', 'v_readfirstlane', 'v_writelane'))
@@ -1151,6 +1162,26 @@ class Stage:
             if refusals is None:
                 raise Unsupported(reason)
             refusals.append((reason, self.kind))
+
+    def join_writes(self, branches):
+        """Branch target -> the scalar registers another path can write before it reaches the target: the loop body
+        [target, branch] for a backward branch, and the skipped instructions (branch, target) for a forward one."""
+        writes = {}
+        for branch, target in branches:
+            regs = writes.setdefault(target, set())
+            for off, _n, name, asm in self.ins:
+                if not (target <= off <= branch if target <= branch else branch < off < target):
+                    continue
+                _, ops, _ = parse(asm)
+                if name.startswith('s_movreld'):
+                    regs.update(range(128))  # M0 picks the destination
+                for tok in destinations(name, ops):
+                    r = reg_range(tok)
+                    if r and r[0] == 's':
+                        regs.update(range(r[1], r[2] + 1))
+                    elif tok == 'm0':
+                        regs.add('m0')
+        return writes
 
     def tracks_uniformity(self):
         return all(hasattr(self, name) for name in ('uniform_v', 'varying_s', 'scc_uniform'))
@@ -1501,6 +1532,7 @@ class Stage:
 
     # VOP1/VOP2 with sub-dword addressing: select the source fields, run the same operation, then place
     # the low bits of the result in the destination field. The integer forms reuse VEC_U unchanged,
+    # v_mov_b32 is the same path with the selected source as its result,
     # VEC_U_TO_F conversions apply output modifiers before dst_sel, VEC_F forms stay refused, and
     # dst_unused UNUSED_SEXT has no lowering.
     def sdwa(self, base, ops, mods):
@@ -1520,6 +1552,11 @@ class Stage:
             arity, text = VEC_U_TO_F[base]
         elif base in VEC_U:
             arity, text = VEC_U[base]
+        elif base == 'v_mov_b32':
+            arity, text = 1, '{0}'
+            # A lane mask is one bit per lane here, so a byte or word of it is not the hardware's field.
+            if fields.get('src0_sel') != 'DWORD' and self.is_lane_mask(ops[1].removeprefix('sext(').removesuffix(')')):
+                raise Unsupported('v_mov_b32 SDWA %s of lane mask %s' % (fields.get('src0_sel'), ops[1]))
         else:
             raise Unsupported('SDWA form of %s' % base)
         sources = []
@@ -2521,8 +2558,8 @@ class Stage:
 
     def op_image_gather4_lz(self, ops, mods):
         name = 'image_gather4_lz'
-        if self.kind != 'ps' or len(ops) != 4:
-            raise Unsupported('%s requires a pixel stage and four operands' % name)
+        if self.kind not in ('ps', 'cs') or len(ops) != 4:
+            raise Unsupported('%s requires a pixel or compute stage and four operands' % name)
         for modifier in mods:
             if not (modifier.startswith(('dim:', 'dmask:')) or modifier in ('dlc', 'glc', 'slc')):
                 raise Unsupported('%s modifier %s' % (name, modifier))
@@ -2547,6 +2584,17 @@ class Stage:
             check_gather_sampler(gather_2d_profile_words(words), 1, comparison=False)
         except ValueError as error:
             raise Unsupported('%s sampler: %s' % (name, error)) from error
+        if self.kind == 'cs':
+            # The compute manifest binds the original table view. Each of its eight
+            # words must still belong to the same image descriptor.
+            image = reg_range(ops[2])
+            first = self.sym.get(image[1]) if image and image[0] == 's' and image[2] - image[1] == 7 else None
+            if not first or first[0] != 'desc' or first[1][0] != 'table' or first[2] is None or first[3] % 8:
+                raise Unsupported('%s requires a fixed table image descriptor' % name)
+            for i in range(8):
+                word = first[:3] + (first[3] + i,)
+                if self.sym.get(image[1] + i) != word or desc_key(word) in self.pipe.modified:
+                    raise Unsupported('%s through a modified image descriptor' % name)
         tex = self.pipe.resource(self.descriptor(ops[2]), 'tex2d')
         smp = self.pipe.sampler(tuple(words))
         u, v = (self.f('v%d' % i) for i in range(addr[1], addr[2] + 1))

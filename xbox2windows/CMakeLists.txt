@@ -286,6 +286,15 @@ set_tests_properties(xmem_lazy_imports PROPERTIES TIMEOUT 60)
 add_test(NAME xmem_lazy_handler_failure COMMAND xmem_lazy_imports_check
     "$<TARGET_FILE:xmem_shim_test_controls>" handler-failure)
 set_tests_properties(xmem_lazy_handler_failure PROPERTIES TIMEOUT 60)
+add_executable(xmem_section_lease_check tests/xmem_section_lease_check.cpp tests/desktop_gpu.cpp)
+target_include_directories(xmem_section_lease_check PRIVATE src)
+target_compile_features(xmem_section_lease_check PRIVATE cxx_std_17)
+target_link_libraries(xmem_section_lease_check PRIVATE d3d12 dxgi)
+add_dependencies(xmem_section_lease_check xmem_shim)
+foreach(adapter warp hardware)
+  add_test(NAME xmem_section_lease_${adapter} COMMAND xmem_section_lease_check ${adapter} "$<TARGET_FILE:xmem_shim>")
+  set_tests_properties(xmem_section_lease_${adapter} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
+endforeach()
 add_executable(xmem_startup_below_40_check tests/xmem_startup_below_40_check.cpp)
 target_link_libraries(xmem_startup_below_40_check PRIVATE OneCore)
 target_compile_features(xmem_startup_below_40_check PRIVATE cxx_std_17)
@@ -1054,6 +1063,10 @@ add_test(NAME startup_dump_fence_removed_control_warp COMMAND startup_dump_fence
 set_tests_properties(startup_dump_fence_removed_control_warp PROPERTIES ENVIRONMENT "X2W_SHIM_DRAW_ADAPTER=warp" TIMEOUT 45
     WILL_FAIL TRUE)
 
+add_executable(startup_typed_buffer_view tests/startup_typed_buffer_view.cpp)
+target_compile_features(startup_typed_buffer_view PRIVATE cxx_std_17)
+add_test(NAME startup_typed_buffer_view COMMAND startup_typed_buffer_view)
+
 # tests/startup_stream_setup.cpp is compiled once for the consumer and the depth check.
 add_library(startup_stream_setup_obj OBJECT tests/startup_stream_setup.cpp)
 target_compile_features(startup_stream_setup_obj PRIVATE cxx_std_17)
@@ -1201,6 +1214,8 @@ foreach(backend IN ITEMS warp hardware)
     add_test(NAME startup_indirect_translated_indexed_${backend} COMMAND startup_indirect_draw_indexed ${backend} translated-indexed)
     add_test(NAME startup_indirect_translated_indexed_upload_${backend} COMMAND startup_indirect_draw_indexed ${backend} translated-indexed-upload)
     add_test(NAME startup_indirect_translated_indexed_rect_${backend} COMMAND startup_indirect_draw_indexed ${backend} translated-indexed-rect)
+    add_test(NAME startup_indirect_translated_indexed_alias_${backend} COMMAND startup_indirect_draw_indexed ${backend} translated-indexed-alias)
+    add_test(NAME startup_indirect_translated_indexed_alias_off_${backend} COMMAND startup_indirect_draw_indexed ${backend} translated-indexed-alias-off)
     add_test(NAME startup_indirect_mesh_${backend} COMMAND startup_indirect_draw_indexed ${backend} mesh)
     add_test(NAME startup_indirect_mesh_console_${backend} COMMAND startup_indirect_draw_indexed ${backend} mesh-console)
     add_test(NAME startup_indirect_mesh_amplified_${backend} COMMAND startup_indirect_draw_indexed ${backend} mesh-amplified)
@@ -1213,10 +1228,15 @@ foreach(backend IN ITEMS warp hardware)
     set_tests_properties(startup_indirect_translated_indexed_${backend} PROPERTIES TIMEOUT 60 SKIP_RETURN_CODE 77)
     set_tests_properties(startup_indirect_translated_indexed_upload_${backend} PROPERTIES TIMEOUT 60 SKIP_RETURN_CODE 77)
     set_tests_properties(startup_indirect_translated_indexed_rect_${backend} PROPERTIES TIMEOUT 60 SKIP_RETURN_CODE 77)
+    set_tests_properties(startup_indirect_translated_indexed_alias_${backend} PROPERTIES TIMEOUT 60 SKIP_RETURN_CODE 77)
+    set_tests_properties(startup_indirect_translated_indexed_alias_off_${backend} PROPERTIES TIMEOUT 60 SKIP_RETURN_CODE 77)
 endforeach()
 set_tests_properties(startup_indirect_draw_indexed_hardware startup_indirect_draw_hardware PROPERTIES SKIP_RETURN_CODE 77)
 foreach(backend IN ITEMS warp hardware)
     add_test(NAME startup_indirect_mesh_request_${backend} COMMAND startup_indirect_draw_indexed ${backend} mesh)
+    add_test(NAME startup_indirect_mesh_create_result_${backend} COMMAND startup_indirect_draw_indexed ${backend} mesh)
+    set_tests_properties(startup_indirect_mesh_create_result_${backend} PROPERTIES TIMEOUT 30 SKIP_RETURN_CODE 77
+        ENVIRONMENT "X2W_FIXED_MESH_CREATE_FIXTURE=1")
     set_tests_properties(startup_indirect_mesh_request_${backend} PROPERTIES TIMEOUT 30 SKIP_RETURN_CODE 77
         ENVIRONMENT "X2W_MESH_REQUEST_FIXTURE=1")
 endforeach()
@@ -1283,6 +1303,14 @@ add_test(NAME startup_slice_footprints_padded_control COMMAND startup_slice_foot
 set_tests_properties(startup_slice_footprints_padded_control PROPERTIES WILL_FAIL TRUE)
 
 find_program(DXC_EXECUTABLE dxc REQUIRED)
+if(EXISTS "${INTAKE_PYTHON}")
+    foreach(backend IN ITEMS warp hardware)
+        add_test(NAME startup_indirect_mesh_cache_${backend} COMMAND "${INTAKE_PYTHON}" -B
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/startup_indirect_mesh_cache_check.py"
+            "${DXC_EXECUTABLE}" "$<TARGET_FILE:startup_indirect_draw_indexed>" ${backend})
+        set_tests_properties(startup_indirect_mesh_cache_${backend} PROPERTIES TIMEOUT 60 SKIP_RETURN_CODE 77)
+    endforeach()
+endif()
 foreach(stage IN ITEMS mesh amplify amplified_mesh pixel)
     if(stage STREQUAL mesh OR stage STREQUAL amplified_mesh)
         set(profile ms_6_5)
@@ -1453,6 +1481,16 @@ target_compile_features(cpu_srv_upload_check PRIVATE cxx_std_17)
 add_test(NAME cpu_srv_upload COMMAND cpu_srv_upload_check)
 add_test(NAME cpu_srv_upload_written_range_control COMMAND cpu_srv_upload_check --mutate written-range)
 set_tests_properties(cpu_srv_upload_written_range_control PROPERTIES WILL_FAIL TRUE)
+# Sampler word 1 LOD limits through the startup stand-in's decoder (#2221).
+foreach(stage IN ITEMS vs ps)
+    set(startup_sampler_lod_${stage} "${CMAKE_CURRENT_BINARY_DIR}/startup_sampler_lod_${stage}.h")
+    add_custom_command(OUTPUT "${startup_sampler_lod_${stage}}" COMMAND "${DXC_EXECUTABLE}" -T ${stage}_6_0
+        -E ${stage}_main -Vn startup_sampler_lod_${stage} -Fh "${startup_sampler_lod_${stage}}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/startup_sampler_lod.hlsl"
+        DEPENDS tests/startup_sampler_lod.hlsl VERBATIM)
+    target_sources(offscreen_check PRIVATE "${startup_sampler_lod_${stage}}")
+endforeach()
+target_sources(offscreen_check PRIVATE tests/startup_sampler_lod.cpp)
 set(startup_sampler_x_cs "${CMAKE_CURRENT_BINARY_DIR}/startup_sampler_x_cs.h")
 add_custom_command(OUTPUT "${startup_sampler_x_cs}" COMMAND "${DXC_EXECUTABLE}" -T cs_6_0 -E main
     -Vn startup_sampler_x_cs -Fh "${startup_sampler_x_cs}"
@@ -2445,6 +2483,13 @@ foreach(adapter IN ITEMS hardware warp)
         PROPERTIES TIMEOUT 45 SKIP_RETURN_CODE 77)
     set_tests_properties(startup_sampler_x_swapped_${adapter}
         PROPERTIES FAIL_REGULAR_EXPRESSION "startup_sampler_x swapped=0")
+    # The dropped control resets the decoded LOD limits and must read the wrong mip for both entries.
+    add_test(NAME startup_sampler_lod_${adapter} COMMAND offscreen_check ${adapter} --startup-sampler-lod)
+    add_test(NAME startup_sampler_lod_dropped_${adapter} COMMAND offscreen_check ${adapter} --startup-sampler-lod-dropped)
+    set_tests_properties(startup_sampler_lod_${adapter} startup_sampler_lod_dropped_${adapter}
+        PROPERTIES TIMEOUT 45 SKIP_RETURN_CODE 77)
+    set_tests_properties(startup_sampler_lod_dropped_${adapter}
+        PROPERTIES PASS_REGULAR_EXPRESSION "startup_sampler_lod dropped_clamp wrong_mip=2 unexpected=0")
     add_test(NAME startup_cb_blend_${adapter} COMMAND offscreen_check ${adapter} --startup-cb-blend)
     add_test(NAME startup_cb_blend_swapped_${adapter} COMMAND offscreen_check ${adapter} --startup-cb-blend-swapped)
     set_tests_properties(startup_cb_blend_${adapter} startup_cb_blend_swapped_${adapter}
@@ -2585,6 +2630,8 @@ if(EXISTS "${INTAKE_PYTHON}")
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/startup_image_sample_l_check.py")
     add_test(NAME startup_image_gather_lz COMMAND "${INTAKE_PYTHON}" -B
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/startup_image_gather_lz_check.py")
+    add_test(NAME startup_compute_gather_lz COMMAND "${INTAKE_PYTHON}" -B
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/startup_compute_gather_lz_check.py")
     add_test(NAME startup_image_sample_c COMMAND "${INTAKE_PYTHON}" -B
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/startup_image_sample_c_check.py")
     add_test(NAME startup_image_gather_c_lz COMMAND "${INTAKE_PYTHON}" -B
@@ -2727,6 +2774,8 @@ if(EXISTS "${INTAKE_PYTHON}")
         "${CMAKE_SOURCE_DIR}/tests/compute_heap_store_check.py" controls)
     add_test(NAME compute_desc_numeric_controls COMMAND "${INTAKE_PYTHON}" -B
         "${CMAKE_SOURCE_DIR}/tests/compute_desc_numeric_check.py" controls)
+    add_test(NAME compute_alu_lane_gaps_controls COMMAND "${INTAKE_PYTHON}" -B
+        "${CMAKE_SOURCE_DIR}/tests/compute_alu_lane_gaps_check.py" controls)
     # Startup shader translator: signed and unsigned three-source integer min, max and median.
     add_test(NAME startup_gfx2hlsl_int_med3_controls COMMAND "${INTAKE_PYTHON}" -B
         "${CMAKE_SOURCE_DIR}/tests/startup_gfx2hlsl_int_med3_check.py")
@@ -3251,6 +3300,9 @@ if(EXISTS "${INTAKE_PYTHON}")
     # Startup shader translator: the SMEM offset 'off' is the literal 0; m0 and other operands keep their handling (#1674).
     add_test(NAME startup_gfx2hlsl_smem_offset COMMAND "${INTAKE_PYTHON}" -B
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/startup_gfx2hlsl_smem_offset_check.py")
+    # Startup shader translator: scalar constants are dropped at a branch join that another path writes (loop counters).
+    add_test(NAME startup_gfx2hlsl_loop_constants COMMAND "${INTAKE_PYTHON}" -B
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/startup_gfx2hlsl_loop_constants_check.py")
     # Startup shader translator: uniform sources of v_readfirstlane_b32 in straight-line code and entry blocks (#1723).
     add_test(NAME startup_gfx2hlsl_readfirstlane_uniform COMMAND "${INTAKE_PYTHON}" -B
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/startup_gfx2hlsl_readfirstlane_uniform_check.py")
@@ -4159,6 +4211,25 @@ if(EXISTS "${INTAKE_PYTHON}")
         "$<TARGET_FILE:cpu_avx_int_ymm_abs_sign_shuf>"
         "$<TARGET_FILE:cpu_avx_int_ymm_abs_sign_shuf_lifted>")
     set_tests_properties(cpu_aot_avx_int_ymm_abs_sign_shuf PROPERTIES SKIP_RETURN_CODE 77)
+    set(cpu_avx_int_ymm_mul_sad_exports
+        "op_vpmuldq_ymm,op_vpmuludq_ymm,op_vpmulhrsw_ymm,op_vpsadbw_ymm,"
+        "op_vpmuldq_ymm_dst_src1,op_vpmuludq_ymm_dst_src2,op_vpmulhrsw_ymm_all,op_vpsadbw_ymm_dst_src2,"
+        "op_vpmuldq_ymm_then_xmm_vpmuludq,op_chain_ymm_mul_sad")
+    string(CONCAT cpu_avx_int_ymm_mul_sad_exports ${cpu_avx_int_ymm_mul_sad_exports})
+    foreach(variant IN ITEMS original altered)
+        cpu_asm_fixture(cpu_avx_int_ymm_mul_sad_${variant} avx_int_ymm_mul_sad)
+        cpu_translation(cpu_avx_int_ymm_mul_sad_${variant} cpu_avx_int_aot "${cpu_avx_int_ymm_mul_sad_exports}")
+    endforeach()
+    target_compile_definitions(cpu_avx_int_ymm_mul_sad_altered PRIVATE ALTER_YMM)
+    add_test(NAME cpu_aot_avx_int_ymm_mul_sad COMMAND "${INTAKE_PYTHON}" -B
+        "${CMAKE_SOURCE_DIR}/tests/cpu/avx_int_ymm_mul_sad_check.py"
+        "$<TARGET_FILE:cpu_avx_int_ymm_mul_sad_original>"
+        "$<TARGET_FILE:cpu_avx_int_ymm_mul_sad_original_lifted>"
+        "$<TARGET_FILE:cpu_avx_int_ymm_mul_sad_altered>"
+        "$<TARGET_FILE:cpu_avx_int_ymm_mul_sad_altered_lifted>")
+    set_tests_properties(cpu_aot_avx_int_ymm_mul_sad PROPERTIES
+        SKIP_RETURN_CODE 77
+        ENVIRONMENT "FORM_COVERAGE_RECORD=${CMAKE_BINARY_DIR}/form_coverage/cpu_aot_avx_int_ymm_mul_sad.txt")
     set(cpu_avx_move_exports
         "op_andpd_xmm,op_andpd_ymm,op_andps_xmm,op_andps_ymm,op_andnpd_xmm,op_andnpd_ymm,"
         "op_andnps_xmm,op_andnps_ymm,op_orpd_xmm,op_orpd_ymm,op_orps_xmm,op_orps_ymm,"
@@ -7394,6 +7465,8 @@ if(EXISTS "${INTAKE_PYTHON}")
         "${CMAKE_SOURCE_DIR}/tests/mesh_dynamic_geometry_check.py")
     add_test(NAME mesh_heap_sampler_cpu COMMAND "${INTAKE_PYTHON}" -B
         "${CMAKE_SOURCE_DIR}/tests/mesh_heap_sampler_check.py")
+    add_test(NAME mesh_clip_cull_cpu COMMAND "${INTAKE_PYTHON}" -B
+        "${CMAKE_SOURCE_DIR}/tests/mesh_clip_cull_check.py")
     add_test(NAME mesh_dynamic_aot_cpu COMMAND "${INTAKE_PYTHON}" -B
         "${CMAKE_SOURCE_DIR}/tests/mesh_dynamic_aot_check.py")
     add_test(NAME mesh_lane_spill_cpu COMMAND "${INTAKE_PYTHON}" -B
@@ -7402,6 +7475,8 @@ if(EXISTS "${INTAKE_PYTHON}")
         "${CMAKE_SOURCE_DIR}/tests/mesh_entry_check.py" skipped)
     add_test(NAME mesh_scc_any_lane_cpu COMMAND "${INTAKE_PYTHON}" -B
         "${CMAKE_SOURCE_DIR}/tests/mesh_scc_any_lane_check.py")
+    add_test(NAME mesh_entry_exec_restore_cpu COMMAND "${INTAKE_PYTHON}" -B
+        "${CMAKE_SOURCE_DIR}/tests/mesh_entry_check.py" exec-restore)
     add_test(NAME mesh_amplification_refusal COMMAND "${INTAKE_PYTHON}" -B
         "${CMAKE_SOURCE_DIR}/tests/mesh_amplification_refusal_check.py")
     set_tests_properties(mesh_amplification_refusal PROPERTIES TIMEOUT 30)
@@ -7500,6 +7575,12 @@ if(EXISTS "${INTAKE_PYTHON}")
             "${CMAKE_SOURCE_DIR}/tests/mesh_shadow_check.py" "${DXC_EXECUTABLE}"
             "$<TARGET_FILE:offscreen_check>" ${adapter})
         set_tests_properties(mesh_shadow_draw_${adapter} PROPERTIES TIMEOUT 60 SKIP_RETURN_CODE 77)
+        # Clip and cull distances in pos1/pos2, placed by an explicit PA_CL_VS_OUT_CNTL word (#1998 item F).
+        add_test(NAME mesh_clip_cull_draw_${adapter} COMMAND "${INTAKE_PYTHON}" -B
+            "${CMAKE_SOURCE_DIR}/tests/mesh_clip_cull_check.py" draw "${DXC_EXECUTABLE}"
+            "$<TARGET_FILE:offscreen_check>" ${adapter})
+        set_tests_properties(mesh_clip_cull_draw_${adapter} PROPERTIES TIMEOUT 120 SKIP_RETURN_CODE 77
+            WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
         add_test(NAME mesh_entry_draw_${adapter} COMMAND "${INTAKE_PYTHON}" -B
             "${CMAKE_SOURCE_DIR}/tests/mesh_entry_check.py" "${DXC_EXECUTABLE}"
             "$<TARGET_FILE:offscreen_check>" ${adapter})
@@ -7516,6 +7597,10 @@ if(EXISTS "${INTAKE_PYTHON}")
             "${CMAKE_SOURCE_DIR}/tests/mesh_entry_check.py" draw-cvt-minmax "${DXC_EXECUTABLE}"
             "$<TARGET_FILE:offscreen_check>" ${adapter})
         set_tests_properties(mesh_entry_cvt_minmax_draw_${adapter} PROPERTIES TIMEOUT 60 SKIP_RETURN_CODE 77)
+        add_test(NAME mesh_entry_exec_restore_draw_${adapter} COMMAND "${INTAKE_PYTHON}" -B
+            "${CMAKE_SOURCE_DIR}/tests/mesh_entry_check.py" draw-exec-restore "${DXC_EXECUTABLE}"
+            "$<TARGET_FILE:offscreen_check>" ${adapter})
+        set_tests_properties(mesh_entry_exec_restore_draw_${adapter} PROPERTIES TIMEOUT 60 SKIP_RETURN_CODE 77)
         add_test(NAME mesh_entry_unary_draw_${adapter} COMMAND "${INTAKE_PYTHON}" -B
             "${CMAKE_SOURCE_DIR}/tests/mesh_entry_check.py" draw-unary "${DXC_EXECUTABLE}"
             "$<TARGET_FILE:offscreen_check>" ${adapter})
@@ -7699,6 +7784,11 @@ if(EXISTS "${INTAKE_PYTHON}")
             "$<TARGET_FILE:offscreen_check>" ${adapter})
         set_tests_properties(compute_store_aot_alu_bcnt_${adapter} PROPERTIES TIMEOUT 60 SKIP_RETURN_CODE 77
             ENVIRONMENT "FORM_COVERAGE_RECORD=${CMAKE_BINARY_DIR}/form_coverage/compute_store_aot_alu_bcnt_${adapter}.txt")
+        add_test(NAME compute_store_aot_alu_lane_gaps_${adapter} COMMAND "${INTAKE_PYTHON}" -B
+            "${CMAKE_SOURCE_DIR}/tests/compute_alu_lane_gaps_check.py" draw "${DXC_EXECUTABLE}"
+            "$<TARGET_FILE:offscreen_check>" ${adapter})
+        set_tests_properties(compute_store_aot_alu_lane_gaps_${adapter} PROPERTIES TIMEOUT 60 SKIP_RETURN_CODE 77
+            ENVIRONMENT "FORM_COVERAGE_RECORD=${CMAKE_BINARY_DIR}/form_coverage/compute_store_aot_alu_lane_gaps_${adapter}.txt")
         add_test(NAME compute_store_aot_mubuf_load_format_d16_${adapter} COMMAND "${INTAKE_PYTHON}" -B
             "${CMAKE_SOURCE_DIR}/tests/compute_store_check.py" draw-mubuf-load-format-d16 "${DXC_EXECUTABLE}"
             "$<TARGET_FILE:offscreen_check>" ${adapter})
@@ -8369,6 +8459,10 @@ if(EXISTS "${INTAKE_PYTHON}")
             "${CMAKE_SOURCE_DIR}/tests/startup_image_gather_lz_check.py" --draw "${DXC_EXECUTABLE}"
             "$<TARGET_FILE:offscreen_check>" ${adapter})
         set_tests_properties(startup_image_gather_lz_${adapter} PROPERTIES TIMEOUT 60 SKIP_RETURN_CODE 77)
+        add_test(NAME startup_compute_gather_lz_${adapter} COMMAND "${INTAKE_PYTHON}" -B
+            "${CMAKE_SOURCE_DIR}/tests/startup_compute_gather_lz_check.py" --dispatch "${DXC_EXECUTABLE}"
+            "$<TARGET_FILE:offscreen_check>" ${adapter})
+        set_tests_properties(startup_compute_gather_lz_${adapter} PROPERTIES TIMEOUT 90 SKIP_RETURN_CODE 77)
         add_test(NAME startup_image_gather_c_lz_${adapter} COMMAND "${INTAKE_PYTHON}" -B
             "${CMAKE_SOURCE_DIR}/tests/startup_image_gather_c_lz_check.py" --draw "${DXC_EXECUTABLE}"
             "$<TARGET_FILE:offscreen_check>" ${adapter} $<$<BOOL:${STARTUP_FXC}>:${STARTUP_FXC}>)

@@ -9641,7 +9641,10 @@ fn pixel_heap_base(ex: &ShaderExtract, class: u32) -> Option<u8> {
         return None;
     }
     if let Some(root) = ex.root_sig.as_ref() {
-        if class != 5 || root.flags & 0x400 == 0 || sampler_heap::resource_base(ex).is_some() {
+        // Class 5 needs CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED (0x400), class 6
+        // SAMPLER_HEAP_DIRECTLY_INDEXED (0x800).
+        let indexed = match class { 5 => root.flags & 0x400 != 0, 6 => root.flags & 0x800 != 0, _ => false };
+        if !indexed || sampler_heap::resource_base(ex).is_some() {
             return None;
         }
     }

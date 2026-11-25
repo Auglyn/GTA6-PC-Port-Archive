@@ -272,6 +272,8 @@ leonida::ResourceId uav_image_resource(ID3D12Resource* resource, std::uint64_t a
 VkBuffer vulkan_buffer(ID3D12Resource* resource);
 // What a device from create_vulkan_device* was created with (enabled features included), or null. For tests.
 const VulkanDeviceInfo* vulkan_device_info(ID3D12Device* device);
+// The device's pipeline workers (src/pipeline_workers.h) and what they have compiled; zeros without any. For tests.
+leonida::PipelineWorkers::Stats pipeline_worker_stats(ID3D12Device* device);
 // True when a slot-133 buffer is a shadow copied from the title's pages, false when they were imported. For tests.
 bool title_shadow_buffer(ID3D12Resource* resource);
 // Slot-133 imports (VK_EXT_external_memory_host) whose memory `device` holds: an import declined after its memory

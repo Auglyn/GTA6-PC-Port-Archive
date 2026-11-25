@@ -2326,6 +2326,26 @@ Pipeline creation:
     serialized size and bytes are each device's own (the host's empty library is 900 bytes, the layer's 16).
   - Not compared: the calls the host runtime faults on (`Serialize(nullptr, n)`, `StorePipeline` with a null PSO,
     `Load*` with a null name or description); the layer answers `E_INVALIDARG` for each.
+- Compiles at draw time: the first draw of a graphics pipeline, the first dispatch of a compute pipeline the warm-up
+  has not built, and each variant are compiled for the submission that needs them. `prepare()` leaves each one that is
+  not built yet to `PipelineCompiles`, once per pipeline and variant; `VulkanQueue::execute_now` then compiles them
+  side by side on the device's workers (`runtime/src/pipeline_workers.h`), the submitting thread among them, and writes
+  the command buffer when all are built. Every draw and dispatch has its own pipeline: none is left to a later frame. A
+  pipeline the driver refuses has the result it had when `prepare()` built it: a draw or an indirect dispatch fails the
+  submission, a dispatch is dropped (strict replay: fails it too). The resource lock is held while they compile, as it
+  is when each is compiled alone, so a PSO released meanwhile waits for the submission. The workers have ended before
+  the session cache is read at device teardown. `LEONIDA_PIPELINE_THREADS=<n>` sets the workers: unset, half the
+  logical processors and at most 8; `0` compiles each pipeline on the submitting thread where `prepare()` meets it.
+  Graphics pipelines of 1 MiB of SPIR-V or more, and compute pipelines over 128 KiB (`LEONIDA_SERIAL_BIG_COMPILES`),
+  are compiled one after another beside the smaller ones, because a compile takes the driver some hundred bytes of
+  memory for each byte of SPIR-V ([pipeline_check.md](pipeline_check.md)); so are the variants of one PSO.
+  `LEONIDA_ASYNC_PIPELINES=1` is not changed: its builds stay on the compile worker. Measured with synthetic programs
+  never compiled before and the warm-up off (RTX 3080, NVIDIA 621.24, Windows 11, 16 logical processors, 8 workers,
+  three runs each): the first submission of 192 graphics pipelines takes 126 to 143 ms instead of 861 to 882, of 192
+  variants 124 to 130 instead of 856 to 863, of 96 compute pipelines 74 to 81 instead of 486 to 519, and the process
+  holds about 50 MiB more (the driver keeps memory for each thread that compiles). One `VkPipelineCache` is enough: one
+  cache per thread, merged, was about as fast. Tested by `pipeline_workers`, `replay_pipeline_compiles` and
+  `d3d12_pipeline_workers`.
 
 **Open:** whether the game uses `D3D12_PIPELINE_STATE_STREAM_DESC` for mesh/RT and which subobject types appear.
 The trace will enumerate them.

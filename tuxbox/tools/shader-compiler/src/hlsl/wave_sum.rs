@@ -369,18 +369,14 @@ fn uniform_forward_guard(
         return false;
     }
     if branch.op == 2 {
-        // Every invocation reaching an unconditional branch takes it. Prove
-        // that there is no bypass of the branch and no entry into the skipped
-        // interval, including a backward edge or an indirect branch.
+        // Every invocation reaching an unconditional branch takes it, so the
+        // skipped interval cannot cause divergence: any branch inside it is
+        // checked by its own guard. Only unbounded (indirect) edges and early
+        // exits are unsafe here.
         return insns.iter().enumerate().all(|(i, op)| {
             if i == branch_index { return true; }
             if matches!(op.mnemonic.as_str(), "s_setpc_b64" | "s_swappc_b64" | "s_call_b64" | "s_rfe_b64" | "s_trap") {
                 return false;
-            }
-            if op.enc == Enc::Sopp && Emitter::branch_cond(op.op).is_some() {
-                let from = op.offset as i64;
-                let to = from + 4 + 4 * op.aux.imm;
-                return !(from.min(to) < target && from.max(to) > pc);
             }
             !(op.enc == Enc::Sopp && op.op == 1 && (op.offset as i64) < target)
         });
@@ -474,11 +470,17 @@ fn execz_forward_guard(
             .map(|id| masked_prologue(insns, first, id).is_some())
             .unwrap_or(false);
         if !masked {
+            if std::env::var("TUXBOX_WAVE_DEBUG").is_ok() {
+                eprintln!("WAVEDEBUG execz_guard: not masked (region_start={region_start:#x}, reduction_end={reduction_end:#x}, op={operation})");
+            }
             return false;
         }
         let pc = branch.offset as i64;
         let target = pc + 4 + 4 * branch.aux.imm;
         if target <= reduction_end as i64 {
+            if std::env::var("TUXBOX_WAVE_DEBUG").is_ok() {
+                eprintln!("WAVEDEBUG execz_guard: target {target:#x} <= reduction_end {reduction_end:#x}");
+            }
             return false;
         }
         // Branches between the guard and the region whose edges skip or
@@ -510,7 +512,30 @@ fn execz_forward_guard(
                 if from < pc || from >= region_start as i64 {
                     continue;
                 }
+                if target_edge > reduction_end as i64 {
+                    // A uniform branch (EXEC, unconditional, or SCC) that skips past
+                    // the region is a uniform skip: it only fires when every lane
+                    // leaves together, so it cannot make the reduction run
+                    // partially. Only a divergent (VCC) skip is non-uniform.
+                    if matches!(op.op, 6 | 7) {
+                        if std::env::var("TUXBOX_WAVE_DEBUG").is_ok() {
+                            eprintln!("WAVEDEBUG execz_guard: divergent skip idx={} pc={from:#x} target={target_edge:#x} op={} region_start={region_start:#x} region_end={reduction_end:#x}", index, op.op);
+                        }
+                        return false;
+                    }
+                    continue;
+                }
                 if target_edge >= region_start as i64 {
+                    // A uniform branch landing exactly on the region start is a
+                    // merge (all active lanes arrive together); it is safe.
+                    // Anything that lands inside the region, or any divergent
+                    // branch, is not.
+                    if target_edge == region_start as i64 && matches!(op.op, 2 | 4 | 5) {
+                        continue;
+                    }
+                    if std::env::var("TUXBOX_WAVE_DEBUG").is_ok() {
+                        eprintln!("WAVEDEBUG execz_guard: offending branch idx={} pc={from:#x} target={target_edge:#x} op={} region_start={region_start:#x} region_end={reduction_end:#x}", index, op.op);
+                    }
                     return false;
                 }
             }
@@ -537,6 +562,110 @@ pub(super) fn reduction_regions(insns: &[Insn], width: u32)
     })
 }
 
+/// Decide whether a branch crossing a reduction region is safe.
+///
+/// Only VCC branches (op 6/7) are divergent: their condition differs per lane.
+/// SCC, EXEC and unconditional branches are uniform — every active lane takes or
+/// falls through together — so they cannot make the reduction run partially.
+/// A uniform branch that skips past the region is therefore safe: when it fires
+/// (EXEC empty, or the scalar condition holds) every lane leaves the region
+/// together, and when it does not fire every active lane reaches it together.
+/// A uniform branch that lands exactly on the region start is a merge: every
+/// active lane reaches the region together.
+///
+/// A backward branch that re-enters the region is the back-edge of a loop whose
+/// header sits before the region. It is safe when the loop body up to the region
+/// contains no divergent branch and no branch that lands strictly inside the
+/// region, so the reduction is reached by every active lane on each iteration.
+fn guard_region(
+    insns: &[Insn],
+    branch_index: usize,
+    region_start: usize,
+    reduction_end: usize,
+    first: usize,
+    operation: &str,
+    verified_reads: &[usize],
+) -> bool {
+    let branch = &insns[branch_index];
+    let pc = branch.offset as i64;
+    if pc < region_start as i64 {
+        // A divergent (VCC) branch crossing the region is never safe: its
+        // condition differs per lane, so it can make the reduction run on only
+        // a subset of the active lanes.
+        if matches!(branch.op, 6 | 7) {
+            return false;
+        }
+        // A uniform branch that lands exactly on the region start is a merge:
+        // every active lane either takes it (to the region) or falls through to
+        // the region, so the reduction is reached by all active lanes together.
+        // Any divergent branch on the fall-through path is rejected by its own
+        // check, so nothing further needs to be proven here.
+        if matches!(branch.op, 2 | 4 | 5)
+            && pc + 4 + 4 * branch.aux.imm == region_start as i64
+        {
+            return true;
+        }
+        // Forward branch: the existing forward guards handle it (they reject
+        // divergent branches and accept uniform skips of a masked region).
+        return execz_forward_guard(
+            insns,
+            branch_index,
+            region_start,
+            reduction_end,
+            first,
+            operation,
+            verified_reads,
+        );
+    }
+    if pc > reduction_end as i64 {
+        // Backward branch entering the region: the back-edge of a loop whose
+        // header sits before the region. It is safe when the loop body up to the
+        // region cannot make the reduction run on only some lanes: no divergent
+        // (VCC) branch may sit there, and no branch may land strictly inside the
+        // region. Uniform branches (EXEC, unconditional, SCC) are safe: they
+        // preserve the property that all active lanes reach the region together
+        // on each iteration (a uniform skip or merge leaves every lane in the
+        // same place).
+        // The back-edge itself must be uniform: a divergent (VCC) loop condition
+        // makes different lanes iterate different numbers of times, so the
+        // reduction in the body would run on a partial lane set.
+        if branch.op == 1 || !Emitter::branch_cond(branch.op).is_some()
+            || matches!(branch.op, 6 | 7)
+        {
+            return false;
+        }
+        let target = pc + 4 + 4 * branch.aux.imm;
+        if target >= region_start as i64 {
+            return false;
+        }
+        for (index, op) in insns.iter().enumerate() {
+            if index == branch_index {
+                continue;
+            }
+            if op.enc == Enc::Sopp && (Emitter::branch_cond(op.op).is_some() || op.op == 1) {
+                let from = op.offset as i64;
+                if from < target || from >= region_start as i64 {
+                    continue;
+                }
+                // A divergent branch in the loop body before the region can make
+                // the reduction execute on only a subset of the active lanes.
+                if matches!(op.op, 6 | 7) {
+                    return false;
+                }
+                let target_edge = from + 4 + 4 * op.aux.imm;
+                // A branch landing strictly inside the region makes the reduction
+                // execute partially.
+                if target_edge > region_start as i64 && target_edge < reduction_end as i64 {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+    // A branch inside the region cannot be uniform.
+    false
+}
+
 /// Validate fixed-width reductions and return EXECZ instruction indices whose
 /// masked region and whole-wave arrival permit a wave-wide empty-EXEC vote.
 pub(super) fn check_control_flow(insns: &[Insn], width: u32) -> Result<BTreeSet<usize>, String> {
@@ -557,7 +686,13 @@ pub(super) fn check_control_flow(insns: &[Insn], width: u32) -> Result<BTreeSet<
                 if (pc < start && target >= start) || (pc > end && target <= end)
                     || (pc >= start && pc <= end)
                 {
-                    if !(pc < start && execz_forward_guard(insns, branch_index, start as usize, end as usize, first, &ins.mnemonic, &verified_reads)) {
+                    if !guard_region(insns, branch_index, start as usize, end as usize, first, &ins.mnemonic, &verified_reads) {
+                        if std::env::var("TUXBOX_WAVE_DEBUG").is_ok() {
+                            let prev = insns.get(branch_index.checked_sub(1).unwrap_or(0));
+                            eprintln!("WAVEDEBUG region=[{start:#x}..{end:#x}] op={} branch_idx={} op={} pc={:#x} target={:#x} prev={:?}",
+                                ins.mnemonic, branch_index, branch.op, pc, target,
+                                prev.map(|p| (p.mnemonic.as_str(), p.src.iter().map(|o| format!("{o:?}")).collect::<Vec<_>>())));
+                        }
                         return Err(format!(
                             "wave reduction at {start:#x} may execute in divergent control flow"
                         ));
@@ -1142,14 +1277,20 @@ mod tests {
 
     #[test]
     fn execz_forward_skip_rejects_branch_skipping_the_region() {
-        // A second branch inside the skip interval that skips (or lands on)
-        // the region would bypass its whole-wave execution.
+        // A divergent branch inside the skip interval that reaches the region
+        // would bypass or partially execute the whole-wave reduction; it is
+        // rejected. (A uniform branch landing exactly on the region start is a
+        // safe merge, covered by execz_skip_allows_uniform_merge_branch_in_window.)
         for width in [32, 64] {
             let mut ops = vec![nop(), branch(8), nop()];
             ops.extend(masked_reduction(width, 7));
             let end = ops.len();
             edge(&mut ops, 1, end, 8);
-            edge(&mut ops, 2, 3, 4);
+            // A divergent branch landing on the region start.
+            edge(&mut ops, 2, 3, 6);
+            assert!(check_control_flow(&ops, width).is_err());
+            // A uniform branch landing strictly inside the region.
+            edge(&mut ops, 2, 6, 4);
             assert!(check_control_flow(&ops, width).is_err());
         }
     }
@@ -1175,6 +1316,124 @@ mod tests {
         ops[0] = insn("s_endpgm", Enc::Sopp, 1, vec![], vec![]);
         offsets(&mut ops);
         assert!(check_control_flow(&ops, 64).is_err());
+    }
+
+    #[test]
+    fn uniform_branch_landing_on_region_start_is_a_safe_merge() {
+        // A uniform branch whose target is exactly the region start is a merge:
+        // every active lane either takes it (to the region) or falls through to
+        // the region, so the reduction is reached by all active lanes together.
+        for width in [32, 64] {
+            let mut ops = vec![compare(vec![Opnd::ConstInt(1), Opnd::ConstInt(0)]), branch(5)];
+            ops.extend(reduction(width, 7));
+            // The reduction (and its saved-EXEC prologue) starts at index 2.
+            edge(&mut ops, 1, 2, 5);
+            assert!(check_control_flow(&ops, width).is_ok());
+            // A divergent (VCC) branch landing on the region start is not safe.
+            edge(&mut ops, 1, 2, 6);
+            assert!(check_control_flow(&ops, width).is_err());
+        }
+    }
+
+    #[test]
+    fn branch_landing_inside_the_reduction_is_rejected() {
+        // A branch that lands strictly inside the region would make the
+        // reduction execute partially; it is rejected for both uniform and
+        // divergent branches.
+        for width in [32, 64] {
+            let mut ops = vec![compare(vec![Opnd::ConstInt(1), Opnd::ConstInt(0)]), branch(5)];
+            ops.extend(reduction(width, 7));
+            // Index 5 is strictly inside the region [2, 2 + len).
+            edge(&mut ops, 1, 5, 5);
+            assert!(check_control_flow(&ops, width).is_err());
+            edge(&mut ops, 1, 5, 6);
+            assert!(check_control_flow(&ops, width).is_err());
+        }
+    }
+
+    #[test]
+    fn loop_back_edge_with_uniform_body_branches_is_safe() {
+        // The back-edge of a loop whose body up to the region contains only
+        // uniform branches is safe: the region is reached by every active lane
+        // on each iteration.
+        for width in [32, 64] {
+            let mut ops = vec![
+                nop(), // loop header
+                compare(vec![Opnd::ConstInt(1), Opnd::ConstInt(0)]),
+                branch(5), // uniform scc1 in the body
+            ];
+            ops.extend(reduction(width, 7)); // region starts at index 3
+            let after = ops.len();
+            ops.push(nop());
+            ops.push(nop());
+            edge(&mut ops, 2, 3, 5); // body branch lands on the region start
+            edge(&mut ops, after, 0, 4); // back-edge (scc0) to the loop header
+            assert!(check_control_flow(&ops, width).is_ok());
+        }
+    }
+
+    #[test]
+    fn loop_back_edge_with_divergent_body_branch_is_rejected() {
+        // A divergent (VCC) branch in the loop body before the region can make
+        // the reduction run on only some lanes, even though the back-edge is
+        // uniform.
+        for width in [32, 64] {
+            let mut ops = vec![
+                nop(), // loop header
+                compare(vec![Opnd::ConstInt(1), Opnd::ConstInt(0)]),
+                branch(6), // divergent vcc in the body
+            ];
+            ops.extend(reduction(width, 7)); // region starts at index 3
+            let after = ops.len();
+            ops.push(nop());
+            ops.push(nop());
+            edge(&mut ops, 2, 0, 6); // divergent body branch to the header
+            edge(&mut ops, after, 0, 4); // back-edge (scc0) to the loop header
+            assert!(check_control_flow(&ops, width).is_err());
+        }
+    }
+
+    #[test]
+    fn loop_back_edge_divergent_condition_is_rejected() {
+        // A divergent (VCC) back-edge makes different lanes iterate different
+        // numbers of times, so the reduction in the body would run on a partial
+        // lane set; it is rejected even when the loop body is otherwise uniform.
+        for width in [32, 64] {
+            let mut ops = vec![
+                nop(), // loop header
+                compare(vec![Opnd::ConstInt(1), Opnd::ConstInt(0)]),
+                branch(5), // uniform scc1 in the body
+            ];
+            ops.extend(reduction(width, 7)); // region starts at index 3
+            let after = ops.len();
+            ops.push(nop());
+            ops.push(nop());
+            edge(&mut ops, 2, 3, 5); // uniform body branch to the region start
+            edge(&mut ops, after, 0, 7); // divergent (vccnz) back-edge to the header
+            assert!(check_control_flow(&ops, width).is_err());
+        }
+    }
+
+    #[test]
+    fn execz_skip_allows_uniform_merge_branch_in_window() {
+        // An EXEC-empty skip of a masked region is safe even when the skip
+        // window contains a uniform branch that lands on the region start
+        // (a merge): all active lanes reach the region together.
+        for width in [32, 64] {
+            let mut ops = vec![
+                nop(),
+                branch(8), // execz skip
+                compare(vec![Opnd::ConstInt(1), Opnd::ConstInt(0)]),
+                branch(5), // uniform scc1
+            ];
+            ops.extend(masked_reduction(width, 7)); // region starts at index 4
+            let after = ops.len();
+            ops.push(nop());
+            ops.push(nop());
+            edge(&mut ops, 1, after, 8); // execz skip lands past the region
+            edge(&mut ops, 3, 4, 5); // uniform branch lands on the region start
+            assert!(check_control_flow(&ops, width).is_ok());
+        }
     }
 }
 

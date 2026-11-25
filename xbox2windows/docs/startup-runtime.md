@@ -1872,6 +1872,13 @@ These are measured on one executable; treat them as hypotheses for others.
   snapshot equality: build `startup_translated_sampler_bindings_check` and run
   `ctest --preset dev --no-tests=error -R "^startup_translated_sampler_bindings(_shared_axis_control)?$" -V`.
   The control expects all three axes to use the U field and must fail.
+  Table entries take their LOD range from word 1, as `smpl` static samplers do: `MIN_LOD` (bits 11:0) and
+  `MAX_LOD` (bits 23:12), unsigned 4.8 fixed point. An entry with word 1 = 0 samples mip 0 only; the border
+  fallback is not a title descriptor and keeps the full mip range. `startup_sampler_lod_{warp,hardware}`
+  decode two table entries that differ only in word 1 (`MIN_LOD` 2, `MAX_LOD` 1) and read a four-mip
+  texture with one value per mip at explicit LODs; a
+  static `smpc` sampler must keep `LESS`. The `_dropped_` control resets the decoded range and must read
+  mip 0 and mip 3 instead: `ctest --preset dev --no-tests=error -R '^startup_sampler_lod_' -V`.
 - The startup shader translator lowers `image_sample_l` (explicit level, 2D and 3D, any `dmask`) to
   `SampleLevel(sampler, uv, level)`, taking the level from the last address register. Offset, compare,
   gather, clamp, cube, 1D and `unorm` forms are refused. Only the translation is checked
@@ -2001,7 +2008,11 @@ releases the request. This affects scheduling and preserves the existing audio
 routing and sample format.
 
 With `X2W_AUDIO_PERMISSIVE=1`, `xapu.dll` tracks active handles across `XApuConnect`
-and `XApuDisconnect`, refuses null or unreadable command headers (`E_POINTER`), null outputs
+and `XApuDisconnect`. `XApuConnect` allocates a zeroed shared buffer of the size given by the
+32-bit value at input `+0x0C` and writes its address to output `+0x00`. In one title's calls the caller read only that
+pointer, and its later decode commands pointed into the buffer. A size of 0, or over a 64 MiB sanity cap, is refused
+(`E_INVALIDARG`) without a handle, and the buffer is released on `XApuDisconnect`. It refuses null
+or unreadable command headers (`E_POINTER`), null or unreadable inputs and null or unwritable outputs
 (`E_POINTER`), and unknown or disconnected handles (`E_HANDLE`), and records one `(type, slot)`
 entry per `XApuEnqueueCommand` call (reading the 32-bit command type at `+0x00` and 32-bit slot
 index at `+0x04`) in a per-connection FIFO ring buffer capped at 16,384 entries (128 KiB per
@@ -2044,7 +2055,7 @@ code 77 means no usable render endpoint (or an unsupported mix format). It print
 format and Windows build. A skip is neither a pass nor a failure. Every wait is bounded.
 
 Not established: `XApuEnqueueCommand`/`XApuDequeueResult` payload fields beyond `(+0x00, +0x04, +0x34)`,
-the 16-byte second output argument of `XApuConnect`, what is audible (no capture-path check), and any
+the shared buffer's layout and output bytes past `+0x08` of `XApuConnect`, what is audible (no capture-path check), and any
 hardware or driver glitch count.
 
 ## APU heap stand-in

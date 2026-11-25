@@ -756,6 +756,12 @@ if(BUILD_TESTING)
 
   add_executable(pipeline_cache_file_test test/pipeline_cache_file_test.cpp)
   add_test(NAME pipeline_cache_file COMMAND pipeline_cache_file_test)
+  # The pool that compiles a submission's pipelines (runtime/src/pipeline_workers.h): pure stdlib.
+  add_executable(pipeline_workers_test test/pipeline_workers_test.cpp)
+  find_package(Threads REQUIRED)
+  target_link_libraries(pipeline_workers_test PRIVATE Threads::Threads)
+  add_test(NAME pipeline_workers COMMAND pipeline_workers_test)
+  set_tests_properties(pipeline_workers PROPERTIES TIMEOUT 120)
 
   # D3D-704's session-cache limit and header check: pure stdlib, no Vulkan headers.
   add_executable(pipeline_cache_store_test test/pipeline_cache_store_test.cpp)
@@ -2227,6 +2233,18 @@ if(TARGET Vulkan::Headers)
     add_test(NAME d3d12_texture_memory COMMAND d3d12_texture_memory_test)
     set_tests_properties(d3d12_texture_memory PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120
                          FAIL_REGULAR_EXPRESSION "Validation Error;VUID-")
+    # The pipelines a submission needs, compiled on the device's workers: the same image as without them. The second
+    # time with the pipelines compiled when they are created, which leaves the variants.
+    add_executable(d3d12_pipeline_workers_test test/d3d12_pipeline_workers_test.cpp)
+    target_link_libraries(d3d12_pipeline_workers_test PRIVATE gta6rt_d3d12_com)
+    target_compile_definitions(d3d12_pipeline_workers_test PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_compile_options(d3d12_pipeline_workers_test PRIVATE /W4 /permissive- /utf-8)
+    add_test(NAME d3d12_pipeline_workers COMMAND d3d12_pipeline_workers_test)
+    add_test(NAME d3d12_pipeline_workers_eager COMMAND d3d12_pipeline_workers_test)
+    set_tests_properties(d3d12_pipeline_workers d3d12_pipeline_workers_eager PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 180
+                         FAIL_REGULAR_EXPRESSION "Validation Error;VUID-")
+    set_tests_properties(d3d12_pipeline_workers_eager PROPERTIES
+                         ENVIRONMENT "LEONIDA_LAZY_PIPELINES=0;LEONIDA_LAZY_COMPUTE=0")
     # ExecuteCommandLists refuses a list whose type isn't the queue's (debug-layer message 836).
     add_executable(d3d12_queue_list_type_test test/d3d12_queue_list_type_test.cpp)
     target_link_libraries(d3d12_queue_list_type_test PRIVATE gta6rt_d3d12_com)
@@ -4018,6 +4036,15 @@ if(TARGET Vulkan::Headers)
       target_compile_definitions(replay_readback_stages_test PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
     endif()
     add_test(NAME replay_readback_stages COMMAND replay_readback_stages_test)
+    # Pipelines not built yet, left to the pool of pipeline_workers.h: what prepare() alone would give (no GPU).
+    add_executable(replay_pipeline_compiles_test test/replay_pipeline_compiles_test.cpp)
+    target_link_libraries(replay_pipeline_compiles_test PRIVATE Vulkan::Headers Threads::Threads)
+    if(WIN32)
+      target_compile_definitions(replay_pipeline_compiles_test PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+    endif()
+    add_test(NAME replay_pipeline_compiles COMMAND replay_pipeline_compiles_test)
+    add_test(NAME replay_pipeline_compiles_strict COMMAND replay_pipeline_compiles_test)
+    set_tests_properties(replay_pipeline_compiles_strict PROPERTIES ENVIRONMENT "LEONIDA_STRICT_REPLAY=1")
     add_executable(replay_quad_list_test test/replay_quad_list_test.cpp)
     target_link_libraries(replay_quad_list_test PRIVATE Vulkan::Headers)
     if(WIN32)

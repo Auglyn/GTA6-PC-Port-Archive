@@ -37,8 +37,11 @@ pub(super) fn reflected(
             accessed_views.push((binding.parameter, slot..end));
         }
     }
+    // Guest tables the pixel stage reads but the mesh layout rewrote. Each gets
+    // an appended pixel-only copy of its original ranges (see `mirrors`).
+    let mut mirrored = Vec::new();
     if let Some(pixel) = pixel {
-        collect_pixel_accesses(&root, &layout, pixel, &mut lengths, &mut accessed_views)?;
+        collect_pixel_accesses(&root, &layout, pixel, &mut lengths, &mut accessed_views, &mut mirrored)?;
     }
     let bytes = original.serialized();
     // SAFETY: the deserializer owns the source pointers throughout serialization.
@@ -58,6 +61,7 @@ pub(super) fn reflected(
             return Err(E_INVALIDARG.into());
         }
         let mut params = std::slice::from_raw_parts(source.pParameters, root.params.len()).to_vec();
+        let originals = params.clone();
         let mut range_storage = vec![Vec::new(); params.len()];
         for (index, change) in layout.replacements {
             let parameter = &mut params[index];
@@ -111,6 +115,20 @@ pub(super) fn reflected(
                 }
             }
         }
+        let mut mirrors = Vec::new();
+        for &guest in &mirrored {
+            let mut copy = originals[guest];
+            if copy.ParameterType != D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE {
+                return Err(E_NOTIMPL.into());
+            }
+            copy.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+            mirrors.push((params.len() as u32, guest as u32));
+            params.push(copy);
+        }
+        if lengths.len() < params.len() {
+            lengths.resize(params.len(), 0);
+        }
+        desc.Anonymous.Desc_1_1.NumParameters = params.len() as u32;
         desc.Anonymous.Desc_1_1.pParameters = params.as_ptr();
         let mut blob = None;
         D3D12SerializeVersionedRootSignature(&desc, &mut blob, None)?;
@@ -124,6 +142,7 @@ pub(super) fn reflected(
             lengths,
             accessed_views,
             index_map: None,
+            mirrors,
         })))
     }
 }
@@ -132,8 +151,9 @@ fn collect_pixel_accesses(
     root: &RootSig,
     mesh: &MeshLayout,
     pixel: &[u8],
-    lengths: &mut [u32],
+    lengths: &mut Vec<u32>,
     views: &mut Vec<(usize, Range<u32>)>,
+    mirrored: &mut Vec<usize>,
 ) -> Result<()> {
     for [ty, space, low, high] in shader_resources(pixel).ok_or(E_NOTIMPL)? {
         let kind = match ty {
@@ -170,14 +190,28 @@ fn collect_pixel_accesses(
                         if from >= to {
                             continue;
                         }
-                        if rewritten {
-                            return Err(E_NOTIMPL.into());
+                        // A rewritten table is mesh-only; the pixel stage reads
+                        // its appended original copy at `target`.
+                        let target = if rewritten {
+                            let position = match mirrored.iter().position(|&m| m == index) {
+                                Some(position) => position,
+                                None => {
+                                    mirrored.push(index);
+                                    mirrored.len() - 1
+                                }
+                            };
+                            root.params.len() + position
+                        } else {
+                            index
+                        };
+                        if lengths.len() <= target {
+                            lengths.resize(target + 1, 0);
                         }
                         let start = u32::try_from(start + (from - base)).map_err(|_| E_NOTIMPL)?;
                         let end = start.checked_add((to - from) as u32).ok_or(E_NOTIMPL)?;
-                        lengths[index] = lengths[index].max(end);
+                        lengths[target] = lengths[target].max(end);
                         if kind != 2 {
-                            views.push((index, start..end));
+                            views.push((target, start..end));
                         }
                     }
                 }

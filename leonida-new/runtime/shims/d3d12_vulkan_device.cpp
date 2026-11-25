@@ -1309,6 +1309,16 @@ bool console_format_stand_ins() {
     return on;
 }
 
+// A driver's compiler needs hundreds of MiB for a very large module; several at once exhausted host memory. Compute modules
+// over 128 KiB compile one at a time (LEONIDA_SERIAL_BIG_COMPILES=0: as many as are asked for).
+bool serial_big_compile(std::size_t spirv_bytes) {
+    static const bool serial = [] {
+        wchar_t v[2]{};
+        return !(GetEnvironmentVariableW(L"LEONIDA_SERIAL_BIG_COMPILES", v, 2) == 1 && v[0] == L'0');
+    }();
+    return serial && spirv_bytes > 128 * 1024;
+}
+
 bool startup_cache_checkpoints_enabled() {
     static const bool enabled = [] {
         wchar_t value[2]{};
@@ -7428,6 +7438,7 @@ public:
         if (!mesh && topology_bits != leonida::topology_type_rect_list)
             graphics_.rectangle_variant_topology = leonida::topology_rect_list;
 
+        std::uint64_t spirv_bytes = 0;
         for (Stage& stage : stages) {
             if (!stage.entry) continue;
             // After the f16 link above, which can also edit the pixel shader's words.
@@ -7442,6 +7453,7 @@ public:
                     stage.words = std::move(patched);
                 }
             }
+            spirv_bytes += stage.words.size() * sizeof(std::uint32_t);
             if (trace_pipeline_compile()) {
                 if (!profile_shaders_.empty()) profile_shaders_ += ',';
                 profile_shaders_ += stage.entry->name;
@@ -7827,6 +7839,13 @@ public:
                 return graphics_.async_build ? queue_build(false, unbound) : variant(unbound, "draw");
             });
         };
+        graphics_.built = [this](std::uint32_t unbound) {
+            std::unique_lock lock(variants_mutex_, std::try_to_lock);  // held: another thread is compiling one
+            if (!lock.owns_lock()) return VkPipeline(VK_NULL_HANDLE);
+            const auto it = variants_.find(unbound);
+            return it == variants_.end() ? VkPipeline(VK_NULL_HANDLE) : it->second;
+        };
+        graphics_.large = spirv_bytes >= leonida::PipelineCompiles::large_spirv_bytes;
 
         if (code_stage) {
             VkDeviceSize offset = 0;
@@ -7986,6 +8005,12 @@ public:
                 });
             };
             pipeline_.build_context = this;
+            pipeline_.built = [](void* self) {
+                auto* pso = static_cast<PipelineState*>(self);
+                std::unique_lock lock(pso->variants_mutex_, std::try_to_lock);  // held: another thread is compiling it
+                return lock.owns_lock() ? pso->pipeline_.pipeline : VkPipeline(VK_NULL_HANDLE);
+            };
+            pipeline_.large = serial_big_compile(spirv_bytes);
         } else if (!build_compute("compute-create")) {
             return E_FAIL;
         }
@@ -8019,15 +8044,9 @@ private:
         const leonida::ShaderLibrary* library = device_.library();
         const leonida::ShaderEntry* entry = compute_entry_;
         if (!library || !entry) return VK_NULL_HANDLE;
-        // The driver's compiler needs hundreds of MiB per very large module; several at once exhausted host memory.
-        // Modules over 128 KiB compile one at a time (LEONIDA_SERIAL_BIG_COMPILES=0: as many as are asked for).
-        static const bool serial_big = [] {
-            wchar_t v[2]{};
-            return !(GetEnvironmentVariableW(L"LEONIDA_SERIAL_BIG_COMPILES", v, 2) == 1 && v[0] == L'0');
-        }();
         static std::mutex big_compile;
         std::unique_lock<std::mutex> big_lock(big_compile, std::defer_lock);
-        if (serial_big && stage_bytes_ > 128 * 1024) big_lock.lock();
+        if (serial_big_compile(stage_bytes_)) big_lock.lock();
         auto words = library->spirv(*entry);
         if (words.empty()) {
             std::fprintf(stderr, "[rt] d3d12: %s.spv is missing or not SPIR-V\n", entry->name.c_str());
@@ -9730,6 +9749,17 @@ public:
         leonida::title_va_aliases().set_buffer_maker(this, [](void* device, std::uint64_t va, std::uint64_t bytes) {
             static_cast<std::remove_reference_t<decltype(*this)>*>(device)->make_title_buffer(va, bytes);
         });
+        {
+            char text[32] = {};
+            size_t length = 0;
+            const bool present = getenv_s(&length, text, "LEONIDA_PIPELINE_THREADS") == 0 && length > 1;
+            const auto threads = leonida::pipeline_threads(present ? text : "", std::thread::hardware_concurrency());
+            if (!threads.valid)
+                std::fprintf(stderr, "[rt] d3d12: LEONIDA_PIPELINE_THREADS=%s is not a number; using %u\n", text,
+                             threads.count);
+            if (threads.count)
+                state_.context->set_pipeline_workers(std::make_unique<leonida::PipelineWorkers>(threads.count));
+        }
         leonida::title_va_aliases().set_hooks(
             &state_,
             [](void* device, std::uint64_t va, std::uint64_t bytes, std::uint64_t& out) {
@@ -10308,6 +10338,7 @@ public:
                                               "vkDeviceWaitIdle");
             }
             state_.context->drain_deleted_resources(UINT64_MAX);
+            state_.context->set_pipeline_workers(nullptr);  // before the pipeline cache is written and destroyed
             state_.context->set_bindless_release(nullptr, nullptr);
             state_.context->set_bindless_current(nullptr);  // the retired generations go with state_.bindless below
         }
@@ -15386,6 +15417,13 @@ bool title_shadow_buffer(ID3D12Resource* resource) {
 VkBuffer vulkan_buffer(ID3D12Resource* resource) {
     const Resource* r = Resource::from<Resource>(resource);
     return r ? r->buffer() : VK_NULL_HANDLE;
+}
+
+leonida::PipelineWorkers::Stats pipeline_worker_stats(ID3D12Device* device) {
+    if (!device) return {};
+    ID3D12Device* real = rt::d3d12_xs::device_proxy_real_device(device);
+    if (auto* d = Device::from<Device>(real ? real : device)) return d->context().pipeline_worker_stats();
+    return {};
 }
 
 const VulkanDeviceInfo* vulkan_device_info(ID3D12Device* device) {

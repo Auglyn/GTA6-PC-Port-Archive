@@ -3999,7 +3999,7 @@ void log_measured_state_blob_fields(const void* blob, std::size_t blob_size) {
         if (g_state_blob_field_logged[i].compare_exchange_strong(expected, true, std::memory_order_relaxed)) {
             std::uint32_t val = 0;
             std::memcpy(&val, bytes + off, 4);
-            std::fprintf(stderr, "[rt] d3d12_xs: state blob: campo sin identificar en 0x%03x = 0x%08x\n",
+            std::fprintf(stderr, "[rt] d3d12_xs: state blob: unidentified field at 0x%03x = 0x%08x\n",
                          static_cast<unsigned>(off), static_cast<unsigned>(val));
         }
     }
