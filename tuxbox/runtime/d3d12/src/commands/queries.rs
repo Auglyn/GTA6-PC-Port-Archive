@@ -12,8 +12,8 @@ pub(super) unsafe extern "system" fn query<const BEGIN: bool>(
     kind: D3D12_QUERY_TYPE,
     index: u32,
 ) {
-    let super::CommandRecording { list, state } = &mut *recording(list);
-    if !state.can_record(&list.native) {
+    let mut state = recording(list);
+    if !state.can_record() {
         return;
     }
     let heap = unsafe { range(object, parent(&list.parent), kind, index, 1) };
@@ -26,11 +26,13 @@ pub(super) unsafe extern "system" fn query<const BEGIN: bool>(
             state.error = E_INVALIDARG;
             return;
         }
-        state.open_queries = state.open_queries.saturating_add(1);
-        unsafe { list.native.BeginQuery(heap, kind, index) };
+        state.active_queries = state.active_queries.saturating_add(1);
+        unsafe { state.native().BeginQuery(heap, kind, index) };
     } else {
-        if kind != D3D12_QUERY_TYPE_TIMESTAMP { state.open_queries = state.open_queries.saturating_sub(1); }
-        unsafe { list.native.EndQuery(heap, kind, index) };
+        if kind != D3D12_QUERY_TYPE_TIMESTAMP {
+            state.active_queries = state.active_queries.saturating_sub(1);
+        }
+        unsafe { state.native().EndQuery(heap, kind, index) };
     }
 }
 
@@ -43,8 +45,8 @@ pub(super) unsafe extern "system" fn resolve(
     destination: *mut c_void,
     offset: u64,
 ) {
-    let super::CommandRecording { list, state } = &mut *recording(list);
-    if !state.can_record(&list.native) {
+    let mut state = recording(list);
+    if !state.can_record() {
         return;
     }
     let owner = parent(&list.parent);
@@ -54,20 +56,28 @@ pub(super) unsafe extern "system" fn resolve(
         state.error = E_INVALIDARG;
         return;
     };
-    let Some(offset) = super::compute::buffer_offset(dst, offset, u64::from(count) * stride) else {
+    let guest_offset = offset;
+    let bytes = u64::from(count) * stride;
+    let Some(offset) = super::compute::buffer_offset(dst, offset, bytes) else {
         state.error = E_INVALIDARG;
         return;
     };
     if !offset.is_multiple_of(8) { state.error = E_INVALIDARG; return; }
+    if let Some(base) = dst.state.guest_address() {
+        state.record_write(base.saturating_add(guest_offset), bytes);
+    } else {
+        state.record_unknown_write();
+    }
     unsafe {
-        list.native
+        state
+            .native()
             .ResolveQueryData(heap, kind, start, count, &dst.native, offset)
     };
 }
 
 // A Series timestamp packet writes the queue clock directly to title memory.
 // Desktop D3D12 exposes the same clock through a timestamp query and resolve.
-pub(super) fn timestamp(list: &super::NativeList, state: &mut Recording, address: u64) -> windows::core::Result<()> {
+pub(super) fn timestamp(list: &List, state: &mut Recording, address: u64) -> windows::core::Result<()> {
     const SLOTS: u32 = 256;
     let (resource, gpu) = unsafe { crate::device::command_buffer_address(parent(&list.parent), address, 8)? };
     let resource = resource.ok_or(E_INVALIDARG)?;
@@ -75,7 +85,7 @@ pub(super) fn timestamp(list: &super::NativeList, state: &mut Recording, address
     super::raytracing::retain(state, &[&resource])?;
     if state.timestamp_page.as_ref().is_none_or(|(_, next)| *next >= SLOTS) {
         let mut device: Option<ID3D12Device> = None;
-        unsafe { list.native.GetDevice(&mut device)? };
+        unsafe { state.native().GetDevice(&mut device)? };
         let mut heap: Option<ID3D12QueryHeap> = None;
         unsafe { device.ok_or(E_INVALIDARG)?.CreateQueryHeap(&D3D12_QUERY_HEAP_DESC {
             Type: D3D12_QUERY_HEAP_TYPE_TIMESTAMP, Count: SLOTS, NodeMask: 0,
@@ -87,11 +97,26 @@ pub(super) fn timestamp(list: &super::NativeList, state: &mut Recording, address
         drop(keep);
         state.timestamp_page = Some((heap, 0));
     }
-    let (heap, index) = state.timestamp_page.as_mut().unwrap();
-    let packet = super::memory_wait::Packet::Timestamp(heap.clone(), *index, resource, offset);
-    *index += 1;
+    let (heap, index) = {
+        let (heap, next) = state.timestamp_page.as_mut().unwrap();
+        let index = *next;
+        *next += 1;
+        (heap.clone(), index)
+    };
+    state.record_write(address, 8);
     super::memory_wait::trace_write("timestamp", address, 8, 0);
-    state.prefix.push(&list.native, packet)
+    unsafe {
+        state.native().EndQuery(&heap, D3D12_QUERY_TYPE_TIMESTAMP, index);
+        state.native().ResolveQueryData(
+            &heap,
+            D3D12_QUERY_TYPE_TIMESTAMP,
+            index,
+            1,
+            &resource,
+            offset,
+        );
+    }
+    Ok(())
 }
 
 pub(super) unsafe extern "system" fn frequency(queue: &Queue, hz: *mut u64) -> HRESULT {

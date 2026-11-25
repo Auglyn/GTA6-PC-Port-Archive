@@ -81,7 +81,7 @@ pub(crate) fn release(allocator: usize) {
 }
 
 pub(super) unsafe extern "system" fn allocate_slot(list: &List, bytes: u32, alignment: u32) -> *mut core::ffi::c_void {
-    let allocator = std::sync::Arc::as_ptr(&recording(list).state.resources) as usize;
+    let allocator = std::sync::Arc::as_ptr(&recording(list).resources) as usize;
     let result = allocate(allocator, bytes as usize, (alignment as usize).max(1));
     static FIRST: std::sync::Once = std::sync::Once::new();
     crate::diagnostics::log_once(&FIRST, || format!(

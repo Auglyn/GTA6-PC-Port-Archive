@@ -16,8 +16,8 @@ pub(super) unsafe extern "system" fn clear(
     count: u32,
     rects: *const RECT,
 ) {
-    let super::CommandRecording { list, state } = &mut *recording(list);
-    if !state.can_record(&list.native) {
+    let mut recording = recording(list);
+    if !recording.can_record() {
         return;
     }
     if handle.ptr == 0
@@ -25,12 +25,13 @@ pub(super) unsafe extern "system" fn clear(
         || flags.0 & !(D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL).0 != 0
         || (count != 0 && rects.is_null())
     {
-        state.error = E_INVALIDARG;
+        recording.error = E_INVALIDARG;
         return;
     }
+    let cmd = recording.native();
     unsafe {
-        (list.native.vtable().ClearDepthStencilView)(
-            list.native.as_raw(),
+        (cmd.vtable().ClearDepthStencilView)(
+            cmd.as_raw(),
             handle,
             flags,
             depth,
@@ -50,16 +51,16 @@ pub(super) unsafe extern "system" fn clear_uav<const FLOAT: bool>(
     count: u32,
     rects: *const RECT,
 ) {
-    let super::CommandRecording { list, state } = &mut *recording(list);
-    if !state.can_record(&list.native) {
+    let mut recording = recording(list);
+    if !recording.can_record() {
         return;
     }
     let Some(resource) = (unsafe { resource_proxy(resource, parent(&list.parent)) }) else {
-        state.error = E_INVALIDARG;
+        recording.error = E_INVALIDARG;
         return;
     };
     if gpu.ptr == 0 || cpu.ptr == 0 || values.is_null() || (count != 0 && rects.is_null()) {
-        state.error = E_INVALIDARG;
+        recording.error = E_INVALIDARG;
         return;
     }
     if resource.state.unbacked_uav() {
@@ -68,6 +69,7 @@ pub(super) unsafe extern "system" fn clear_uav<const FLOAT: bool>(
         crate::diagnostics::log_once(&SKIPPED, || "skipped UAV clear of a Scarlett depth image".to_owned());
         return;
     }
+    let state = &mut *recording;
     let (gpu, cpu) = if let Some(arena) = &state.descriptor_arena
         && arena.contains(gpu.ptr)
     {
@@ -89,23 +91,24 @@ pub(super) unsafe extern "system" fn clear_uav<const FLOAT: bool>(
     } else {
         (gpu, cpu)
     };
-    if let Err(error) = state.prepare_copy(resource.state.placed(), None) {
-        state.error = error;
+    if let Err(error) = recording.prepare_copy(resource.state.placed(), None) {
+        recording.error = error;
         return;
     }
     let alias = match unsafe { crate::device::clear_buffer_alias(parent(&list.parent), cpu.ptr, resource) } {
         Ok(alias) => alias,
-        Err(error) => { state.error = error.code(); return; }
+        Err(error) => { recording.error = error.code(); return; }
     };
     if let Some(target) = &alias
-        && let Err(error) = super::raytracing::retain(state, &[target])
+        && let Err(error) = super::raytracing::retain(&recording, &[target])
     {
-        state.error = error.code();
+        recording.error = error.code();
         return;
     }
     let target = alias.as_ref().unwrap_or_else(|| resource.state.depth()
         .map_or(&resource.native, |pair| &pair.image)).as_raw();
-    let native = &list.native;
+    recording.record_unknown_write();
+    let native = recording.native();
     unsafe {
         if FLOAT {
             (native.vtable().ClearUnorderedAccessViewFloat)(

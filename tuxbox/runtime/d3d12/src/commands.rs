@@ -48,7 +48,7 @@ mod copy_memory;
 pub(crate) mod list_memory;
 pub(crate) mod queue_trace;
 mod media;
-mod memory_wait;
+pub(crate) mod memory_wait;
 pub(crate) mod page_mapping;
 mod queries;
 mod ray_dispatch;
@@ -60,21 +60,27 @@ mod tiles;
 
 enum ListState {
     Fresh(ID3D12CommandAllocator, Option<ID3D12PipelineState>),
-    Open,
+    Open { native_open: bool },
     Closed,
 }
 
 struct Recording {
+    active: recording::ActiveList,
     allocator: ID3D12CommandAllocator,
-    open_queries: u32,
-    predicate: Option<(ID3D12Resource, u64, D3D12_PREDICATION_OP)>,
-    prefix: memory_wait::Prefix,
+    list_type: D3D12_COMMAND_LIST_TYPE,
+    compact: bool,
+    segments: Vec<Arc<memory_wait::Segment>>,
+    written_ranges: memory_wait::WrittenRanges,
     /// Fence label writes and waits, for explaining a stalled wait.
     labels: Vec<memory_wait::Label>,
     timestamp_page: Option<(ID3D12QueryHeap, u32)>,
     resources: device::MediaResources,
     scene_commands: Vec<raytracing::SceneCommand>,
     bindings: compute_bindings::Bindings,
+    predication: Option<recording::Predication>,
+    graphics_state: recording::GraphicsState,
+    active_queries: u32,
+    bundle_executed: bool,
     stencil_slot: Option<u32>,
     stencil_targets: Option<stencil::Targets>,
     dsv_bound: bool,
@@ -114,34 +120,7 @@ struct ListData {
     // The guest writes these pipeline packet words before it checks the
     // packet bounds and calls slot 25. Keep them separate from host state.
     pipeline_packets: core::cell::UnsafeCell<[u8; 32]>,
-    recording: Mutex<CommandRecording>,
-}
-
-// Command methods borrow the current native list together with the guest recording
-// state, under one lock. A compute fence wait can replace the native list.
-struct NativeList {
-    native: ID3D12GraphicsCommandList,
-    parent: Option<IUnknown>,
-    extended: OnceLock<Option<ID3D12GraphicsCommandList1>>,
-    enhanced_barriers: OnceLock<Option<ID3D12GraphicsCommandList7>>,
-    mesh: OnceLock<Option<ID3D12GraphicsCommandList6>>,
-    raytracing: Option<ID3D12GraphicsCommandList4>,
-}
-
-impl NativeList {
-    fn new(native: ID3D12GraphicsCommandList, parent: Option<IUnknown>, raytracing: Option<ID3D12GraphicsCommandList4>) -> Self {
-        Self {
-            native, parent, raytracing,
-            extended: OnceLock::new(),
-            enhanced_barriers: OnceLock::new(),
-            mesh: OnceLock::new(),
-        }
-    }
-}
-
-struct CommandRecording {
-    list: NativeList,
-    state: Recording,
+    recording: Mutex<Recording>,
 }
 
 type List = Proxy<ID3D12GraphicsCommandList, ListData>;
@@ -164,33 +143,33 @@ fn recording(list: &List) -> RecordingGuard<'_> {
 
 /// The locked recording state. A command that puts the list into its error
 /// state is reported as it returns, while its title caller is still known.
-struct RecordingGuard<'a>(MutexGuard<'a, CommandRecording>, &'static std::panic::Location<'static>);
+struct RecordingGuard<'a>(MutexGuard<'a, Recording>, &'static std::panic::Location<'static>);
 
 impl std::ops::Deref for RecordingGuard<'_> {
-    type Target = CommandRecording;
-    fn deref(&self) -> &CommandRecording {
+    type Target = Recording;
+    fn deref(&self) -> &Recording {
         &self.0
     }
 }
 
 impl std::ops::DerefMut for RecordingGuard<'_> {
-    fn deref_mut(&mut self) -> &mut CommandRecording {
+    fn deref_mut(&mut self) -> &mut Recording {
         &mut self.0
     }
 }
 
 impl Drop for RecordingGuard<'_> {
     fn drop(&mut self) {
-        if self.0.state.error.is_ok() {
-            self.0.state.error_reported = false;
-        } else if !self.0.state.error_reported {
-            self.0.state.error_reported = true;
+        if self.0.error.is_ok() {
+            self.0.error_reported = false;
+        } else if !self.0.error_reported {
+            self.0.error_reported = true;
             static COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
             let count = COUNT.fetch_add(1, Ordering::Relaxed) + 1;
             if count <= 32 || count.is_power_of_two() {
                 crate::diagnostics::log(&format!(
                     "command list failed {:#010x} (#{count}) in the command at {}:{}, guest caller {:#x}",
-                    self.0.state.error.0, self.1.file(), self.1.line(),
+                    self.0.error.0, self.1.file(), self.1.line(),
                     crate::survey::title_rva().unwrap_or(0),
                 ));
             }
@@ -260,8 +239,8 @@ unsafe extern "system" fn reset(
         Ok(pipeline) => pipeline,
         Err(error) => return error,
     };
-    let CommandRecording { list: active, state } = &mut *recording(list);
-    if matches!(state.phase, ListState::Open) {
+    let mut state = recording(list);
+    if matches!(state.phase, ListState::Open { .. }) {
         return E_FAIL;
     }
     let native = &list.native;
@@ -273,20 +252,20 @@ unsafe extern "system" fn reset(
         )
     };
     if hr.is_ok() {
-        if active.native != *native {
-            let rt = native.cast().ok();
-            *active = NativeList::new(native.clone(), list.parent.clone(), rt);
-        }
+        state.phase = ListState::Open { native_open: true };
+        state.active = recording::ActiveList::new(list.native.clone(), state.compact);
         state.allocator = allocator.native.clone();
-        state.open_queries = 0;
-        state.predicate = None;
-        state.phase = ListState::Open;
         state.resources = allocator.state.clone();
         state.timestamp_page = None;
         state.labels.clear();
-        state.prefix = memory_wait::Prefix::default();
+        state.segments.clear();
+        state.written_ranges.clear();
         state.scene_commands.clear();
         state.bindings = compute_bindings::Bindings::new(initial);
+        state.predication = None;
+        state.graphics_state.clear();
+        state.active_queries = 0;
+        state.bundle_executed = false;
         if state.media.is_some() {
             state.media = Some(media::Recording::new(allocator));
         }
@@ -312,13 +291,15 @@ unsafe extern "system" fn reset(
 }
 
 unsafe extern "system" fn close(list: &List) -> HRESULT {
-    let CommandRecording { list: active, state } = &mut *recording(list);
+    let mut state = recording(list);
     match state.phase {
         ListState::Closed => return E_FAIL,
         ListState::Fresh(..) => {} // The initial empty recording is already closed on the host.
-        ListState::Open => {
-            if let Err(error) = state.prefix.finish(&active.native) { state.error = error.code(); }
-            if let Err(error) = unsafe { active.native.Close() } && state.error.is_ok() {
+        ListState::Open { native_open } => {
+            if native_open
+                && let Err(error) = unsafe { state.active.native.Close() }
+                && state.error.is_ok()
+            {
                 state.error = error.code();
             }
         }
@@ -424,8 +405,8 @@ unsafe extern "system" fn clear_rtv(
     count: u32,
     rects: *const RECT,
 ) {
-    let CommandRecording { list, state } = &mut *recording(list);
-    if !state.can_record(&list.native) {
+    let mut state = recording(list);
+    if !state.can_record() {
         return;
     }
     if handle.ptr == 0 || color.is_null() || (count != 0 && rects.is_null()) {
@@ -439,9 +420,10 @@ unsafe extern "system" fn clear_rtv(
         state.error = error;
         return;
     }
+    let cmd = state.native();
     unsafe {
-        (list.native.vtable().ClearRenderTargetView)(
-            list.native.as_raw(),
+        (cmd.vtable().ClearRenderTargetView)(
+            cmd.as_raw(),
             handle,
             color,
             count,
@@ -461,8 +443,8 @@ unsafe extern "system" fn discard(
     object: *mut c_void,
     region: *const D3D12_DISCARD_REGION,
 ) {
-    let CommandRecording { list, state } = &mut *recording(list);
-    if !state.can_record(&list.native) {
+    let mut state = recording(list);
+    if !state.can_record() {
         return;
     }
     let Some(resource) = (unsafe { device::resource_proxy(object, parent(&list.parent)) }) else {
@@ -476,9 +458,10 @@ unsafe extern "system" fn discard(
     // CPU-backed read-only textures acquire their contents at submission.
     // Keeping the old bytes of a discarded read-only region is permitted.
     if resource.state.placed().is_none() && resource.state.buffer_window().is_none() {
+        let cmd = state.native();
         unsafe {
-            (list.native.vtable().DiscardResource)(
-                list.native.as_raw(),
+            (cmd.vtable().DiscardResource)(
+                cmd.as_raw(),
                 resource.native.as_raw(),
                 region,
             )
@@ -503,8 +486,8 @@ unsafe extern "system" fn execute_indirect(
     count_buffer: *mut c_void,
     count_offset: u64,
 ) {
-    let CommandRecording { list, state } = &mut *recording(list);
-    if !state.can_record(&list.native) {
+    let mut state = recording(list);
+    if !state.can_record() {
         return;
     }
     let owner = parent(&list.parent);
@@ -527,8 +510,8 @@ unsafe extern "system" fn execute_indirect(
         (Some(&buffer.native), offset)
     };
     if !(argument_offset | count_offset).is_multiple_of(4) { state.error = E_INVALIDARG; return; }
-    let execute = || unsafe {
-        list.native.ExecuteIndirect(
+    let execute = |native: &ID3D12GraphicsCommandList| unsafe {
+        native.ExecuteIndirect(
             &signature.native,
             max_count,
             &arguments.native,
@@ -773,16 +756,12 @@ pub(crate) unsafe fn wrap_command_list(
     device11: bool,
     out: *mut *mut c_void,
 ) -> HRESULT {
-    let raytracing = if compact {
-        None
-    } else {
-        native.cast::<ID3D12GraphicsCommandList4>().ok()
-    };
-    let has_list4 = raytracing.is_some();
+    let has_list4 = !compact && native.cast::<ID3D12GraphicsCommandList4>().is_ok();
     let has_list6 = has_list4 && native.cast::<ID3D12GraphicsCommandList6>().is_ok();
     if extended && !has_list6 {
         return windows::Win32::Foundation::E_NOINTERFACE;
     }
+    let list_type = unsafe { native.GetType() };
     let state = ListData {
         reserved0: [0; 2],
         write_cursor: 0,
@@ -790,38 +769,41 @@ pub(crate) unsafe fn wrap_command_list(
         packet_end: 0,
         reserved2: [0; 0x540 - 0x38],
         pipeline_packets: core::cell::UnsafeCell::new([0; 32]),
-        recording: Mutex::new(CommandRecording {
-            list: NativeList::new(native.clone(), Some(device.clone()), raytracing),
-            state: Recording {
-                allocator: allocator.native.clone(),
-                open_queries: 0,
-                predicate: None,
-                labels: Vec::new(),
-                timestamp_page: None,
-                prefix: memory_wait::Prefix::default(),
-                resources: allocator.state.clone(),
-                scene_commands: Vec::new(),
-                bindings: compute_bindings::Bindings::new(initial),
-                stencil_slot: initial.and_then(|p| p.state.stencil_slot),
-                stencil_targets: None,
-                dsv_bound: false,
-                display_bound: false,
-                trace_target: None,
-                trace_samples: Vec::new(),
-                placed_reads: Vec::new(),
-                placed_writes: Vec::new(),
-                bound_placed_targets: Vec::new(),
-                resource_heap: None,
-                descriptor_arena: None,
-                descriptor_leases: Default::default(),
-                indexed_arenas: Vec::new(),
-                scalar_descriptors: Default::default(),
-                sampled_heaps: Vec::new(),
-                media: compact.then(|| media::Recording::new(allocator)),
-                phase: ListState::Fresh(allocator.native.clone(), initial.map(|p| p.native.clone())),
-                error: S_OK,
-                error_reported: false,
-            },
+        recording: Mutex::new(Recording {
+            active: recording::ActiveList::new(native.clone(), compact),
+            allocator: allocator.native.clone(),
+            list_type,
+            compact,
+            segments: Vec::new(),
+            written_ranges: memory_wait::WrittenRanges::default(),
+            labels: Vec::new(),
+            timestamp_page: None,
+            resources: allocator.state.clone(),
+            scene_commands: Vec::new(),
+            bindings: compute_bindings::Bindings::new(initial),
+            predication: None,
+            graphics_state: recording::GraphicsState::default(),
+            active_queries: 0,
+            bundle_executed: false,
+            stencil_slot: initial.and_then(|p| p.state.stencil_slot),
+            stencil_targets: None,
+            dsv_bound: false,
+            display_bound: false,
+            trace_target: None,
+            trace_samples: Vec::new(),
+            placed_reads: Vec::new(),
+            placed_writes: Vec::new(),
+            bound_placed_targets: Vec::new(),
+            resource_heap: None,
+            descriptor_arena: None,
+            descriptor_leases: Default::default(),
+            indexed_arenas: Vec::new(),
+            scalar_descriptors: Default::default(),
+            sampled_heaps: Vec::new(),
+            media: compact.then(|| media::Recording::new(allocator)),
+            phase: ListState::Fresh(allocator.native.clone(), initial.map(|p| p.native.clone())),
+            error: S_OK,
+            error_reported: false,
         }),
     };
     unsafe {

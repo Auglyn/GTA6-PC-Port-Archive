@@ -7,7 +7,8 @@ Sémantique d'après la documentation publique d'AMD (« RDNA 2 Instruction Set 
 """
 import math
 
-from emu import rdna2_exec_cmp64, rdna2_exec_div, rdna2_exec_f16, rdna2_exec_movrel, rdna2_exec_sad, rdna2_exec_wide
+from emu import (rdna2_exec_cmp16, rdna2_exec_cmp64, rdna2_exec_div, rdna2_exec_f16, rdna2_exec_movrel,
+                 rdna2_exec_sad, rdna2_exec_wide)
 from emu.rdna2_exec_ops import (MASK32, SIXTEEN_BIT_RESULTS, VECTOR, VECTOR_COMPARE, VECTOR_NO_OPERATION,
                                 _float_op, _fma, _legacy_fma, _mul_add, bits_float, float_bits, ldexp, signed)
 
@@ -239,6 +240,9 @@ def execute(wave, name, opcode, word, literal):
 
 
 def _compare(wave, name, fields, literal):
+    from emu.rdna2_exec import Untranslated
+
+    rdna2_exec_cmp16.check_vop3(name, fields.op_sel, Untranslated)
     test, writes_exec = VECTOR_COMPARE[name]
     mask = 0
     for lane in wave.active():

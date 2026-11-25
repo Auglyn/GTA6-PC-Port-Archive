@@ -6593,6 +6593,7 @@ impl Host {
             let copy = self.new_list()?;
             copy.close();
             tracing::info!(width, height, format = format.0, "presenting to a window");
+            crate::fps_overlay::start(hwnd);
             Ok(Presenter {
                 swap_chain,
                 width,

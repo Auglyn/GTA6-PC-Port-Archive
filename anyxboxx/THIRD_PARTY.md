@@ -46,6 +46,7 @@ Le détail par changement est dans `git log -- third_party/victory`. La copie in
 | [myokex/victory-amd](https://github.com/myokex/victory-amd) (myokex) | GPL-3.0 | | Douze commits : textures revérifiées après envoi, mips partielles, dispatchs de plus de 65 535 groupes, vues de textures placées, liste des pipelines précoces, attentes de pipelines au chargement, vues de tampons constants de 64 Kio, file de textures, diagnostics, tableaux de pages DirectStorage |
 | [JoshuuDev/victory-amd](https://github.com/JoshuuDev/victory-amd) (Joshua Odom) | GPL-3.0 | | Lectures noyau dans la mémoire du titre faites à côté puis recopiées (`10ea38e`) |
 | [PastiiJay/klbf-lab](https://github.com/PastiiJay/klbf-lab), branche `klbf-amd` (PastiiJay, KLBF) | GPL-3.0 | | Portages : demi-vagues wave32 sur un hôte à 64 lanes, garde NaN |
+| [rorodev6/victory](https://github.com/rorodev6/victory) (rorodev6) | GPL-3.0 ou ultérieure | | Compteur de fps en haut à gauche (`fps_overlay.rs`, commit `4ddc0c1`), porté avec une taille réglable (`VICTORY_FPS_OVERLAY_SIZE`) |
 
 Les autres commits de `third_party/victory` sont écrits pour AnyXboxX (Proton, réductions de write-watch, gardes, vues, diagnostics) ; leur auteur est celui du commit.
 

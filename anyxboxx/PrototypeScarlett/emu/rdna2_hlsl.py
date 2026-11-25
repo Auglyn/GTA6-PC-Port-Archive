@@ -11,9 +11,9 @@ from pathlib import Path
 import struct
 import sys
 
-from emu import (rdna2, rdna2_exec_div, rdna2_exec_wide, rdna2_hlsl_div, rdna2_hlsl_dot, rdna2_hlsl_ext,
-                 rdna2_hlsl_f16, rdna2_hlsl_format, rdna2_hlsl_image, rdna2_hlsl_movrel, rdna2_hlsl_pc, rdna2_hlsl_sad,
-                 rdna2_hlsl_scalar64, rdna2_hlsl_wide)
+from emu import (rdna2, rdna2_exec_cmp16, rdna2_exec_div, rdna2_exec_wide, rdna2_hlsl_div, rdna2_hlsl_dot,
+                 rdna2_hlsl_ext, rdna2_hlsl_f16, rdna2_hlsl_format, rdna2_hlsl_image, rdna2_hlsl_movrel, rdna2_hlsl_pc,
+                 rdna2_hlsl_sad, rdna2_hlsl_scalar64, rdna2_hlsl_wide)
 from emu.rdna2_exec_ops import signed
 from emu.rdna2_exec_ops import SIXTEEN_BIT_RESULTS, VECTOR_NO_OPERATION
 from emu.rdna2_exec_vop3 import MAD64, Fields, float_inputs, float_result
@@ -175,6 +175,7 @@ def _vop3(name, opcode, fields, literal, active=ACTIVE):
     is_float = float_result(name)
     a, b, c = (modified(code, i, fields, literal, float_inputs(name)) for i, code in enumerate(fields.sources))
     if opcode < 0x100 and is_compare(name):
+        rdna2_exec_cmp16.check_vop3(name, fields.op_sel, Untranslatable)
         target = "s[126]" if name.startswith("v_cmpx") else scalar_target(fields.vdst)
         return [f"{{ bool t = ({active}) && ({compare_condition(name, a, b)}); {target} = Ballot(lane, t); }}"]
     if name in CARRY:

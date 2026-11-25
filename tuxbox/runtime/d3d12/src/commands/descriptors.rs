@@ -26,12 +26,13 @@ impl ResourceHeap {
     pub(super) fn scalar_descriptor(
         &self, index: u32, arena: Option<&device::descriptor_paging::Arena>,
     ) -> Option<ScalarDescriptor> {
-        let offset = (index as usize).checked_mul(self.stride)?;
         let cpu = if let Some(arena) = arena {
+            let offset = (index as usize).checked_mul(arena.guest_stride())?;
             let logical = arena.base().checked_add(offset)?;
             if !arena.contains(logical as u64) { return None; }
             arena.cpu(logical).ptr
         } else {
+            let offset = (index as usize).checked_mul(self.stride)?;
             let handle = self.cpu.start.checked_add(offset)?;
             if !self.cpu.contains(&handle) { return None; }
             handle
@@ -40,7 +41,7 @@ impl ResourceHeap {
     }
 
     pub(super) fn index_map(
-        &self, list: &super::NativeList, arena: Option<&device::descriptor_paging::Arena>,
+        &self, list: &List, arena: Option<&device::descriptor_paging::Arena>,
         resources: &device::MediaResources,
     ) -> windows::core::Result<u64> {
         let parent = list.parent.as_ref().ok_or(E_INVALIDARG)?;
@@ -90,8 +91,8 @@ pub(super) unsafe extern "system" fn bind_heaps(
     count: u32,
     heaps: *const *mut c_void,
 ) {
-    let super::CommandRecording { list, state } = &mut *recording(list);
-    if !state.ensure_open(&list.native) {
+    let mut state = recording(list);
+    if !state.prepare_state() {
         return;
     }
     if count > 2 || (count != 0 && heaps.is_null()) {
@@ -135,8 +136,9 @@ pub(super) unsafe extern "system" fn bind_heaps(
     state.resource_heap = resource_heap;
     state.descriptor_arena = descriptor_arena;
     state.bindings.heaps(&retained[..count as usize]);
+    let cmd = state.native();
     unsafe {
-        (list.native.vtable().SetDescriptorHeaps)(list.native.as_raw(), count, native.as_ptr())
+        (cmd.vtable().SetDescriptorHeaps)(cmd.as_raw(), count, native.as_ptr())
     };
 }
 
@@ -145,10 +147,11 @@ pub(super) unsafe extern "system" fn table<const COMPUTE: bool>(
     index: u32,
     base: D3D12_GPU_DESCRIPTOR_HANDLE,
 ) {
-    let super::CommandRecording { list, state } = &mut *recording(list);
-    if !state.can_record(&list.native) {
+    let mut state = recording(list);
+    if !state.prepare_state() {
         return;
     }
+    let state = &mut *state;
     let logical = base;
     let base = if let Some(arena) = &state.descriptor_arena && arena.contains(base.ptr) {
         let Some(Some(length)) = state.bindings.paged_layout::<COMPUTE>().and_then(|t| t.get(index as usize)) else {
@@ -165,8 +168,8 @@ pub(super) unsafe extern "system" fn table<const COMPUTE: bool>(
     } else { base };
     state.bindings.table::<COMPUTE>(index, base, logical);
     if COMPUTE {
-        unsafe { list.native.SetComputeRootDescriptorTable(index, base) };
+        unsafe { state.native().SetComputeRootDescriptorTable(index, base) };
     } else {
-        unsafe { list.native.SetGraphicsRootDescriptorTable(index, base) };
+        unsafe { state.native().SetGraphicsRootDescriptorTable(index, base) };
     }
 }

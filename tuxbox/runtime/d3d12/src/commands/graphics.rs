@@ -9,35 +9,36 @@ use windows::Win32::Graphics::Direct3D12::*;
 use windows::core::{BOOL, Interface};
 
 pub(super) unsafe extern "system" fn root(list: &List, signature: *mut c_void) {
-    let super::CommandRecording { list, state } = &mut *recording(list);
-    if !state.can_record(&list.native) {
+    let mut state = recording(list);
+    if !state.prepare_state() {
         return;
     }
     match unsafe { root_proxy(signature, parent(&list.parent)) } {
         Ok(root) => {
             let native = root.map(|r| &r.native);
             state.bindings.graphics_root(native, root.map(|r| &r.state));
-            unsafe { list.native.SetGraphicsRootSignature(native) };
+            unsafe { state.native().SetGraphicsRootSignature(native) };
         }
         Err(error) => state.error = error,
     }
 }
 
 pub(super) unsafe extern "system" fn topology(list: &List, primitive: D3D_PRIMITIVE_TOPOLOGY) {
-    let super::CommandRecording { list, state } = &mut *recording(list);
-    if state.can_record(&list.native) {
+    let mut state = recording(list);
+    if state.prepare_state() {
         let native = if primitive.0 == crate::device::rectangle::LIST {
             D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST
         } else {
             primitive
         };
-        unsafe { list.native.IASetPrimitiveTopology(native) };
+        state.graphics_state.topology = Some(native);
+        unsafe { state.native().IASetPrimitiveTopology(native) };
     }
 }
 
 pub(super) unsafe extern "system" fn pipeline(list: &List, guest: *mut c_void) {
-    let super::CommandRecording { list, state } = &mut *recording(list);
-    if !state.can_record(&list.native) {
+    let mut state = recording(list);
+    if !state.prepare_state() {
         return;
     }
     match unsafe { crate::device::compute::pipeline(guest, parent(&list.parent)) } {
@@ -46,7 +47,7 @@ pub(super) unsafe extern "system" fn pipeline(list: &List, guest: *mut c_void) {
             state.bindings.null_usage = host.state.null_usage.clone();
             state.bindings.pipeline = Some(host.into());
             state.bindings.draw_trace = host.state.draw_trace.clone();
-            unsafe { list.native.SetPipelineState(&host.native) };
+            unsafe { state.native().SetPipelineState(&host.native) };
         }
         _ => state.error = E_INVALIDARG,
     }
@@ -57,8 +58,8 @@ pub(super) unsafe extern "system" fn viewports(
     count: u32,
     views: *const D3D12_VIEWPORT,
 ) {
-    let super::CommandRecording { list, state } = &mut *recording(list);
-    if !state.can_record(&list.native) {
+    let mut state = recording(list);
+    if !state.prepare_state() {
         return;
     }
     if count > D3D12_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE
@@ -67,12 +68,20 @@ pub(super) unsafe extern "system" fn viewports(
         state.error = E_INVALIDARG;
         return;
     }
-    unsafe { (list.native.vtable().RSSetViewports)(list.native.as_raw(), count, views) };
+    state.graphics_state.viewports.clear();
+    if count != 0 {
+        state
+            .graphics_state
+            .viewports
+            .extend_from_slice(unsafe { core::slice::from_raw_parts(views, count as usize) });
+    }
+    let cmd = state.native();
+    unsafe { (cmd.vtable().RSSetViewports)(cmd.as_raw(), count, views) };
 }
 
 pub(super) unsafe extern "system" fn scissors(list: &List, count: u32, rects: *const RECT) {
-    let super::CommandRecording { list, state } = &mut *recording(list);
-    if !state.can_record(&list.native) {
+    let mut state = recording(list);
+    if !state.prepare_state() {
         return;
     }
     if count > D3D12_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE
@@ -81,7 +90,15 @@ pub(super) unsafe extern "system" fn scissors(list: &List, count: u32, rects: *c
         state.error = E_INVALIDARG;
         return;
     }
-    unsafe { (list.native.vtable().RSSetScissorRects)(list.native.as_raw(), count, rects) };
+    state.graphics_state.scissors.clear();
+    if count != 0 {
+        state
+            .graphics_state
+            .scissors
+            .extend_from_slice(unsafe { core::slice::from_raw_parts(rects, count as usize) });
+    }
+    let cmd = state.native();
+    unsafe { (cmd.vtable().RSSetScissorRects)(cmd.as_raw(), count, rects) };
 }
 
 // At RVA 0x5790ccf the title passes the count and handle array in RDX/R8,
@@ -93,8 +110,8 @@ pub(super) unsafe extern "system" fn targets(
     contiguous: BOOL,
     dsv: *const D3D12_CPU_DESCRIPTOR_HANDLE,
 ) {
-    let super::CommandRecording { list, state } = &mut *recording(list);
-    if !state.can_record(&list.native) {
+    let mut state = recording(list);
+    if !state.prepare_state() {
         return;
     }
     if count > D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT || (count != 0 && rtvs.is_null()) {
@@ -144,9 +161,13 @@ pub(super) unsafe extern "system" fn targets(
     } else if let Some(targets) = &mut state.stencil_targets {
         targets.unbind();
     }
+    let cmd = state.native().clone();
     unsafe {
-        (list.native.vtable().OMSetRenderTargets)(
-            list.native.as_raw(),
+        state
+            .graphics_state
+            .set_render_targets(&cmd, count, rtvs, contiguous.as_bool(), dsv);
+        (cmd.vtable().OMSetRenderTargets)(
+            cmd.as_raw(),
             count,
             rtvs,
             contiguous,
@@ -162,11 +183,10 @@ pub(super) unsafe extern "system" fn draw(
     start_vertex: u32,
     start_instance: u32,
 ) {
-    let super::CommandRecording { list, state } = &mut *recording(list);
-    if state.can_record(&list.native) {
-        state.draw(list, vertices != 0 && instances != 0, || unsafe {
-            list.native
-                .DrawInstanced(vertices, instances, start_vertex, start_instance);
+    let mut state = recording(list);
+    if state.can_record() {
+        state.draw(list, vertices != 0 && instances != 0, |native| unsafe {
+            native.DrawInstanced(vertices, instances, start_vertex, start_instance);
             static FIRST: std::sync::Once = std::sync::Once::new();
             crate::diagnostics::log_once(&FIRST, || format!("recorded DrawInstanced list={list:p} vertices={vertices} instances={instances}"));
         });
@@ -179,8 +199,8 @@ pub(super) unsafe extern "system" fn shading_rate(
     rate: D3D12_SHADING_RATE,
     combiners: *const D3D12_SHADING_RATE_COMBINER,
 ) {
-    let super::CommandRecording { list, state } = &mut *recording(list);
-    if !state.can_record(&list.native) {
+    let mut state = recording(list);
+    if !state.prepare_state() {
         return;
     }
     if !matches!(rate, D3D12_SHADING_RATE_1X1 | D3D12_SHADING_RATE_1X2 | D3D12_SHADING_RATE_2X1 |
@@ -190,10 +210,12 @@ pub(super) unsafe extern "system" fn shading_rate(
         state.error = E_INVALIDARG;
         return;
     }
-    let native = match list.native.cast::<ID3D12GraphicsCommandList5>() {
+    let native = match state.native().cast::<ID3D12GraphicsCommandList5>() {
         Ok(native) => native,
         Err(error) => { state.error = error.code(); return; }
     };
+    let saved_combiners = (!combiners.is_null()).then(|| unsafe { *combiners.cast::<[D3D12_SHADING_RATE_COMBINER; 2]>() });
+    state.graphics_state.shading_rate = Some((rate, saved_combiners));
     unsafe { native.RSSetShadingRate(rate, (!combiners.is_null()).then_some(combiners)) };
 }
 
@@ -202,11 +224,11 @@ pub(super) unsafe extern "system" fn shading_rate(
 // ordering in DXIL, including earlydepthstencil for early-depth color shaders.
 // Desktop D3D12 always honors this shader contract; it has no dynamic override.
 pub(super) unsafe extern "system" fn force_shader_depth_order(list: &List, enable: u32) {
-    let super::CommandRecording { list, state } = &mut *recording(list);
-    if !state.can_record(&list.native) {
+    let mut state = recording(list);
+    if !state.prepare_state() {
         return;
     }
-    if enable > 1 || unsafe { list.native.GetType() } != D3D12_COMMAND_LIST_TYPE_DIRECT {
+    if enable > 1 || state.list_type != D3D12_COMMAND_LIST_TYPE_DIRECT {
         state.error = E_INVALIDARG;
         return;
     }
@@ -219,8 +241,8 @@ pub(super) unsafe extern "system" fn force_shader_depth_order(list: &List, enabl
 // SetSampleMaskX programs an additional 16-bit coverage mask per pixel in a
 // 2x2 quad. Enabling every sample preserves the coverage of the bound PSO.
 pub(super) unsafe extern "system" fn sample_mask(list: &List, mask: u64) {
-    let super::CommandRecording { list, state } = &mut *recording(list);
-    if !state.can_record(&list.native) {
+    let mut state = recording(list);
+    if !state.prepare_state() {
         return;
     }
     // A mask that differs between the four pixels of a quad, such as the
@@ -239,25 +261,25 @@ pub(super) unsafe extern "system" fn sample_mask(list: &List, mask: u64) {
 // FD3D12CommandContext::RHIDispatchMeshShader calls slot 127 at Frosty
 // RVA 0x578f241 with X/Y/Z group counts in the standard register order.
 pub(super) unsafe extern "system" fn dispatch_mesh(list: &List, x: u32, y: u32, z: u32) {
-    let super::CommandRecording { list, state } = &mut *recording(list);
-    if !state.can_record(&list.native) {
+    let mut state = recording(list);
+    if !state.can_record() {
         return;
     }
     if x.max(y).max(z) > D3D12_CS_DISPATCH_MAX_THREAD_GROUPS_PER_DIMENSION
         || u64::from(x) * u64::from(y) * u64::from(z) > 1 << 22
         || !matches!(
-            unsafe { list.native.GetType() },
+            state.list_type,
             D3D12_COMMAND_LIST_TYPE_DIRECT | D3D12_COMMAND_LIST_TYPE_BUNDLE
         )
     {
         state.error = E_INVALIDARG;
         return;
     }
-    let Some(native) = list.mesh.get_or_init(|| list.native.cast().ok()) else {
+    let Some(native) = state.mesh().cloned() else {
         state.error = windows::Win32::Foundation::E_NOINTERFACE;
         return;
     };
-    state.draw(list, x != 0 && y != 0 && z != 0, || unsafe { native.DispatchMesh(x, y, z) });
+    state.draw(list, x != 0 && y != 0 && z != 0, |_| unsafe { native.DispatchMesh(x, y, z) });
     static FIRST_MESH: std::sync::Once = std::sync::Once::new();
     crate::diagnostics::log_once(&FIRST_MESH, || {
         format!("recorded Xbox slot 127 DispatchMesh ({x}, {y}, {z})")
@@ -270,15 +292,15 @@ pub(super) unsafe extern "system" fn index_buffer(
     list: &List,
     view: *const D3D12_INDEX_BUFFER_VIEW,
 ) {
-    let super::CommandRecording { list, state } = &mut *recording(list);
-    if state.can_record(&list.native) {
+    let mut state = recording(list);
+    if state.prepare_state() {
         let mut host = unsafe { view.as_ref() }.copied();
         if let Some(v) = &mut host {
-            let Some(address) = super::compute::address(list, state, v.BufferLocation, v.SizeInBytes.into()) else { return; };
+            let Some(address) = super::compute::address(list, &mut state, v.BufferLocation, v.SizeInBytes.into()) else { return; };
             v.BufferLocation = address;
         }
-        unsafe { list.native.IASetIndexBuffer(host.as_ref().map(core::ptr::from_ref)) };
-
+        state.graphics_state.index_buffer = host;
+        unsafe { state.native().IASetIndexBuffer(host.as_ref().map(core::ptr::from_ref)) };
     }
 }
 
@@ -288,8 +310,8 @@ pub(super) unsafe extern "system" fn vertex_buffers(
     count: u32,
     views: *const D3D12_VERTEX_BUFFER_VIEW,
 ) {
-    let super::CommandRecording { list, state } = &mut *recording(list);
-    if !state.can_record(&list.native) {
+    let mut state = recording(list);
+    if !state.prepare_state() {
         return;
     }
     if start > D3D12_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT
@@ -299,18 +321,26 @@ pub(super) unsafe extern "system" fn vertex_buffers(
         return;
     }
     if views.is_null() || count == 0 {
-        unsafe { (list.native.vtable().IASetVertexBuffers)(list.native.as_raw(), start, count, views) };
+        if views.is_null() {
+            for slot in start as usize..(start + count) as usize {
+                state.graphics_state.vertex_buffers[slot] = None;
+            }
+        }
+        let cmd = state.native();
+        unsafe { (cmd.vtable().IASetVertexBuffers)(cmd.as_raw(), start, count, views) };
         return;
     }
     let mut translated = [D3D12_VERTEX_BUFFER_VIEW::default(); D3D12_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT as usize];
     let host = &mut translated[..count as usize];
     host.copy_from_slice(unsafe { core::slice::from_raw_parts(views, count as usize) });
     for v in host.iter_mut() {
-        let Some(address) = super::compute::address(list, state, v.BufferLocation, v.SizeInBytes.into()) else { return; };
+        let Some(address) = super::compute::address(list, &mut state, v.BufferLocation, v.SizeInBytes.into()) else { return; };
         v.BufferLocation = address;
     }
-    unsafe { list.native.IASetVertexBuffers(start, Some(host)) };
-
+    for (i, &v) in host.iter().enumerate() {
+        state.graphics_state.vertex_buffers[start as usize + i] = Some(v);
+    }
+    unsafe { state.native().IASetVertexBuffers(start, Some(host)) };
 }
 
 // Slot 13 at Frosty RVA 0x578ecf6 uses the desktop five-argument ordering.
@@ -322,11 +352,10 @@ pub(super) unsafe extern "system" fn draw_indexed(
     base_vertex: i32,
     first_instance: u32,
 ) {
-    let super::CommandRecording { list, state } = &mut *recording(list);
-    if state.can_record(&list.native) {
-        state.draw(list, indices != 0 && instances != 0, || unsafe {
-            list.native
-                .DrawIndexedInstanced(indices, instances, first, base_vertex, first_instance);
+    let mut state = recording(list);
+    if state.can_record() {
+        state.draw(list, indices != 0 && instances != 0, |native| unsafe {
+            native.DrawIndexedInstanced(indices, instances, first, base_vertex, first_instance);
             static FIRST: std::sync::Once = std::sync::Once::new();
             crate::diagnostics::log_once(&FIRST, || format!("recorded DrawIndexedInstanced list={list:p} indices={indices} instances={instances}"));
         });
@@ -335,31 +364,40 @@ pub(super) unsafe extern "system" fn draw_indexed(
 
 // Frosty's ApplyState records these output-merger values at RVAs 0x57f0356 and 0x57f0398.
 pub(super) unsafe extern "system" fn blend_factor(list: &List, factor: *const f32) {
-    let super::CommandRecording { list, state } = &mut *recording(list);
-    if state.can_record(&list.native) {
-        unsafe { (list.native.vtable().OMSetBlendFactor)(list.native.as_raw(), factor) };
+    let mut state = recording(list);
+    if state.prepare_state() {
+        // Direct3D specifies NULL BlendFactor as [1.0, 1.0, 1.0, 1.0]. Pass an
+        // explicit pointer to the host because some drivers dereference it.
+        let saved = if factor.is_null() {
+            [1.0; 4]
+        } else {
+            unsafe { *factor.cast::<[f32; 4]>() }
+        };
+        state.graphics_state.blend_factor = Some(saved);
+        unsafe { state.native().OMSetBlendFactor(Some(&saved)) };
     }
 }
 
 pub(super) unsafe extern "system" fn stencil_ref(list: &List, reference: u32) {
-    let super::CommandRecording { list, state } = &mut *recording(list);
-    if state.can_record(&list.native) {
-        unsafe { list.native.OMSetStencilRef(reference) };
+    let mut state = recording(list);
+    if state.prepare_state() {
+        state.graphics_state.stencil_ref = Some(reference);
+        unsafe { state.native().OMSetStencilRef(reference) };
     }
 }
 
 // ApplyState loads the depth minimum and maximum into XMM1/XMM2 before the
 // slot 68 call returning at title RVA 0x57f03ed.
 pub(super) unsafe extern "system" fn depth_bounds(list: &List, minimum: f32, maximum: f32) {
-    let super::CommandRecording { list, state } = &mut *recording(list);
-    if !state.can_record(&list.native) {
+    let mut state = recording(list);
+    if !state.prepare_state() {
         return;
     }
-    let native = list
-        .extended
-        .get_or_init(|| list.native.cast::<ID3D12GraphicsCommandList1>().ok());
-    match native {
-        Some(native) => unsafe { native.OMSetDepthBounds(minimum, maximum) },
+    match state.extended().cloned() {
+        Some(native) => {
+            state.graphics_state.depth_bounds = Some((minimum, maximum));
+            unsafe { native.OMSetDepthBounds(minimum, maximum) };
+        }
         None => state.error = windows::Win32::Foundation::E_NOINTERFACE,
     }
 }

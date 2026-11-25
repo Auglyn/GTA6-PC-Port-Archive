@@ -60,6 +60,7 @@
 #include "../src/spirv_f16_halves.h"
 #include "../src/spirv_stores.h"
 #include "../src/title_va_alias.h"
+#include "../src/console_heap_vsharp_slots.h"
 #include "../src/title_window_plan.h"
 #include "../src/vulkan_present.h"
 #include "../src/vulkan_device_filter.h"
@@ -2199,6 +2200,14 @@ struct DeviceState {
     void title_texture_mapped(const void* resource, std::uint64_t address);
     void title_texture_unmapped(const void* resource, std::uint64_t address);  // the title wrote texels
     void title_texture_gone(const void* resource, std::uint64_t address);
+    // Textures destroyed while their thread held title_texture_mutex (inside the registry, t_in_title_textures): a
+    // descriptor it overwrote held the last reference. Their GPU placement is removed at once; title_texture_gone
+    // cannot take the registry mutex again there (MSVC's
+    // std::mutex throws resource_deadlock_would_occur, which Wine's msvcp140 aborts on), so their entries only stop
+    // naming the resource and are removed by drain_titles_gone once the mutex is free. Under title_texture_mutex.
+    std::vector<std::pair<const void*, std::uint64_t>> titles_gone;
+    std::atomic<bool> titles_gone_pending{false};
+    void drain_titles_gone();
 
     // Windows of the title's own memory in the GPU address arena (src/title_va_alias.h, docs/d3d12_vulkan.md
     // section 3.3 "Title-chosen addresses"): a root view or buffer V# that names the title's memory outside any
@@ -3207,6 +3216,7 @@ struct DeviceState {
         std::vector<std::uint8_t> mirror;  // the title's bytes as the tracker last copied them
         std::vector<std::uint8_t> made;    // the title's bytes each arena slot was last made from
         std::vector<std::uint8_t> retry;   // per slot: not settled yet (fix_console_slot), in `retries`
+        leonida::ConsoleHeapVsharpSlots live_vsharps;  // slots whose GPU copy holds a live buffer V#
         std::vector<std::uint32_t> retries;
         std::set<std::uint32_t> empty_slots;
         std::uint32_t next_empty = 0;
@@ -3286,6 +3296,7 @@ struct DeviceState {
         if (empty) heap.empty_slots.insert(std::uint32_t(slot));
         else if (!heap.empty_slots.empty()) heap.empty_slots.erase(std::uint32_t(slot));
         std::memcpy(heap.copy + slot * kDescriptorSize, w, kDescriptorSize);
+        heap.live_vsharps.set(slot, leonida::ConsoleHeapVsharpSlots::is_live_vsharp(w));
         return settled;
     }
 
@@ -3317,6 +3328,7 @@ struct DeviceState {
                 heap.fix_over = true;
             if (heap.fix_over) {
                 std::memset(heap.copy + at, 0, kDescriptorSize);
+                heap.live_vsharps.clear(slot);
                 ++heap.deferred_fixes;
                 if (!heap.retry[slot]) {
                     heap.retry[slot] = 1;
@@ -3402,6 +3414,7 @@ struct DeviceState {
             const auto end = std::uint32_t((offset + bytes) / kDescriptorSize);
             heap.empty_slots.erase(heap.empty_slots.lower_bound(first), heap.empty_slots.lower_bound(end));
             for (auto slot = first; slot < end; ++slot) heap.retry[slot] = 0;
+            heap.live_vsharps.clear_range(first, end);
         });
         const auto t1 = clock::now();
         heap.fix_start = t1;
@@ -3414,16 +3427,13 @@ struct DeviceState {
             heap.alias_generation = alias_generation;
             heap.checked_generation = generation;
             // Even an unchanged title slot may name a buffer released since the last submission.
-            for (size_t at = 0; at + kDescriptorSize <= heap.bytes; at += kDescriptorSize) {
-                auto* w = reinterpret_cast<uint32_t*>(heap.copy + at);
-                if (!(w[3] >> 30) && (w[2] || w[6])) {
-                    const auto slot = at / kDescriptorSize;
-                    if (!fix_console_slot(heap, slot) && !heap.retry[slot]) {
-                        heap.retry[slot] = 1;
-                        heap.retries.push_back(uint32_t(slot));
-                    }
+            // Walk the host-RAM V# bitset instead of reading every slot of `heap.copy` (which may be uncached WC VRAM).
+            heap.live_vsharps.for_each([&](std::size_t slot) {
+                if (!fix_console_slot(heap, slot) && !heap.retry[slot]) {
+                    heap.retry[slot] = 1;
+                    heap.retries.push_back(uint32_t(slot));
                 }
-            }
+            });
         }
         const auto t2 = clock::now();
         // A settled zero can acquire GPU backing without a CPU map event. Probe at most eight in
@@ -3641,6 +3651,7 @@ struct DeviceState {
                 heap->previous = heap->made.data();
             }
             heap->retry.assign(std::size_t(bytes / kDescriptorSize), 0);
+            heap->live_vsharps.reset(std::size_t(bytes / kDescriptorSize));
             heap->pages = make_shadow_pages(reinterpret_cast<const std::uint8_t*>(static_cast<std::uintptr_t>(console_va)),
                                             heap->input, std::size_t(bytes));
         }
@@ -10202,6 +10213,19 @@ void DeviceState::title_texture_unmapped(const void* resource, std::uint64_t add
 }
 
 void DeviceState::title_texture_gone(const void* resource, std::uint64_t address) {
+    if (t_in_title_textures) {  // this thread holds title_texture_mutex
+        {
+            // Never held here: ~Resource takes descriptor_mutex itself (image_owner, forget_image). The submit path
+            // reads gpu_placements under descriptor_mutex alone, so the placement must not outlive the resource.
+            std::lock_guard descriptors(descriptor_mutex);
+            gpu_placements.remove(address, resource);
+        }
+        const auto it = title_textures.find(address);
+        if (it != title_textures.end() && it->second->resource == resource) it->second->resource = nullptr;
+        titles_gone.push_back({resource, address});
+        titles_gone_pending.store(true, std::memory_order_release);
+        return;
+    }
     std::lock_guard lock(title_texture_mutex);
     {
         std::lock_guard descriptors(descriptor_mutex);
@@ -10209,6 +10233,17 @@ void DeviceState::title_texture_gone(const void* resource, std::uint64_t address
     }
     const auto it = title_textures.find(address);
     if (it != title_textures.end() && it->second->resource == resource) title_textures.erase(it);
+}
+
+void DeviceState::drain_titles_gone() {
+    if (!titles_gone_pending.load(std::memory_order_acquire)) return;
+    std::lock_guard lock(title_texture_mutex);
+    for (const auto& [resource, address] : titles_gone) {
+        const auto it = title_textures.find(address);
+        if (it != title_textures.end() && !it->second->resource) title_textures.erase(it);
+    }
+    titles_gone.clear();
+    titles_gone_pending.store(false, std::memory_order_release);
 }
 
 // The T# of a view: what the shader gets to know about it, in the structure the console's shaders read.
@@ -11796,6 +11831,7 @@ public:
             if (!written) ++stats.null_views;
             if (stats.views == 64 || !(stats.views % 2048)) log_title_census("slot-70 texture views");
         }
+        state_.drain_titles_gone();
         return written;
     }
 
@@ -11929,12 +11965,13 @@ public:
         std::unique_lock lock(state_.title_texture_mutex, std::try_to_lock);
         if (!lock.owns_lock()) return;  // a slot-70 view is filling one; next time
         title_refreshed_.store(ticks, std::memory_order_relaxed);
-        const InTitleTextures inside;
+        std::optional<InTitleTextures> inside(std::in_place);
         TitleTextureStats& stats = title_stats_;
         ++stats.passes;
-        // A fill this pass makes can submit, and a submission destroys a retired image, whose destructor erases its
-        // registry entry (title_texture_gone). The registry mutex is recursive for its owner on Windows, so that
-        // erase lands inside this pass: every walk below visits a snapshot, never an iterator into the registry.
+        // A fill this pass makes can submit, and a submission destroys a retired image, whose destructor reaches
+        // title_texture_gone while this thread holds the registry mutex: the entry stops naming the resource and is
+        // erased by drain_titles_gone after the pass. Every walk below visits a snapshot, never an iterator into the
+        // registry, and skips an entry without a resource.
         const auto entries = leonida::title_texture_snapshot(state_.title_textures);
         title_pass_ = true;
         std::uint64_t checked = 0, filled = 0, fill_pass_ns = 0;
@@ -12066,7 +12103,9 @@ public:
             stats.last_log = now;
             log_title_census("refresh");
         }
+        inside.reset();
         lock.unlock();
+        state_.drain_titles_gone();
         for (Resource* r : release) r->Release();
     }
 
@@ -12367,7 +12406,8 @@ private:
         };
         auto& textures = state_.title_textures;
         const auto it = textures.find(address);
-        TitleTexture* t = it == textures.end() ? nullptr : it->second.get();
+        // An entry without a resource is one destroyed inside the registry, waiting for drain_titles_gone.
+        TitleTexture* t = it == textures.end() || !it->second->resource ? nullptr : it->second.get();
         if (!t || !TitleGpuPlacements<Resource>::matches(d, *t->resource)) {
             if (Resource* gpu = matching_gpu_placement(d, address)) {
                 ++title_stats_.of_slot133;
@@ -12753,7 +12793,7 @@ private:
         VkDeviceSize owned_bytes = 0, placed_bytes = 0, host_heap_bytes = 0;
         for (const auto& [address, t] : state_.title_textures) {
             (t->owned ? owned : slot133) += 1;
-            if (!t->owned && t->unbound_bytes) t->set_resource(t->resource);
+            if (!t->owned && t->resource && t->unbound_bytes) t->set_resource(t->resource);
             mapped += t->mapped;
             filled += t->fills > 0;
             (t->owned ? owned_bytes : placed_bytes) += t->backing_bytes;
