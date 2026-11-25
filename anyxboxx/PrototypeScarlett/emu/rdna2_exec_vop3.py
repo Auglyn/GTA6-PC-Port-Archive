@@ -7,8 +7,8 @@ Sémantique d'après la documentation publique d'AMD (« RDNA 2 Instruction Set 
 """
 import math
 
-from emu.rdna2_exec_ops import (MASK32, VECTOR, VECTOR_COMPARE, _float_op, _fma, bits_float, float_bits,
-                                ldexp, signed)
+from emu.rdna2_exec_ops import (MASK32, VECTOR, VECTOR_COMPARE, _float_op, _fma, _mul_add, bits_float,
+                                float_bits, ldexp, signed)
 
 SIGN = 0x8000_0000
 EXEC_LO = 126
@@ -26,7 +26,8 @@ def _float3(function):
 
 
 def _legacy_fma(x, y, z):
-    return z if x == 0 or y == 0 else x * y + z          # « legacy » : 0 × n'importe quoi = 0
+    """« DX9 rules, 0.0 * x = 0.0 » (ISA RDNA 2, p. 167) ; sinon la FMA arrondie une seule fois."""
+    return z if x == 0 or y == 0 else _fma(x, y, z)
 
 
 def _bitfield(value, offset, width, is_signed=False):
@@ -62,7 +63,7 @@ def _perm_b32(src0, src1, src2):
 # Instructions propres à VOP3 : fonction(a, b, c) des trois sources.
 VECTOR3 = {
     "v_fma_f32": _float3(_fma),
-    "v_mad_f32": _float3(_fma),
+    "v_mad_f32": _float3(_mul_add),
     "v_fma_legacy_f32": _float3(_legacy_fma),
     "v_mad_u32_u24": lambda a, b, c: (a & 0xFFFFFF) * (b & 0xFFFFFF) + c,
     "v_mad_i32_i24": lambda a, b, c: signed(a, 24) * signed(b, 24) + signed(c),

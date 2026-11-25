@@ -24,6 +24,11 @@ struct Entry {
 }
 const _: () = assert!(size_of::<Builder>() == 24 && size_of::<Entry>() == 80);
 
+// BuildRaytracingAccelerationStructure and CopyRaytracingAccelerationStructure
+// in the Series X|S command-list table, which this library's callers use.
+const BUILD_SLOT: usize = 119;
+const COPY_SLOT: usize = 121;
+
 // The Xbox COM vtable is distinct from the desktop interface. This provider
 // calls the same public slots as an Xbox title, preserving command-list errors.
 unsafe fn slot(object: Object, index: usize) -> *const c_void {
@@ -88,7 +93,7 @@ unsafe extern "system" fn tuxbox_bvh_build(
     post: *const Post,
 ) {
     let record: unsafe extern "system" fn(Object, *const Build, u32, *const Post) =
-        unsafe { core::mem::transmute(slot(list, 117)) };
+        unsafe { core::mem::transmute(slot(list, BUILD_SLOT)) };
     unsafe { record(list, desc, count, post) };
 }
 
@@ -99,20 +104,26 @@ unsafe extern "system" fn tuxbox_bvh_batch(
     count: u32,
     entries: *const Entry,
 ) {
-    if count == 0 {
+    if count == 0 || entries.is_null() {
         return;
     }
-    if !entries.is_null() {
-        let entries = unsafe { core::slice::from_raw_parts(entries, count as usize) };
-        if entries.iter().all(|entry| entry.extra == [0; 4]) {
-            for entry in entries {
-                unsafe { tuxbox_bvh_build(this, list, &entry.build, 0, core::ptr::null()) };
-            }
-            return;
+    let entries = unsafe { core::slice::from_raw_parts(entries, count as usize) };
+    for entry in entries {
+        // `extra` holds the postbuild count and array, then the size and
+        // address of an Xbox extension stream.
+        let [post_count, post, stream_bytes, stream] = entry.extra;
+        if stream_bytes != 0 && stream != 0 {
+            // Desktop DXR cannot express the stream. A missing description
+            // makes the provider skip and report this one build.
+            unsafe { tuxbox_bvh_build(this, list, core::ptr::null(), 0, core::ptr::null()) };
+            continue;
         }
+        let post_count = post_count as u32;
+        let post = if post_count == 0 { 0 } else { post };
+        unsafe {
+            tuxbox_bvh_build(this, list, &entry.build, post_count, post as usize as *const Post)
+        };
     }
-    // A void recording call reports unsupported inputs at Close.
-    unsafe { tuxbox_bvh_build(this, list, core::ptr::null(), 0, core::ptr::null()) };
 }
 
 #[unsafe(no_mangle)]
@@ -128,7 +139,7 @@ unsafe extern "system" fn tuxbox_bvh_copy(
         u64,
         u64,
         D3D12_RAYTRACING_ACCELERATION_STRUCTURE_COPY_MODE,
-    ) = unsafe { core::mem::transmute(slot(list, 119)) };
+    ) = unsafe { core::mem::transmute(slot(list, COPY_SLOT)) };
     unsafe { record(list, dst, src, mode) };
 }
 

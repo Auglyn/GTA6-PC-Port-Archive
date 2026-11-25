@@ -12,6 +12,7 @@
 
 #include <cstdint>
 
+#include "hdr_luminance.h"
 #include "interface_helpers.h"
 #include "interfaces.h"
 #include "trace.h"
@@ -31,11 +32,7 @@ struct ComPtr {
 // --- XDisplay : HDR de l'écran principal ----------------------------------------------
 enum HdrModeResult : uint32_t { kHdrUnknown = 0, kHdrEnabled = 1, kHdrDisabled = 2 };
 
-struct HdrModeInfo {
-  float min_tone_map_luminance;
-  float max_tone_map_luminance;
-  float max_full_frame_tone_map_luminance;
-};
+using anyxboxx::HdrModeInfo;
 
 bool PrimaryOutputDescription(DXGI_OUTPUT_DESC1* description) {
   const HMONITOR primary = MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY);
@@ -59,9 +56,12 @@ HdrModeResult XDisplayTryEnableHdrMode(uint32_t preference, HdrModeInfo* info) n
   if (!PrimaryOutputDescription(&description)) return kHdrUnknown;
   const bool hdr = description.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
   if (hdr && info != nullptr) {
-    *info = HdrModeInfo{description.MinLuminance, description.MaxLuminance, description.MaxFullFrameLuminance};
+    *info = anyxboxx::NormalizeHdrLuminance(
+        HdrModeInfo{description.MinLuminance, description.MaxLuminance, description.MaxFullFrameLuminance});
   }
-  ANYXBOXX_TRACE("[runtime] XDisplayTryEnableHdrMode(%u) : écran %s", preference, hdr ? "HDR" : "SDR");
+  ANYXBOXX_TRACE("[runtime] XDisplayTryEnableHdrMode(%u) : écran %s (DXGI : %.4f / %.1f / %.1f nits)", preference,
+                 hdr ? "HDR" : "SDR", description.MinLuminance, description.MaxLuminance,
+                 description.MaxFullFrameLuminance);
   return hdr ? kHdrEnabled : kHdrDisabled;
 }
 
@@ -166,3 +166,13 @@ void* HdrDisplayInterface() { return const_cast<StaticInterface*>(&kHdr); }
 void* NetworkingInterface() { return const_cast<StaticInterface*>(&kNetworking); }
 
 }  // namespace anyxboxx
+
+extern "C" {
+
+// Règle de repli des luminances HDR (hdr_luminance.h), exposée pour les tests : l'écran du PC ne
+// permet pas de choisir les valeurs que DXGI rend.
+void WINAPI AnyXboxX_NormalizeHdrLuminance(anyxboxx::HdrModeInfo* info) {
+  if (info != nullptr) *info = anyxboxx::NormalizeHdrLuminance(*info);
+}
+
+}  // extern "C"

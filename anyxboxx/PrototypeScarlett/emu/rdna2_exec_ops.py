@@ -2,7 +2,8 @@
 
 Les tables associent un mnémonique à sa fonction, d'après la documentation publique d'AMD
 (« RDNA 2 Instruction Set Architecture »). Les flottants sont calculés en double précision
-puis arrondis en simple précision ; les dénormaux ne sont pas traités à part.
+puis arrondis en simple précision (les FMA une seule fois, voir _fma) ; les dénormaux ne sont pas
+traités à part.
 """
 import math
 import struct
@@ -230,8 +231,52 @@ def _binary_float(function):
     return lambda a, b, d, k, c: operation(F(a), F(b))
 
 
-def _fma(a, b, c):
+def _mul_add(a, b, c):
+    """v_mac_f32, v_mad_f32 : calcul gardé tel quel (somme double, puis arrondi en simple).
+
+    L'ISA RDNA 2 les donne pour retirées (« Removed: [...] V_MAC_F32, V_MADMK_F32, V_MADAK_F32 (replaced
+    by FMA equivalents) », p. 3) et ses tables d'opcodes VOP2 et VOP3 (chapitre 12) n'ont ni V_MAC_F32 ni
+    V_MAD_F32 : elles viennent des encodages gfx10 (RDNA 1) des tests de LLVM, qui les réserve au
+    prédicat HasMadMacF32Insts et y associe V_MAD_F32 à `any_fmad`, la multiplication-addition non
+    fusionnée (VOP3Instructions.td). Leur arrondi exact n'est pas modélisé ici.
+    """
     return a * b + c
+
+
+_TWO_53 = 2.0 ** 53
+
+
+def _first_nan(a, b, c, total):
+    """NaN de a × b + c : le premier opérande NaN (déjà rendu silencieux par la conversion en double),
+    sinon (∞ × 0, ∞ − ∞) le NaN silencieux positif 0x7FC00000. Supposé, pas encore mesuré sur RDNA 2."""
+    for operand in (a, b, c):
+        if operand != operand:
+            return operand
+    return total if total == total else math.nan
+
+
+def _fma(a, b, c):
+    """a × b + c arrondi une seule fois en simple précision.
+
+    ISA RDNA 2 (AMD, novembre 2020, p. 169) : « V_FMA_F32 Fused single precision multiply add. 0.5ULP
+    accuracy, denormals are supported » ; V_FMAC_F32, V_FMAMK_F32 et V_FMAAK_F32 (p. 134) sont dites
+    « fused » aussi. Le produit de deux f32 (48 bits) est exact en double, pas la somme : arrondie au
+    plus proche, puis en simple, elle peut tomber pile entre deux f32 et partir du mauvais côté (double
+    arrondi, signalé sur #133 par akimfomin avec PortBridge). La somme est donc arrondie « à l'impair »
+    (Boldo et Melquiond, 2008) : erreur exacte par TwoSum (Knuth), et si la somme est inexacte avec un
+    dernier bit pair, passage au double voisin du côté de la valeur exacte. Avec 53 bits contre 24 + 2,
+    l'arrondi en simple qui suit (float_bits) est celui de la valeur exacte, sous-normaux et
+    débordement compris.
+    """
+    product = a * b
+    total = product + c
+    if not abs(total) < math.inf:
+        return _first_nan(a, b, c, total)
+    back = total - product
+    error = (product - (total - back)) + (c - back)
+    if error and not math.frexp(total)[0] * _TWO_53 % 2.0:
+        return math.nextafter(total, math.inf if error > 0 else -math.inf)
+    return total
 
 
 def _round_even(x):
@@ -273,7 +318,7 @@ VECTOR = {
     "v_min_f32": _binary_float(min),
     "v_max_f32": _binary_float(max),
     "v_fmac_f32": lambda a, b, d, k, c: _float_op(_fma)(F(a), F(b), F(d)),
-    "v_mac_f32": lambda a, b, d, k, c: _float_op(_fma)(F(a), F(b), F(d)),
+    "v_mac_f32": lambda a, b, d, k, c: _float_op(_mul_add)(F(a), F(b), F(d)),
     "v_fmamk_f32": lambda a, b, d, k, c: _float_op(_fma)(F(a), F(k), F(b)),
     "v_fmaak_f32": lambda a, b, d, k, c: _float_op(_fma)(F(a), F(b), F(k)),
     "v_cndmask_b32": lambda a, b, d, k, c: b if c else a,

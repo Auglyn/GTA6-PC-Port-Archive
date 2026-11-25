@@ -8,6 +8,7 @@ référence emu/rdna2_exec*, contre lequel la traduction est vérifiée.
 """
 import re
 
+from emu import rdna2_hlsl_fma
 from emu.rdna2_exec_ops import float_bits, signed
 
 NULL, VCC, EXEC, OFF = 125, 106, 126, 0x7D
@@ -86,10 +87,6 @@ uint MulLegacyF32(uint a, uint b) {
   float x = asfloat(a), y = asfloat(b);
   return (x == 0.0f || y == 0.0f) ? 0u : asuint(x * y);
 }
-uint FmaLegacyF32(uint a, uint b, uint c) {
-  float x = asfloat(a), y = asfloat(b);
-  return (x == 0.0f || y == 0.0f) ? c : asuint(mad(x, y, asfloat(c)));
-}
 uint PermB32(uint a, uint b, uint c) {
   uint r = 0u;
   [unroll] for (uint i = 0u; i < 4u; ++i) {
@@ -106,7 +103,7 @@ uint PermB32(uint a, uint b, uint c) {
   }
   return r;
 }
-"""
+""" + rdna2_hlsl_fma.HELPERS                  # FmaF32, FmaLegacyF32 (après MulHiU32)
 
 
 def hexa(value):
@@ -251,13 +248,13 @@ VECTOR = {
     "v_mul_legacy_f32": "MulLegacyF32({a}, {b})",
     "v_min_f32": "asuint(min(asfloat({a}), asfloat({b})))",
     "v_max_f32": "asuint(max(asfloat({a}), asfloat({b})))",
-    "v_fmac_f32": "asuint(mad(asfloat({a}), asfloat({b}), asfloat({d})))",
+    "v_fmac_f32": "FmaF32({a}, {b}, {d})",                 # arrondi unique : emu/rdna2_hlsl_fma.py
     "v_mac_f32": "asuint(mad(asfloat({a}), asfloat({b}), asfloat({d})))",
-    "v_fma_f32": "asuint(mad(asfloat({a}), asfloat({b}), asfloat({c})))",
+    "v_fma_f32": "FmaF32({a}, {b}, {c})",
     "v_mad_f32": "asuint(mad(asfloat({a}), asfloat({b}), asfloat({c})))",
     "v_fma_legacy_f32": "FmaLegacyF32({a}, {b}, {c})",
-    "v_fmamk_f32": "asuint(mad(asfloat({a}), asfloat({k}), asfloat({b})))",
-    "v_fmaak_f32": "asuint(mad(asfloat({a}), asfloat({b}), asfloat({k})))",
+    "v_fmamk_f32": "FmaF32({a}, {k}, {b})",
+    "v_fmaak_f32": "FmaF32({a}, {b}, {k})",
     "v_rcp_f32": "asuint(rcp(asfloat({a})))",
     "v_rsq_f32": "asuint(rsqrt(asfloat({a})))",
     "v_sqrt_f32": "asuint(sqrt(asfloat({a})))",

@@ -125,10 +125,15 @@ pub fn subsets(mode: usize, partition: usize) -> [u8; TEXELS] {
 
 /// Texels d'ancrage (index raccourci d'un bit), le premier étant toujours le texel 0.
 pub fn anchors(mode: usize, partition: usize) -> Vec<usize> {
-    match MODES[mode].subsets {
-        1 => vec![0],
-        2 => vec![0, ANCHORS_2[partition] as usize],
-        _ => vec![0, ANCHORS_3[0][partition] as usize, ANCHORS_3[1][partition] as usize],
+    let count = MODES[mode].subsets;
+    anchor_texels(count, partition)[..count as usize].to_vec()
+}
+
+fn anchor_texels(subsets: u32, partition: usize) -> [usize; 3] {
+    match subsets {
+        1 => [0; 3],
+        2 => [0, ANCHORS_2[partition] as usize, 0],
+        _ => [0, ANCHORS_3[0][partition] as usize, ANCHORS_3[1][partition] as usize],
     }
 }
 
@@ -233,32 +238,33 @@ pub fn decode(block: &[u8]) -> Result<[u8; RGBA_BYTES], String> {
     let rotation = bits.take(m.rotation_bits) as usize;
     let selection = bits.take(m.selection_bits);
     let endpoints = endpoints(&m, &mut bits);
-    let short = anchors(index, partition);
-    let mut colour_index = [0u32; TEXELS];
-    for (texel, slot) in colour_index.iter_mut().enumerate() {
-        *slot = bits.take(m.index_bits - short.contains(&texel) as u32);
+    let anchors = anchor_texels(m.subsets, partition).into_iter().fold(0u16, |mask, texel| mask | 1 << texel);
+    let mut primary_index = [0u32; TEXELS];
+    for (texel, slot) in primary_index.iter_mut().enumerate() {
+        *slot = bits.take(m.index_bits - u32::from((anchors >> texel) & 1));
     }
-    let mut alpha_index = colour_index;
+    let mut secondary_index = [0u32; TEXELS];
     if m.index2_bits > 0 {
-        for (texel, slot) in alpha_index.iter_mut().enumerate() {
+        for (texel, slot) in secondary_index.iter_mut().enumerate() {
             *slot = bits.take(m.index2_bits - (texel == 0) as u32);
         }
     }
+    let primary_weights = weights(m.index_bits);
+    let (colour_index, colour_weights, alpha_index, alpha_weights) = match (m.index2_bits, selection) {
+        (0, _) => (&primary_index, primary_weights, &primary_index, primary_weights),
+        (width, 0) => (&primary_index, primary_weights, &secondary_index, weights(width)),
+        (width, _) => (&secondary_index, weights(width), &primary_index, primary_weights),
+    };
     let shape = subsets(index, partition);
     let mut pixels = [0u8; RGBA_BYTES];
     for texel in 0..TEXELS {
-        let (mut ci, mut cb, mut ai, mut ab) = (colour_index[texel], m.index_bits, colour_index[texel], m.index_bits);
-        if m.index2_bits > 0 {
-            (ai, ab) = (alpha_index[texel], m.index2_bits);
-            if selection != 0 {
-                (ci, cb, ai, ab) = (ai, ab, ci, cb);
-            }
-        }
+        let cw = colour_weights[colour_index[texel] as usize];
+        let aw = alpha_weights[alpha_index[texel] as usize];
         let subset = 2 * shape[texel] as usize;
         let (low, high) = (endpoints[subset], endpoints[subset + 1]);
         let mut colour = [0u32; 4];
         for channel in 0..4 {
-            let w = if channel == 3 { weights(ab)[ai as usize] } else { weights(cb)[ci as usize] };
+            let w = if channel == 3 { aw } else { cw };
             colour[channel] = ((64 - w) * low[channel] + w * high[channel] + 32) >> 6;
         }
         if rotation > 0 {

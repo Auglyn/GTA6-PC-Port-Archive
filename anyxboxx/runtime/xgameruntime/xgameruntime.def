@@ -18,3 +18,5 @@ EXPORTS
   AnyXboxX_CreateDXGIFactory
   AnyXboxX_CreateDXGIFactory1
   AnyXboxX_CreateDXGIFactory2
+  ; Repli des luminances HDR quand l'écran n'en annonce pas (tests)
+  AnyXboxX_NormalizeHdrLuminance
