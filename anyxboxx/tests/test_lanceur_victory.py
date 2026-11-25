@@ -149,6 +149,10 @@ public static class FakeTool {
             Console.WriteLine("card rehash runs: " + (Environment.GetEnvironmentVariable("VICTORY_CARD_REHASH_RUNS") ?? "unset"));
             Console.WriteLine("discord: " + (Environment.GetEnvironmentVariable("VICTORY_DISCORD") ?? "unset"));
         }
+        string err = Environment.GetEnvironmentVariable("FAKE_TOOL_STDERR_" + name.ToUpperInvariant());
+        if (!string.IsNullOrEmpty(err)) {
+            Console.Error.WriteLine(err);
+        }
         string code = Environment.GetEnvironmentVariable("FAKE_TOOL_EXIT_" + name.ToUpperInvariant());
         return string.IsNullOrEmpty(code) ? 0 : int.Parse(code);
     }
@@ -245,6 +249,67 @@ def test_launcher_stops_when_the_build_fails(tmp_path, faux_outil):
     assert [a.split()[0] for a in appels] == ["cargo"], appels         # l'ancien victory.exe n'est pas lancé
     assert fini.returncode != 0
     assert f"cargo build failed (exit code {CODE_ECHEC_CARGO})" in fini.stderr
+
+
+def test_launcher_survives_stderr_redirection_in_windows_powershell_51(tmp_path, faux_outil):
+    """Issue #233: sous Windows PowerShell 5.1 avec 2> victory.log, les warnings stderr ne doivent pas avorter."""
+    def run_redirected(sub, options, code_victory):
+        base = tmp_path / sub
+        script = base / "depot" / "tools" / "lancer_victory.ps1"
+        script.parent.mkdir(parents=True)
+        shutil.copy(RACINE / "tools" / "lancer_victory.ps1", script)
+        manifeste = base / "depot" / "third_party" / "victory" / "Cargo.toml"
+        manifeste.parent.mkdir(parents=True)
+        manifeste.write_text("", encoding="utf-8")
+        jeu = base / "jeu"
+        jeu.mkdir()
+        for nom in ("game_scarlett_master.exe", "common.rpf", *FICHIERS_PRECOMPILATION):
+            (jeu / nom).write_bytes(b"")
+        cible, outils = base / "cible", base / "outils"
+        for profil in ("diag", "release"):
+            (cible / profil).mkdir(parents=True)
+            shutil.copy(faux_outil, cible / profil / "victory.exe")
+        outils.mkdir()
+        shutil.copy(faux_outil, outils / "cargo.exe")
+        journal, errlog = base / "appels.log", base / "victory.log"
+        env = {
+            **os.environ,
+            "PATH": f"{outils}{os.pathsep}{os.environ['PATH']}",
+            "CARGO_TARGET_DIR": str(cible),
+            "FAKE_TOOL_LOG": str(journal),
+            "FAKE_TOOL_EXIT_CARGO": "0",
+            "FAKE_TOOL_EXIT_VICTORY": str(code_victory),
+            "FAKE_TOOL_STDERR_CARGO": "warning: use of deprecated method fetch_update",
+            "FAKE_TOOL_STDERR_VICTORY": "victory diagnostic stderr line",
+        }
+        opts = (" " + " ".join(options)) if options else ""
+        cmd = f"& '{script}' -GameDir '{jeu}'{opts} 2> '{errlog}'; exit $LASTEXITCODE"
+        fini = subprocess.run(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", cmd],
+            env=env, capture_output=True, text=True, timeout=120,
+        )
+        appels = journal.read_text(encoding="utf-8").splitlines() if journal.is_file() else []
+        raw_err = errlog.read_bytes() if errlog.is_file() else b""
+        contenu_err = (
+            raw_err.decode("utf-16")
+            if raw_err.startswith((b"\xff\xfe", b"\xfe\xff"))
+            else raw_err.decode("utf-8", errors="replace")
+        )
+        return fini, appels, contenu_err
+
+    fini, appels, err = run_redirected("run", (), CODE_SORTIE_VICTORY)
+    assert [a.split()[:2] for a in appels] == [["cargo", "build"], ["victory", "run"]], (appels, fini.stderr, err)
+    assert fini.returncode == CODE_SORTIE_VICTORY, fini.stderr
+    assert "warning: use of deprecated method fetch_update" in err
+    assert "victory diagnostic stderr line" in err
+
+    fini, appels, err = run_redirected("warm", ("-Warm", "-Precompile"), 0)
+    assert [a.split()[:2] for a in appels] == [
+        ["cargo", "build"], ["victory", "warm"], ["victory", "warm"], ["victory", "run"]
+    ], (appels, fini.stderr, err)
+    assert fini.returncode == 0, fini.stderr
+    assert "warning: use of deprecated method fetch_update" in err
+    assert "victory diagnostic stderr line" in err
 
 
 def test_no_xg_library_in_the_repository():

@@ -7,8 +7,8 @@ ne sont pas synchrones, d'où une barrière de groupe après chaque écriture.
 """
 from emu import rdna2_exec_lanes, rdna2_exec_smem, rdna2_hlsl_format, rdna2_hlsl_smem, rdna2_swizzle as swz
 from emu.rdna2_exec_atomic import STRIDE64
-from emu.rdna2_exec_memory import (ADD_TID, LDS_ATOMIC, LDS_PATTERN, SCALAR_PATTERN, VECTOR_ATOMIC, VECTOR_PATTERN,
-                                   WIDTHS)
+from emu.rdna2_exec_memory import (ADD_TID, LDS_ADD_TID, LDS_ATOMIC, LDS_PATTERN, M0, SCALAR_PATTERN, VECTOR_ATOMIC,
+                                   VECTOR_PATTERN, WIDTHS, flat_offset)
 from emu.rdna2_exec_ops import signed
 from emu.rdna2_hlsl_ops import NULL, OFF, Untranslatable, hexa, source
 
@@ -50,7 +50,10 @@ def _scalar(name, word):
 
 
 def _flat(family, name, word, active):
-    offset = hexa(signed(word & 0xFFF, 12))
+    offset = flat_offset(family, word)
+    if offset is None:
+        raise Untranslatable(f"{name}: FLAT offset with bit 11 set (the ISA requires a positive offset)")
+    offset = hexa(offset)
     addr, data, saddr, vdst = (word >> 32) & 0xFF, (word >> 40) & 0xFF, (word >> 48) & 0x7F, (word >> 56) & 0xFF
     if name in ADD_TID:                 # SADDR + offset + lane × 4, no VGPR address (emu/rdna2_exec_memory.py)
         if saddr == OFF:
@@ -104,6 +107,11 @@ def _lds(name, word, active):
     combined = offset1 << 8 | offset0
     if name in rdna2_exec_lanes.NAMES:
         return _lanes(name, addr, data0, vdst, combined, active)
+    if name in LDS_ADD_TID:             # M0[15:0] + offset + lane × 4, no VGPR address (emu/rdna2_exec_memory.py)
+        index = f"(((s[{M0}] & 0xFFFFu) + {combined}u + lane * 4u) >> 2) % {LDS_WORDS}"
+        if LDS_ADD_TID[name] == "write":
+            return [f"if ({active}) {{ g_lds[{index}] = v[{data0}]; }}", LDS_BARRIER]
+        return [LDS_BARRIER, f"if ({active}) {{ v[{vdst}] = g_lds[{index}]; }}"]
     atomic = LDS_ATOMIC.match(name)
     if atomic:
         operation = atomic.group(1)
@@ -169,7 +177,8 @@ def memory_statements(family, name, word, active):
         return rdna2_hlsl_smem.statements(name, word)
     if family == "SMEM" and SCALAR_PATTERN.match(name):
         return _scalar(name, word)
-    if family == "DS" and (LDS_PATTERN.match(name) or LDS_ATOMIC.match(name) or name in rdna2_exec_lanes.NAMES):
+    if family == "DS" and (LDS_PATTERN.match(name) or LDS_ATOMIC.match(name) or name in rdna2_exec_lanes.NAMES
+                           or name in LDS_ADD_TID):
         return _lds(name, word, active)
     if family in ("MUBUF", "MTBUF") and rdna2_hlsl_format.supports(name):
         return rdna2_hlsl_format.statements(name, word, active)

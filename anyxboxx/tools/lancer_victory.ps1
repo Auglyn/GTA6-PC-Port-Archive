@@ -106,7 +106,15 @@ if ($useDiag) {
 # Always ask cargo: it does nothing when victory.exe is current, and rebuilds it after a pull that changes
 # third_party/victory (an old victory.exe would ignore the settings the new tree reads).
 Write-Host "Building VIctory ($(if ($useDiag) { 'diag profile, diagnostics feature' } else { 'release' }))..."
-& cargo build @profileArgs --manifest-path $manifest
+# Windows PowerShell 5.1 wraps redirected native stderr (`2>`) in NativeCommandError, which
+# $ErrorActionPreference = 'Stop' turns into a terminating error on benign warnings; rely on $LASTEXITCODE.
+$prevErrorAction = $ErrorActionPreference
+try {
+    $ErrorActionPreference = 'Continue'
+    & cargo build @profileArgs --manifest-path $manifest
+} finally {
+    $ErrorActionPreference = $prevErrorAction
+}
 if ($LASTEXITCODE -ne 0) { throw "cargo build failed (exit code $LASTEXITCODE)." }
 
 # No victory.toml is needed: VIctory reads the game folder from VICTORY_GAME_DIR.
@@ -190,7 +198,13 @@ if ($Warm) {
         throw "-Warm found no .rpf archive in '$GameDir'."
     }
     Write-Host "Warming the shader cache from $($archives.Count) archives (about 7 minutes the first time)..."
-    & $exe warm @archives
+    $prevErrorAction = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        & $exe warm @archives
+    } finally {
+        $ErrorActionPreference = $prevErrorAction
+    }
     if ($LASTEXITCODE -ne 0) { throw "victory warm failed (exit code $LASTEXITCODE)." }
 }
 
@@ -203,9 +217,21 @@ if ($Precompile) {
         }
     }
     Write-Host 'Precompiling the shaders of shaders.rpf, the game and its DLLs into the cache...'
-    & $exe warm $shaders $gameExe @dlls
+    $prevErrorAction = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        & $exe warm $shaders $gameExe @dlls
+    } finally {
+        $ErrorActionPreference = $prevErrorAction
+    }
     if ($LASTEXITCODE -ne 0) { throw "victory warm failed (exit code $LASTEXITCODE)." }
 }
 
-& $exe run $gameExe --execute
+$prevErrorAction = $ErrorActionPreference
+try {
+    $ErrorActionPreference = 'Continue'
+    & $exe run $gameExe --execute
+} finally {
+    $ErrorActionPreference = $prevErrorAction
+}
 exit $LASTEXITCODE

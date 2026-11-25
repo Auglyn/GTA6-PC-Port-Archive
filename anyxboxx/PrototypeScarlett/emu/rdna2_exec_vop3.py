@@ -7,8 +7,8 @@ Sémantique d'après la documentation publique d'AMD (« RDNA 2 Instruction Set 
 """
 import math
 
-from emu import (rdna2_exec_cmp16, rdna2_exec_cmp64, rdna2_exec_div, rdna2_exec_f16, rdna2_exec_movrel,
-                 rdna2_exec_sad, rdna2_exec_wide)
+from emu import (rdna2_exec_cmp16, rdna2_exec_cmp64, rdna2_exec_cmpf16, rdna2_exec_div, rdna2_exec_f16,
+                 rdna2_exec_movrel, rdna2_exec_sad, rdna2_exec_wide)
 from emu.rdna2_exec_ops import (MASK32, SIXTEEN_BIT_RESULTS, VECTOR, VECTOR_COMPARE, VECTOR_NO_OPERATION,
                                 _float_op, _fma, _legacy_fma, _mul_add, bits_float, float_bits, ldexp, signed)
 
@@ -154,7 +154,7 @@ EXECUTABLE = frozenset(set(VECTOR) - {"v_readfirstlane_b32"} | set(VECTOR_COMPAR
                        | LANE_OPERATIONS | set(rdna2_exec_cmp64.COMPARE64) | MAD64 | VECTOR_NO_OPERATION
                        | set(rdna2_exec_wide.OPERATIONS) | set(rdna2_exec_div.OPERATIONS)
                        | rdna2_exec_movrel.VECTOR | set(rdna2_exec_sad.OPERATIONS)
-                       | set(rdna2_exec_f16.OPERATIONS))
+                       | set(rdna2_exec_f16.OPERATIONS) | set(rdna2_exec_cmpf16.COMPAREF16))
 
 
 class Fields:
@@ -206,6 +206,8 @@ def execute(wave, name, opcode, word, literal):
     if name in rdna2_exec_wide.OPERATIONS:
         return rdna2_exec_wide.execute(wave, name, fields.sources, fields.vdst, literal, fields.abs, fields.neg,
                                        fields.clamp, fields.omod)
+    if name in rdna2_exec_cmpf16.COMPAREF16:
+        return rdna2_exec_cmpf16.execute_vop3(wave, name, fields, literal)
     if name in rdna2_exec_cmp64.COMPARE64:
         return rdna2_exec_cmp64.execute(wave, name, fields.sources, literal, fields.vdst, fields.abs, fields.neg)
     if name in rdna2_exec_div.OPERATIONS:

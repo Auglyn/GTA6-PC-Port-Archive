@@ -16,7 +16,7 @@ import re
 from emu import (rdna2, rdna2_hlsl, rdna2_hlsl_div, rdna2_hlsl_dot, rdna2_hlsl_ext, rdna2_hlsl_f16, rdna2_hlsl_format,
                  rdna2_hlsl_image, rdna2_hlsl_sad, rdna2_hlsl_wide)
 from emu.rdna2_exec_cmp16 import check_vop3
-from emu.rdna2_exec_memory import ADD_TID
+from emu.rdna2_exec_memory import ADD_TID, LDS_ADD_TID
 from emu.rdna2_exec_vop3 import Fields, float_inputs
 from emu.rdna2_hlsl_memory import memory_statements
 from emu.rdna2_hlsl import CARRY, SCALAR_FAMILIES, _fields, _literal, _words, modified
@@ -200,8 +200,8 @@ def _specific(data, instruction, name):
         return _vop3(name, instruction.opcode, Fields(pair), _literal(data, instruction, 2))
     if family == "DS" and name == "ds_bpermute_b32":
         return _bpermute(pair)
-    if family == "GLOBAL" and name in ADD_TID:      # lane = SV_GroupIndex 0-63: the TID in the wave64
-        return memory_statements(family, name, pair, ACTIVE)
+    if family == "GLOBAL" and name in ADD_TID or family == "DS" and name in LDS_ADD_TID:
+        return memory_statements(family, name, pair, ACTIVE)    # lane = SV_GroupIndex 0-63: the TID in the wave64
     return None
 
 
