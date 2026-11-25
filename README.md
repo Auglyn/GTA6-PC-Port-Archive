@@ -1,0 +1,17 @@
+# victory-fork GitHub export
+
+Issues, pull requests and comments from `fxceless/victory-fork` (called `victory-gta6` until 24 Nov 2026), exported from the GitHub REST API on 2026-11-25.
+
+Each file in `data/` is gzipped JSON Lines: one API object per line, unchanged.
+
+| File | Contents | Items |
+|---|---|---|
+| `issues_and_prs.jsonl.gz` | every issue and PR (title, body, labels, state, author) | 159 |
+| `pulls.jsonl.gz` | PR details (head and base branch, merge state) | 587 |
+| `issue_comments.jsonl.gz` | conversation comments on issues and PRs | 1,027 |
+| `review_comments.jsonl.gz` | inline code-review comments | 44 |
+| `labels.jsonl.gz` | labels | 10 |
+
+Not included: PR approval reviews and images attached to comments (only their links).
+
+`export.py` made these files (`python -I export.py`, needs the `gh` CLI signed in).
