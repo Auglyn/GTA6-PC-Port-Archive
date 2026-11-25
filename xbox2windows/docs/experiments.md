@@ -36,6 +36,14 @@ cmake --build --preset release --target startup_resource_budget -j 2
 ctest --preset release --no-tests=error -j 1 -R '^startup_resource_budget_' -V
 ```
 
+`startup_resource_retire` covers `X2W_D3D12_RELEASE_RETIRED=1`
+([class and fences](startup-runtime.md#d3d12-resource-budget)):
+
+```powershell
+cmake --build --preset release --target startup_resource_retire -j 2
+ctest --preset release --no-tests=error -j 1 -R '^startup_resource_retire_' -V
+```
+
 The test runs on WARP and hardware with the debug layer on and off. The
 [budget heartbeat](startup-runtime.md#d3d12-resource-budget) correlates these
 counts with DXGI usage. The fixture measures the accounting and retirement
@@ -7616,6 +7624,12 @@ A sampled program can also read attr0.z/w, as plain values from a P1/P2 pair in 
 
 The integer readback profile declares the primary constant buffer as `uint4`. Integer consumers read its words directly, and floating-point consumers reinterpret the same bits. The byte layout is unchanged. The constant-index bitset draw checks copying `0xffffffff` through a VGPR and overwriting the destination with a floating-point result. On RTX 4060 Laptop (driver 32.0.16.1656), the previous float-typed load returned `0x7fffffff` for the immediate-index-31 copy; the integer load preserves `0xffffffff`. [Original report and independent reproduction](https://github.com/R0Y00/Xbox2Windows/pull/680#issuecomment-7099515543)
 
+The integer-copy and flat-scratch fixtures write expected UINT texels directly as
+four little-endian words. On Windows with CPython 3.11.9, converting the word
+`0xff812345` to a Python float and back writes `0xffc12345`. The copy fixture
+checks both signs and rejects changing just the quiet bit. The scratch fixtures
+carry the same payloads through their loads and stores.
+
 For normalized compressed whole-pair exports, the Python API can return `(source, mask)` via `return_write_mask=True`. The caller applies the returned RT0 mask (RG = `0x3`, BA = `0xC`, RGBA = `0xF`) in the PSO. Disabled components in the emitted `float4` are placeholders. The regular API still returns `float2` for its existing RG form and rejects a BA-only export. Because disassembly text can hide raw enable-bit differences, this API requires known whole-pair input. The draw fixture uses distinct clear sentinels and checks that a full PSO mask or incorrect enabled-channel values fail. Run `ctest --preset dev --no-tests=error -R '^pixel_aot_compressed_export_(warp|hardware)$' -V`.
 
 The LLVM 15 binary fixture for #361 changes only the four EN bits of an assembled gfx1013 export and checks all 16 raw values. Reassembling the printed text keeps a packed pair when its first printed operand is enabled: raw 0x2 and 0xA reassemble as 0x0, and 0x5 reassembles as 0xF. Fully disabled source fields reassemble as zero. The normal lowering accepts 0x3, 0xC and 0xF through its explicit RT0-mask API. Other masks are rejected. These checks characterize the encoding and LLVM 15 behavior; they establish no gfx1013 channel-write semantics for non-pair masks.
@@ -8845,11 +8859,16 @@ of console shader programs and support for other console mesh paths are tracked 
 
 Slot 86 publishes complete Xbox mesh containers under a separate cache key. The
 key frames the original MS, the optional PS, the creation root signature and the
-pipeline-state stream with its pointers cleared. The shim writes `.m86` last,
+pipeline-state stream with its pointers and known padding cleared. A request that
+previously contained nonzero blend or depth-stencil padding gets a new key and
+must be published once under that key. The shim writes `.m86` last,
 after `.ps86`, `.root` and `.stream86`. An empty `.ps86` records a stream
 without a pixel shader. Use the cache tool with a desktop pair independently
 validated for that exact source and root. The ready marker records both output
-shader hashes so an incomplete or mixed update cannot reach PSO creation.
+shader hashes so an incomplete or mixed update cannot reach PSO creation. The
+cache fixture changes only blend and depth-stencil padding and reuses the cached
+PSO, then changes one sample-mask bit and checks for a new request and clear
+attachments.
 
 ```powershell
 python -B tools/startup/mesh86_cache.py <cache> <key> --mesh <desktop-ms.cso> --pixel <desktop-ps.cso>
@@ -8858,13 +8877,22 @@ ctest --preset release --no-tests=error -R '^startup_indirect_mesh_cache_' -V
 
 The executable subset uses the original root and PSO state. It accepts root
 constants captured on the list, single-sample color attachments in exact format
-order and a matching depth view when the stream declares one. A mesh stream
-without a pixel stage requires zero color attachments, a writable matching
-depth view and a physical adapter. The depth-only fixture removed the device
-on WARP when dispatched, so the shim refuses it there. Untracked descriptor
-tables, heap indexing, root descriptors,
+order and a matching depth view when the stream declares one. A cached mesh
+stream with zero color attachments requires a writable matching depth view.
+It can include a depth-only pixel stage. The mesh-only depth path still
+requires a physical adapter because its fixture removed the device on WARP.
+Untracked descriptor tables, heap indexing, root descriptors,
 stencil state and depth bounds are refused. A shader accepted individually can still
 fail PSO creation or lack a consumable root binding.
+
+The depth-only pixel fixture publishes a source-built mesh and pixel pair, binds
+zero color targets and a writable D16 depth view, and uses the guest
+`ExecuteIndirect` entry point. The pixel shader writes `SV_Depth = 0.25` on
+the left half and discards the right half. Readback checks four `0x4000` depth
+words and four unchanged `0xffff` clear words. A missing DSV format and a
+zero depth-write mask each leave the cached PSO unavailable. Missing draw
+attachments and incomplete root constants also leave depth clear. The MS-only
+depth and three-color-target controls still run in the same test.
 
 The fixture writes its group counts at byte offset four on the GPU and checks
 all eight pixels and the surrounding argument words. One group paints the
@@ -11409,6 +11437,12 @@ the first thread's descriptors. The same commit's RTX 5080 Laptop
 three orders. [Issue #1115](https://github.com/R0Y00/Xbox2Windows/issues/1115)
 has the reports.
 
+The strict readback initializes the four output words to -1.0, -2.0, -3.0 and -4.0 before each dispatch.
+It prints the zero-based index and expected and actual bits of every differing word, finishes all three
+sampler orders and returns failure on any difference. In the missing-store control the shader omits both
+comparison stores only when the ordinary pair is reversed (swap 1). Those results would otherwise carry
+over from swap 0 and pass. Words 2 and 3 must instead retain the sentinels `c0400000` and `c0800000`.
+
 Two controls written as direct HLSL on that adapter, compiled with the same DXC
 at `cs_6_0` and run through the same readback path, separate the shader from the
 descriptor layer. With the two bindings written out explicitly — `SamplerState
@@ -11454,6 +11488,14 @@ Laptop (32.0.15.8142), the Intel Arc 140T (32.0.101.8132) and in-box WARP
 (10.0.26100.9818). The group-id build matched on the RTX and WARP, and read
 `0.25 0.25`/`0 0`, `0.75 0.75`/`0 0` and `0.25 0.25`/`1 1` on the Arc.
 An Arc rerun with fixed output indexing can isolate the sampler index.
+
+On Intel UHD Graphics 770 (8086:a780, driver 32.0.101.5973), both the plain and renamed translated tables
+differed at words 1 and 3 in each swap. Swaps 0, 1 and 2 produced `0.25 0.25 0 0`, `0.75 0.75 0 0` and
+`0.25 0.25 1 1` with DXC 1.9.2609.5 and the pinned SPIR-V tools. The same shader binaries matched all four
+words in every swap on RTX 4060 (32.0.15.9579) and in-box WARP (10.0.26100.9711).
+The direct control with fixed dispatch-thread output indexing also distinguished the two index sources on
+the UHD 770. Its dispatch-thread sampler index passed and its group sampler index reproduced all three rows.
+The local D3D12 debug layer was unavailable.
 
 ### Standalone comparison-sampler split in the SPIR-V bridge
 

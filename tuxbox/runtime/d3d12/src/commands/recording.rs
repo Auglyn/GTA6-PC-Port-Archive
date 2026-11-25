@@ -40,7 +40,7 @@ impl Recording {
         }
     }
 
-    pub(super) fn compute_dispatch(&mut self, list: &List, dispatch: impl FnOnce()) {
+    pub(super) fn compute_dispatch(&mut self, list: &super::NativeList, dispatch: impl FnOnce()) {
         let null_usage = self.bindings.null_usage.clone();
         let dispatch = move || {
             dispatch();
@@ -99,7 +99,7 @@ impl Recording {
         }
     }
 
-    pub(super) fn draw(&mut self, list: &List, rasterizes: bool, draw: impl FnOnce()) {
+    pub(super) fn draw(&mut self, list: &super::NativeList, rasterizes: bool, draw: impl FnOnce()) {
         let null_usage = self.bindings.null_usage.clone();
         let display_bound = self.display_bound;
         let draw = move || {

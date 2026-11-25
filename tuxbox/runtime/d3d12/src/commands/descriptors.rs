@@ -40,7 +40,7 @@ impl ResourceHeap {
     }
 
     pub(super) fn index_map(
-        &self, list: &List, arena: Option<&device::descriptor_paging::Arena>,
+        &self, list: &super::NativeList, arena: Option<&device::descriptor_paging::Arena>,
         resources: &device::MediaResources,
     ) -> windows::core::Result<u64> {
         let parent = list.parent.as_ref().ok_or(E_INVALIDARG)?;
@@ -90,7 +90,7 @@ pub(super) unsafe extern "system" fn bind_heaps(
     count: u32,
     heaps: *const *mut c_void,
 ) {
-    let mut state = recording(list);
+    let super::CommandRecording { list, state } = &mut *recording(list);
     if !state.ensure_open(&list.native) {
         return;
     }
@@ -145,11 +145,10 @@ pub(super) unsafe extern "system" fn table<const COMPUTE: bool>(
     index: u32,
     base: D3D12_GPU_DESCRIPTOR_HANDLE,
 ) {
-    let mut state = recording(list);
+    let super::CommandRecording { list, state } = &mut *recording(list);
     if !state.can_record(&list.native) {
         return;
     }
-    let state = &mut *state;
     let logical = base;
     let base = if let Some(arena) = &state.descriptor_arena && arena.contains(base.ptr) {
         let Some(Some(length)) = state.bindings.paged_layout::<COMPUTE>().and_then(|t| t.get(index as usize)) else {

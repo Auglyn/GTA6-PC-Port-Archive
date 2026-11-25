@@ -340,7 +340,7 @@ fn texture_layout(
 }
 
 fn record_copy(
-    list: &List,
+    list: &super::NativeList,
     state: &mut super::Recording,
     device: &ID3D12Device,
     destination: LinearResource,
@@ -411,7 +411,7 @@ pub(super) unsafe extern "system" fn copy_memory(
     bytes: u64,
     flags: u32,
 ) {
-    let mut state = recording(list);
+    let super::CommandRecording { list, state } = &mut *recording(list);
     if !state.can_record(&list.native) {
         return;
     }
@@ -438,7 +438,7 @@ pub(super) unsafe extern "system" fn copy_memory(
         let (to_kind, from_kind) = (kind(&to), kind(&from));
         let mut native_device: Option<ID3D12Device> = None;
         unsafe { list.native.GetDevice(&mut native_device)? };
-        record_copy(list, &mut state, &native_device.ok_or(E_FAIL)?, to, from, bytes)?;
+        record_copy(list, state, &native_device.ok_or(E_FAIL)?, to, from, bytes)?;
         note(&format!(
             "slot 62 copied {bytes:#x} bytes from {from_kind} {source:#x} to {to_kind} {destination:#x}"
         ));

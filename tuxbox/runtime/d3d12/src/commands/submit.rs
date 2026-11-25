@@ -79,6 +79,9 @@ pub(super) unsafe fn execute_batch(queue: &Queue, count: u32, lists: *const *mut
     // Mirrors exist only when a constant-buffer or address-SRV import failed.
     // The count is zero for every boot that has not hit that path.
     crate::device::snapshot_cbv_mirrors();
+    // A guest Reset can replace the tail of a split recording. Hold every
+    // such tail through ExecuteCommandLists just as each wait owns its prefix.
+    let mut tails = Vec::new();
     let mut list_index = 0;
     let trace_samples = std::cell::RefCell::new(Vec::new());
     // The lists in this batch that write or wait on fence labels.
@@ -95,7 +98,7 @@ pub(super) unsafe fn execute_batch(queue: &Queue, count: u32, lists: *const *mut
         ),
         |&item, (textures, writes, shader_views, scene_lists, splits, pending)| {
             let list = unsafe { guest_list(item, parent(&queue.parent)) }.ok_or(E_INVALIDARG)?;
-            let state = recording(list);
+            let super::CommandRecording { list: active, state } = &*recording(list);
             if !matches!(state.phase, ListState::Closed)
                 || state.error.is_err()
                 || unsafe { list.native.GetType() } != queue.state.kind
@@ -145,7 +148,11 @@ pub(super) unsafe fn execute_batch(queue: &Queue, count: u32, lists: *const *mut
             writes.extend(state.placed_writes.iter().cloned());
             shader_views.extend(state.sampled_heaps.iter().cloned());
             trace_samples.borrow_mut().extend(state.trace_samples.iter().cloned());
-            Ok(list.native.as_raw())
+            if active.native != list.native {
+                tails.try_reserve(1).map_err(|_| E_OUTOFMEMORY)?;
+                tails.push(active.native.clone());
+            }
+            Ok(active.native.as_raw())
         },
         |host, (mut textures, mut writes, shader_views, scene_lists, splits, mut pending)| {
             let holds = (!splits.is_empty())
@@ -170,7 +177,7 @@ pub(super) unsafe fn execute_batch(queue: &Queue, count: u32, lists: *const *mut
                             Some(device::blas::begin_submission(owner))
                         };
                         for list in scene_lists {
-                            let state = recording(list);
+                            let state = &recording(list).state;
                             for command in &state.scene_commands {
                                 command.prepare(list)?;
                             }

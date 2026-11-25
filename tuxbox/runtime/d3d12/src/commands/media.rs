@@ -81,7 +81,7 @@ fn copy_state(state: D3D12_RESOURCE_STATES) -> std::result::Result<D3D12_RESOURC
 }
 
 unsafe extern "system" fn barriers(list: &List, count: u32, input: *const D3D12_RESOURCE_BARRIER) {
-    let mut state = recording(list);
+    let super::CommandRecording { list, state } = &mut *recording(list);
     if !state.can_record(&list.native) || count == 0 {
         return;
     }
@@ -142,7 +142,7 @@ unsafe extern "system" fn copy(
     src: *const CopyLocation,
     region: *const D3D12_BOX,
 ) {
-    let mut state = recording(list);
+    let super::CommandRecording { list, state } = &mut *recording(list);
     if !state.can_record(&list.native) {
         return;
     }
@@ -160,7 +160,7 @@ unsafe extern "system" fn copy(
 }
 
 unsafe fn record_copy(
-    list: &List,
+    list: &super::NativeList,
     media: &mut Recording,
     dst: &CopyLocation,
     at: [u32; 3],

@@ -9,7 +9,7 @@ use windows::Win32::Graphics::Direct3D12::*;
 use windows::core::{BOOL, Interface};
 
 pub(super) unsafe extern "system" fn root(list: &List, signature: *mut c_void) {
-    let mut state = recording(list);
+    let super::CommandRecording { list, state } = &mut *recording(list);
     if !state.can_record(&list.native) {
         return;
     }
@@ -24,7 +24,7 @@ pub(super) unsafe extern "system" fn root(list: &List, signature: *mut c_void) {
 }
 
 pub(super) unsafe extern "system" fn topology(list: &List, primitive: D3D_PRIMITIVE_TOPOLOGY) {
-    let mut state = recording(list);
+    let super::CommandRecording { list, state } = &mut *recording(list);
     if state.can_record(&list.native) {
         let native = if primitive.0 == crate::device::rectangle::LIST {
             D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST
@@ -36,7 +36,7 @@ pub(super) unsafe extern "system" fn topology(list: &List, primitive: D3D_PRIMIT
 }
 
 pub(super) unsafe extern "system" fn pipeline(list: &List, guest: *mut c_void) {
-    let mut state = recording(list);
+    let super::CommandRecording { list, state } = &mut *recording(list);
     if !state.can_record(&list.native) {
         return;
     }
@@ -57,7 +57,7 @@ pub(super) unsafe extern "system" fn viewports(
     count: u32,
     views: *const D3D12_VIEWPORT,
 ) {
-    let mut state = recording(list);
+    let super::CommandRecording { list, state } = &mut *recording(list);
     if !state.can_record(&list.native) {
         return;
     }
@@ -71,7 +71,7 @@ pub(super) unsafe extern "system" fn viewports(
 }
 
 pub(super) unsafe extern "system" fn scissors(list: &List, count: u32, rects: *const RECT) {
-    let mut state = recording(list);
+    let super::CommandRecording { list, state } = &mut *recording(list);
     if !state.can_record(&list.native) {
         return;
     }
@@ -93,7 +93,7 @@ pub(super) unsafe extern "system" fn targets(
     contiguous: BOOL,
     dsv: *const D3D12_CPU_DESCRIPTOR_HANDLE,
 ) {
-    let mut state = recording(list);
+    let super::CommandRecording { list, state } = &mut *recording(list);
     if !state.can_record(&list.native) {
         return;
     }
@@ -162,7 +162,7 @@ pub(super) unsafe extern "system" fn draw(
     start_vertex: u32,
     start_instance: u32,
 ) {
-    let mut state = recording(list);
+    let super::CommandRecording { list, state } = &mut *recording(list);
     if state.can_record(&list.native) {
         state.draw(list, vertices != 0 && instances != 0, || unsafe {
             list.native
@@ -179,7 +179,7 @@ pub(super) unsafe extern "system" fn shading_rate(
     rate: D3D12_SHADING_RATE,
     combiners: *const D3D12_SHADING_RATE_COMBINER,
 ) {
-    let mut state = recording(list);
+    let super::CommandRecording { list, state } = &mut *recording(list);
     if !state.can_record(&list.native) {
         return;
     }
@@ -202,7 +202,7 @@ pub(super) unsafe extern "system" fn shading_rate(
 // ordering in DXIL, including earlydepthstencil for early-depth color shaders.
 // Desktop D3D12 always honors this shader contract; it has no dynamic override.
 pub(super) unsafe extern "system" fn force_shader_depth_order(list: &List, enable: u32) {
-    let mut state = recording(list);
+    let super::CommandRecording { list, state } = &mut *recording(list);
     if !state.can_record(&list.native) {
         return;
     }
@@ -219,7 +219,7 @@ pub(super) unsafe extern "system" fn force_shader_depth_order(list: &List, enabl
 // SetSampleMaskX programs an additional 16-bit coverage mask per pixel in a
 // 2x2 quad. Enabling every sample preserves the coverage of the bound PSO.
 pub(super) unsafe extern "system" fn sample_mask(list: &List, mask: u64) {
-    let mut state = recording(list);
+    let super::CommandRecording { list, state } = &mut *recording(list);
     if !state.can_record(&list.native) {
         return;
     }
@@ -239,7 +239,7 @@ pub(super) unsafe extern "system" fn sample_mask(list: &List, mask: u64) {
 // FD3D12CommandContext::RHIDispatchMeshShader calls slot 127 at Frosty
 // RVA 0x578f241 with X/Y/Z group counts in the standard register order.
 pub(super) unsafe extern "system" fn dispatch_mesh(list: &List, x: u32, y: u32, z: u32) {
-    let mut state = recording(list);
+    let super::CommandRecording { list, state } = &mut *recording(list);
     if !state.can_record(&list.native) {
         return;
     }
@@ -253,7 +253,7 @@ pub(super) unsafe extern "system" fn dispatch_mesh(list: &List, x: u32, y: u32, 
         state.error = E_INVALIDARG;
         return;
     }
-    let Some(native) = list.state.mesh.get_or_init(|| list.native.cast().ok()) else {
+    let Some(native) = list.mesh.get_or_init(|| list.native.cast().ok()) else {
         state.error = windows::Win32::Foundation::E_NOINTERFACE;
         return;
     };
@@ -270,11 +270,11 @@ pub(super) unsafe extern "system" fn index_buffer(
     list: &List,
     view: *const D3D12_INDEX_BUFFER_VIEW,
 ) {
-    let mut state = recording(list);
+    let super::CommandRecording { list, state } = &mut *recording(list);
     if state.can_record(&list.native) {
         let mut host = unsafe { view.as_ref() }.copied();
         if let Some(v) = &mut host {
-            let Some(address) = super::compute::address(list, &mut state, v.BufferLocation, v.SizeInBytes.into()) else { return; };
+            let Some(address) = super::compute::address(list, state, v.BufferLocation, v.SizeInBytes.into()) else { return; };
             v.BufferLocation = address;
         }
         unsafe { list.native.IASetIndexBuffer(host.as_ref().map(core::ptr::from_ref)) };
@@ -288,7 +288,7 @@ pub(super) unsafe extern "system" fn vertex_buffers(
     count: u32,
     views: *const D3D12_VERTEX_BUFFER_VIEW,
 ) {
-    let mut state = recording(list);
+    let super::CommandRecording { list, state } = &mut *recording(list);
     if !state.can_record(&list.native) {
         return;
     }
@@ -306,7 +306,7 @@ pub(super) unsafe extern "system" fn vertex_buffers(
     let host = &mut translated[..count as usize];
     host.copy_from_slice(unsafe { core::slice::from_raw_parts(views, count as usize) });
     for v in host.iter_mut() {
-        let Some(address) = super::compute::address(list, &mut state, v.BufferLocation, v.SizeInBytes.into()) else { return; };
+        let Some(address) = super::compute::address(list, state, v.BufferLocation, v.SizeInBytes.into()) else { return; };
         v.BufferLocation = address;
     }
     unsafe { list.native.IASetVertexBuffers(start, Some(host)) };
@@ -322,7 +322,7 @@ pub(super) unsafe extern "system" fn draw_indexed(
     base_vertex: i32,
     first_instance: u32,
 ) {
-    let mut state = recording(list);
+    let super::CommandRecording { list, state } = &mut *recording(list);
     if state.can_record(&list.native) {
         state.draw(list, indices != 0 && instances != 0, || unsafe {
             list.native
@@ -335,14 +335,14 @@ pub(super) unsafe extern "system" fn draw_indexed(
 
 // Frosty's ApplyState records these output-merger values at RVAs 0x57f0356 and 0x57f0398.
 pub(super) unsafe extern "system" fn blend_factor(list: &List, factor: *const f32) {
-    let mut state = recording(list);
+    let super::CommandRecording { list, state } = &mut *recording(list);
     if state.can_record(&list.native) {
         unsafe { (list.native.vtable().OMSetBlendFactor)(list.native.as_raw(), factor) };
     }
 }
 
 pub(super) unsafe extern "system" fn stencil_ref(list: &List, reference: u32) {
-    let mut state = recording(list);
+    let super::CommandRecording { list, state } = &mut *recording(list);
     if state.can_record(&list.native) {
         unsafe { list.native.OMSetStencilRef(reference) };
     }
@@ -351,12 +351,11 @@ pub(super) unsafe extern "system" fn stencil_ref(list: &List, reference: u32) {
 // ApplyState loads the depth minimum and maximum into XMM1/XMM2 before the
 // slot 68 call returning at title RVA 0x57f03ed.
 pub(super) unsafe extern "system" fn depth_bounds(list: &List, minimum: f32, maximum: f32) {
-    let mut state = recording(list);
+    let super::CommandRecording { list, state } = &mut *recording(list);
     if !state.can_record(&list.native) {
         return;
     }
     let native = list
-        .state
         .extended
         .get_or_init(|| list.native.cast::<ID3D12GraphicsCommandList1>().ok());
     match native {

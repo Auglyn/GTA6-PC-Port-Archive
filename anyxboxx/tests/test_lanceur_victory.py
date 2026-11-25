@@ -14,6 +14,7 @@ VICTORY = RACINE / "third_party" / "victory"
 REGLAGES = (
     "VICTORY_SHADER_LOOP_LIMIT", "VICTORY_LATE_WAIT", "VICTORY_WIDE_BACK",
     "VICTORY_CARD_BUFFERS_MIN_MB", "VICTORY_CARD_BUFFERS_MB", "VICTORY_DSTORAGE_NOTIFY",
+    "VICTORY_STAGING_POOL_MB",
 )
 # Absentes du code de VIctory au commit épinglé : les poser ne change rien.
 ABSENTES = (

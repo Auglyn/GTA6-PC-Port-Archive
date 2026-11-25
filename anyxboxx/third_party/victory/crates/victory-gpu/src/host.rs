@@ -1485,6 +1485,8 @@ struct CardWork {
     differs: (ID3D12Resource, usize, u64),
     /// Where the pieces that differ are fetched to: PC memory, mapped.
     fetched: Option<(ID3D12Resource, usize, u64)>,
+    /// Reused by the serial copyback path while CARD_WORK is locked.
+    merge_scratch: Vec<u8>,
     /// The dwords of `differs` taken by plans whose results were not read
     /// yet.
     taken: u32,
@@ -3359,6 +3361,7 @@ impl Host {
                 pso,
                 differs: (differs, data as usize, RESULTS),
                 fetched: None,
+                merge_scratch: Vec::new(),
                 taken: 0,
                 out: 0,
             })
@@ -4048,12 +4051,11 @@ impl Host {
                     *written += count.load(Ordering::Relaxed);
                 }
             } else {
-                let mut title = Vec::new();
                 for &(i, lo, hi, at) in &pieces {
                     // SAFETY: the mapping of the fetched bytes, `total` of
                     // them; the copy into it has run.
                     let gpu = unsafe { std::slice::from_raw_parts((*data + at as usize) as *const u8, hi - lo) };
-                    written[i] += plan.ranges[i].shadow.card_merge(lo, gpu, &mut title);
+                    written[i] += plan.ranges[i].shadow.card_merge(lo, gpu, &mut work.merge_scratch);
                 }
             }
         }
@@ -5974,7 +5976,7 @@ fn read(src: *const u8, dst: *mut u8, len: usize) -> bool {
     // SAFETY: the destination is mapped writable memory of `len` bytes; the
     // kernel checks the source.
     crate::l8ww::timed(crate::l8ww::Site::Read, || unsafe {
-        ReadProcessMemory(GetCurrentProcess(), src.cast(), dst.cast(), len, &mut done) != 0
+        ReadProcessMemory(GetCurrentProcess(), src.cast(), dst.cast(), len, &mut done) != 0 && done == len
     })
 }
 

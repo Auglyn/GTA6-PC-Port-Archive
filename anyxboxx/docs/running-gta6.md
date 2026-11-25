@@ -287,6 +287,7 @@ The script sets the variables below (unless you pass `-NoTunedSettings`, which k
 | `VICTORY_RELAY` | not set | Fork option, no longer set by default (fork issue #89: skin disappears, subtitles overlap); `2` was on in the measured runs of `7b0f736` and batch 4. |
 | `VICTORY_CARD_BUFFERS_MIN_MB`, `VICTORY_CARD_BUFFERS_MB` | `1`, `1024` | Card buffer sizing, in MB. |
 | `VICTORY_DSTORAGE_NOTIFY` | `1` | DirectStorage writes into physical pages are reported to the GPU side (fork commits `e49864a` and `bf870de` by Yorivel, fork issue #62): without it the first room's walls can read stale copies and look transparent. |
+| `VICTORY_STAGING_POOL_MB` | `1024` | Staging buffers of the textures picked by index are kept for reuse, up to that many MB, instead of a new upload buffer made and mapped at every upload (`0` keeps none). Measured on an RTX 5080 (driver 621.01, VIctory logs, two runs each way, 25 November): at world entry the stretch below 2.5 fps lasts about 40 s instead of about 80 s, and the texture pass of the first 100 s takes 190 ms a frame instead of 560 to 730 ms; nothing changes once the queue is empty (3.4 to 3.5 fps either way). |
 
 The former defaults `VICTORY_RT_MISS`, `VICTORY_WAVE32_READFIRSTLANE`, `VICTORY_WAVE32_CROSSLANE`, `VICTORY_SKIP_BVH_BUILDER` and `VICTORY_CAPPED_DYNAMIC` are gone: no file of the pinned commit reads them (the BVH builder is off unless `VICTORY_BVH_BUILDER=1`). `tests/test_lanceur_victory.py` now checks that VIctory reads every variable the launcher sets.
 

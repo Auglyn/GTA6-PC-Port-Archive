@@ -6,11 +6,11 @@ use windows::Win32::Foundation::{E_INVALIDARG, E_NOTIMPL};
 use windows::Win32::Graphics::Direct3D12::*;
 
 pub(super) unsafe extern "system" fn pipeline(list: &List, object: *mut c_void) {
-    let mut state = recording(list);
+    let super::CommandRecording { list, state } = &mut *recording(list);
     if !state.can_record(&list.native) {
         return;
     }
-    let Some(host) = &list.state.raytracing else {
+    let Some(host) = &list.raytracing else {
         state.error = E_NOTIMPL;
         return;
     };
@@ -29,11 +29,11 @@ pub(super) unsafe extern "system" fn pipeline(list: &List, object: *mut c_void) 
 const _: () = assert!(size_of::<D3D12_DISPATCH_RAYS_DESC>() == 104);
 
 pub(super) unsafe extern "system" fn dispatch(list: &List, desc: *const D3D12_DISPATCH_RAYS_DESC) {
-    let mut state = recording(list);
+    let super::CommandRecording { list, state } = &mut *recording(list);
     if !state.can_record(&list.native) {
         return;
     }
-    let Some(host) = &list.state.raytracing else {
+    let Some(host) = &list.raytracing else {
         state.error = E_NOTIMPL;
         return;
     };

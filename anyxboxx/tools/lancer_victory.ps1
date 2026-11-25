@@ -99,6 +99,10 @@ if (-not $NoTunedSettings) {
         # DirectStorage writes into physical pages are reported to the GPU side (fork commits e49864a and
         # bf870de by Yorivel): the first room's walls no longer read stale copies.
         VICTORY_DSTORAGE_NOTIFY         = '1'
+        # Staging buffers of the textures picked by index are kept for reuse, up to this many MB, instead of a
+        # new upload buffer made and mapped at every upload. Measured on an RTX 5080 (two runs each way): the
+        # stretch below 2.5 fps at world entry lasts about 40 s instead of about 80 s. 0 keeps none.
+        VICTORY_STAGING_POOL_MB         = '1024'
     }
     foreach ($name in $tuned.Keys) {
         Set-Item -Path "Env:$name" -Value $tuned[$name]

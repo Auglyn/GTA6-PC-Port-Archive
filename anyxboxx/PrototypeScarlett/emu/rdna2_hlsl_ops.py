@@ -169,10 +169,10 @@ def scalar_statement(name, fields, literal):
 # --- Vectorielles : expressions uint de {a}, {b}, {c} (sources) et {d} (destination) --------
 VECTOR = {
     "v_mov_b32": "{a}",
-    "v_add_f32": "asuint(asfloat({a}) + asfloat({b}))",
-    "v_sub_f32": "asuint(asfloat({a}) - asfloat({b}))",
-    "v_subrev_f32": "asuint(asfloat({b}) - asfloat({a}))",
-    "v_mul_f32": "asuint(asfloat({a}) * asfloat({b}))",
+    "v_add_f32": "F32Add({a}, {b})",
+    "v_sub_f32": "F32Sub({a}, {b})",
+    "v_subrev_f32": "F32Sub({b}, {a})",
+    "v_mul_f32": "F32Mul({a}, {b})",
     "v_mul_legacy_f32": "MulLegacyF32({a}, {b})",
     "v_min_f32": "asuint(min(asfloat({a}), asfloat({b})))",
     "v_max_f32": "asuint(max(asfloat({a}), asfloat({b})))",

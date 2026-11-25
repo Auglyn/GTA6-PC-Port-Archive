@@ -29,7 +29,7 @@ OPTIONAL_PROVIDERS = {"dxc-utils": "dxc-utils/dxcompiler.dll", "xg": "xg/xg_xs.d
 SUITES = (*BASE_SUITES, "d3d12-mesh", *OPTIONAL_PROVIDERS)
 # The scenarios of `lanes.exe --selftest`, one gate each.
 LANES_SCENARIOS = ("labels", "cross-queue", "compute-frame", "skipped-command", "copy-memory", "shared-texture",
-                   "indirect-dispatch", "texture-readback",
+                   "indirect-dispatch", "dispatch-wait", "texture-readback",
                    "ray-tracing-builder", "thread-dimensions",
                    "descriptor-reclaim")
 
@@ -702,6 +702,7 @@ GATE_LABELS = {
     "lanes-selftest-copy-memory": "CopyMemoryToMemoryX direction and contents",
     "lanes-selftest-shared-texture": "A waiting queue reading a texture another queue writes",
     "lanes-selftest-indirect-dispatch": "ExecuteIndirect matching a direct dispatch",
+    "lanes-selftest-dispatch-wait": "A memory wait before and after a compute dispatch",
     "lanes-selftest-texture-readback": "A guest texture copied back to title memory",
     "lanes-benchmark": "Lanes frame, submission, fence handover, copy and pipeline timings",
     "lanes-selftest-ray-tracing-builder": "Single, copied and batched builds through XboxBvhBuilder",

@@ -219,6 +219,7 @@ pub(crate) fn announce() {
 
 /// The role, among those `VICTORY_L7_SKIP` names, of a pipeline whose
 /// shaders have the roles `mask`.
+#[cfg(feature = "diagnostics")]
 pub(crate) fn skipped_role(mask: u64) -> Option<&'static str> {
     let hit = mask & config().skip;
     (hit != 0).then(|| roles().names[hit.trailing_zeros() as usize].as_str())

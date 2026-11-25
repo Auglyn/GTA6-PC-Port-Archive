@@ -226,11 +226,11 @@ pub(super) unsafe extern "system" fn copy(
     source: u64,
     mode: D3D12_RAYTRACING_ACCELERATION_STRUCTURE_COPY_MODE,
 ) {
-    let mut state = recording(list);
+    let super::CommandRecording { list, state } = &mut *recording(list);
     if !state.can_record(&list.native) {
         return;
     }
-    let Some(host) = &list.state.raytracing else {
+    let Some(host) = &list.raytracing else {
         state.error = E_NOTIMPL;
         return;
     };
@@ -238,7 +238,7 @@ pub(super) unsafe extern "system" fn copy(
         state.error = E_POINTER;
         return;
     };
-    if let Err(error) = record(&mut state, host, owner, destination, source, mode) {
+    if let Err(error) = record(state, host, owner, destination, source, mode) {
         crate::diagnostics::recording_error(format_args!(
             "slot 119 AS copy mode {}, source {source:#x}, destination {destination:#x}: {:?}",
             mode.0,
@@ -272,13 +272,13 @@ pub(super) unsafe extern "system" fn postbuild(
     count: u32,
     addresses: *const u64,
 ) {
-    let mut state = recording(list);
+    let super::CommandRecording { list, state } = &mut *recording(list);
     if !state.can_record(&list.native) {
         return;
     }
     let result = (|| -> Result<()> {
         let desc = unsafe { desc.as_ref() }.ok_or(E_POINTER)?;
-        let host = list.state.raytracing.as_ref().ok_or(E_NOTIMPL)?;
+        let host = list.raytracing.as_ref().ok_or(E_NOTIMPL)?;
         let owner = list.parent.as_ref().ok_or(E_POINTER)?;
         validate_size_output(desc)?;
         if count == 0 {

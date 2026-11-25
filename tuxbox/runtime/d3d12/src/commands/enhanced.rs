@@ -31,7 +31,7 @@ fn texture_group(api: &ID3D12GraphicsCommandList7, items: &[D3D12_TEXTURE_BARRIE
 }
 
 unsafe fn record(
-    list: &List,
+    list: &super::NativeList,
     native: &ID3D12GraphicsCommandList7,
     groups: &[D3D12_BARRIER_GROUP],
 ) -> Result<(), HRESULT> {
@@ -149,7 +149,7 @@ pub(super) unsafe extern "system" fn barrier(
     count: u32,
     groups: *const D3D12_BARRIER_GROUP,
 ) {
-    let mut state = recording(list);
+    let super::CommandRecording { list, state } = &mut *recording(list);
     if count == 0 || !state.can_record(&list.native) {
         return;
     }
@@ -158,7 +158,6 @@ pub(super) unsafe extern "system" fn barrier(
         return;
     }
     let Some(native) = list
-        .state
         .enhanced_barriers
         .get_or_init(|| enhanced_barriers(&list.native))
     else {

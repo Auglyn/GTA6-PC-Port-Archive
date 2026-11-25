@@ -13,7 +13,7 @@ use windows::core::{HRESULT, Interface};
 use super::{List, ListState, Recording, parent, recording};
 
 pub(super) unsafe extern "system" fn clear_state(list: &List, pipeline: *mut c_void) {
-    let mut state = recording(list);
+    let super::CommandRecording { list, state } = &mut *recording(list);
     if !state.can_record(&list.native) {
         return;
     }
@@ -36,6 +36,7 @@ pub(super) unsafe extern "system" fn clear_state(list: &List, pipeline: *mut c_v
     // Draw and dispatch replay these bindings. Clear them with the host state,
     // or the next draw puts the old tables back.
     state.bindings = super::compute_bindings::Bindings::new(pipeline);
+    state.predicate = None;
     state.stencil_slot = pipeline.and_then(|pipeline| pipeline.state.stencil_slot);
     if let Some(targets) = &mut state.stencil_targets {
         targets.unbind();
@@ -126,7 +127,7 @@ pub(super) unsafe extern "system" fn copy_tiles(
     offset: u64,
     flags: D3D12_TILE_COPY_FLAGS,
 ) {
-    let mut state = recording(list);
+    let super::CommandRecording { list, state } = &mut *recording(list);
     if !state.can_record(&list.native) {
         return;
     }
@@ -211,7 +212,7 @@ pub(super) unsafe extern "system" fn resolve_subresource(
     src_subresource: u32,
     format: DXGI_FORMAT,
 ) {
-    let mut state = recording(list);
+    let super::CommandRecording { list, state } = &mut *recording(list);
     if !state.can_record(&list.native) {
         return;
     }
@@ -266,7 +267,7 @@ pub(super) unsafe extern "system" fn set_predication(
     offset: u64,
     operation: D3D12_PREDICATION_OP,
 ) {
-    let mut state = recording(list);
+    let super::CommandRecording { list, state } = &mut *recording(list);
     if !state.can_record(&list.native) {
         return;
     }
@@ -275,6 +276,7 @@ pub(super) unsafe extern "system" fn set_predication(
         return;
     }
     if buffer.is_null() {
+        state.predicate = None;
         unsafe { list.native.SetPredication(None::<&ID3D12Resource>, offset, operation) };
         return;
     }
@@ -291,6 +293,7 @@ pub(super) unsafe extern "system" fn set_predication(
         state.error = E_INVALIDARG;
         return;
     };
+    state.predicate = Some((buffer.native.clone(), offset, operation));
     unsafe { list.native.SetPredication(&buffer.native, offset, operation) };
 }
 
@@ -308,7 +311,7 @@ pub(super) unsafe extern "system" fn stream_output(
     count: u32,
     views: *const D3D12_STREAM_OUTPUT_BUFFER_VIEW,
 ) {
-    let mut state = recording(list);
+    let super::CommandRecording { list, state } = &mut *recording(list);
     if !state.can_record(&list.native) {
         return;
     }
@@ -334,7 +337,7 @@ pub(super) unsafe extern "system" fn stream_output(
             state.error = E_INVALIDARG;
             return;
         }
-        let Some(location) = super::compute::address(list, &mut state, view.BufferLocation, view.SizeInBytes) else {
+        let Some(location) = super::compute::address(list, state, view.BufferLocation, view.SizeInBytes) else {
             return;
         };
         view.BufferLocation = location;
@@ -343,7 +346,7 @@ pub(super) unsafe extern "system" fn stream_output(
                 state.error = E_INVALIDARG;
                 return;
             }
-            let Some(filled) = super::compute::address(list, &mut state, view.BufferFilledSizeLocation, 4) else {
+            let Some(filled) = super::compute::address(list, state, view.BufferFilledSizeLocation, 4) else {
                 return;
             };
             view.BufferFilledSizeLocation = filled;
@@ -402,8 +405,8 @@ fn adopt_bundle(parent_state: &mut Recording, bundle: &Recording) -> Result<(), 
     Ok(())
 }
 
-pub(super) unsafe extern "system" fn execute_bundle(list: &List, bundle: *mut c_void) {
-    let mut state = recording(list);
+pub(super) unsafe extern "system" fn execute_bundle(guest: &List, bundle: *mut c_void) {
+    let super::CommandRecording { list, state } = &mut *recording(guest);
     if !state.can_record(&list.native) {
         return;
     }
@@ -415,12 +418,12 @@ pub(super) unsafe extern "system" fn execute_bundle(list: &List, bundle: *mut c_
         state.error = E_INVALIDARG;
         return;
     };
-    if core::ptr::eq(list, bundle) {
+    if core::ptr::eq(guest, bundle) {
         state.error = E_INVALIDARG;
         return;
     }
     // Lock the caller first, then the bundle. The two lists are distinct.
-    let bundle_state = recording(bundle);
+    let bundle_state = &recording(bundle).state;
     if unsafe { bundle.native.GetType() } != D3D12_COMMAND_LIST_TYPE_BUNDLE
         || !matches!(&bundle_state.phase, ListState::Closed)
         || bundle_state.error.is_err()
@@ -428,7 +431,7 @@ pub(super) unsafe extern "system" fn execute_bundle(list: &List, bundle: *mut c_
         state.error = E_INVALIDARG;
         return;
     }
-    if let Err(error) = adopt_bundle(&mut state, &bundle_state) {
+    if let Err(error) = adopt_bundle(state, bundle_state) {
         state.error = error;
         return;
     }
@@ -449,7 +452,7 @@ pub(super) unsafe extern "system" fn set_marker(
     data: *const c_void,
     size: u32,
 ) {
-    let mut state = recording(list);
+    let super::CommandRecording { list, state } = &mut *recording(list);
     if !state.can_record(&list.native) {
         return;
     }
@@ -464,7 +467,7 @@ pub(super) unsafe extern "system" fn begin_event(
     data: *const c_void,
     size: u32,
 ) {
-    let mut state = recording(list);
+    let super::CommandRecording { list, state } = &mut *recording(list);
     if !state.can_record(&list.native) {
         return;
     }
@@ -474,7 +477,7 @@ pub(super) unsafe extern "system" fn begin_event(
 }
 
 pub(super) unsafe extern "system" fn end_event(list: &List) {
-    let mut state = recording(list);
+    let super::CommandRecording { list, state } = &mut *recording(list);
     let _ = state.can_record(&list.native);
 }
 

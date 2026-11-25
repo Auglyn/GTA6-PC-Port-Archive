@@ -6,7 +6,7 @@ pub(super) unsafe extern "system" fn transition(
     count: u32,
     barriers: *const D3D12_RESOURCE_BARRIER,
 ) {
-    let mut state = recording(list);
+    let super::CommandRecording { list, state } = &mut *recording(list);
     if !state.can_record(&list.native) || count == 0 {
         return;
     }
@@ -209,7 +209,7 @@ pub(super) fn enhanced_barriers(native: &ID3D12GraphicsCommandList) -> Option<ID
 }
 
 pub(super) unsafe extern "system" fn flush_texture_cache(list: &List, mask: u32, address: u64, bytes: u64) {
-    let mut state = recording(list);
+    let super::CommandRecording { list, state } = &mut *recording(list);
     if !state.can_record(&list.native) {
         return;
     }
@@ -235,7 +235,7 @@ pub(super) unsafe extern "system" fn flush_texture_cache(list: &List, mask: u32,
             format!("texture cache range flush mask {mask:#x} address {address:#x} bytes {bytes:#x}")
         });
     }
-    global_cache_barrier(list, &mut state);
+    global_cache_barrier(list, state);
 }
 
 // The extended list accepts separate cache/engine masks before the VA range.
@@ -243,7 +243,7 @@ pub(super) unsafe extern "system" fn flush_texture_cache(list: &List, mask: u32,
 pub(super) unsafe extern "system" fn extended_cache_barrier(
     list: &List, _cache: u32, _engines: u32, address: u64, bytes: u64,
 ) {
-    let mut state = recording(list);
+    let super::CommandRecording { list, state } = &mut *recording(list);
     if !state.can_record(&list.native) {
         return;
     }
@@ -251,12 +251,11 @@ pub(super) unsafe extern "system" fn extended_cache_barrier(
         state.error = E_INVALIDARG;
         return;
     }
-    global_cache_barrier(list, &mut state);
+    global_cache_barrier(list, state);
 }
 
-pub(super) fn global_cache_barrier(list: &List, state: &mut Recording) {
+pub(super) fn global_cache_barrier(list: &super::NativeList, state: &mut Recording) {
     let Some(native) = list
-        .state
         .enhanced_barriers
         .get_or_init(|| enhanced_barriers(&list.native))
     else {

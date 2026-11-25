@@ -12,7 +12,7 @@ pub(super) unsafe extern "system" fn query<const BEGIN: bool>(
     kind: D3D12_QUERY_TYPE,
     index: u32,
 ) {
-    let mut state = recording(list);
+    let super::CommandRecording { list, state } = &mut *recording(list);
     if !state.can_record(&list.native) {
         return;
     }
@@ -26,8 +26,10 @@ pub(super) unsafe extern "system" fn query<const BEGIN: bool>(
             state.error = E_INVALIDARG;
             return;
         }
+        state.open_queries = state.open_queries.saturating_add(1);
         unsafe { list.native.BeginQuery(heap, kind, index) };
     } else {
+        if kind != D3D12_QUERY_TYPE_TIMESTAMP { state.open_queries = state.open_queries.saturating_sub(1); }
         unsafe { list.native.EndQuery(heap, kind, index) };
     }
 }
@@ -41,7 +43,7 @@ pub(super) unsafe extern "system" fn resolve(
     destination: *mut c_void,
     offset: u64,
 ) {
-    let mut state = recording(list);
+    let super::CommandRecording { list, state } = &mut *recording(list);
     if !state.can_record(&list.native) {
         return;
     }
@@ -65,7 +67,7 @@ pub(super) unsafe extern "system" fn resolve(
 
 // A Series timestamp packet writes the queue clock directly to title memory.
 // Desktop D3D12 exposes the same clock through a timestamp query and resolve.
-pub(super) fn timestamp(list: &List, state: &mut Recording, address: u64) -> windows::core::Result<()> {
+pub(super) fn timestamp(list: &super::NativeList, state: &mut Recording, address: u64) -> windows::core::Result<()> {
     const SLOTS: u32 = 256;
     let (resource, gpu) = unsafe { crate::device::command_buffer_address(parent(&list.parent), address, 8)? };
     let resource = resource.ok_or(E_INVALIDARG)?;

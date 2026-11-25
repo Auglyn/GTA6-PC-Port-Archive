@@ -49,7 +49,7 @@ pub(super) unsafe extern "system" fn copy_texture(
     region: *const D3D12_BOX,
     flags: u32,
 ) {
-    let mut state = recording(list);
+    let super::CommandRecording { list, state } = &mut *recording(list);
     if !state.can_record(&list.native) {
         return;
     }
@@ -93,7 +93,7 @@ pub(super) unsafe extern "system" fn copy_resource(
     src: *mut c_void,
     options: u32,
 ) {
-    let mut state = recording(list);
+    let super::CommandRecording { list, state } = &mut *recording(list);
     if !state.can_record(&list.native) {
         return;
     }

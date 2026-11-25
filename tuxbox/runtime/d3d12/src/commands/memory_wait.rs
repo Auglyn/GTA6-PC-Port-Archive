@@ -84,7 +84,7 @@ impl Drop for Word {
 }
 
 impl Word {
-    fn map(list: &List, address: u64) -> Result<Self> {
+    fn map(list: &super::NativeList, address: u64) -> Result<Self> {
         if address == 0 || !address.is_multiple_of(8) {
             return Err(E_INVALIDARG.into());
         }
@@ -276,7 +276,7 @@ pub(super) unsafe extern "system" fn wait_value64(
     target: u64,
     flags: u32,
 ) {
-    let mut state = recording(list);
+    let super::CommandRecording { list, state } = &mut *recording(list);
     if !state.ensure_open(&list.native) {
         return;
     }
@@ -290,9 +290,13 @@ pub(super) unsafe extern "system" fn wait_value64(
         }
         let list_type = unsafe { list.native.GetType() }.0;
         trace_wait(address, target, word.value(), list_type, state.prefix.in_body);
-        let split = !state.prefix.in_body;
+        // A compute list can resume its pipeline and root arguments in a fresh
+        // native list. A query begun in this list must also end in the same list.
+        let compute_body = state.prefix.in_body && list_type == D3D12_COMMAND_LIST_TYPE_COMPUTE.0
+            && state.open_queries == 0 && state.media.is_none();
+        let split = !state.prefix.in_body || compute_body;
         state.labels.push(Label { wait: Some(split), address, value: target });
-        if state.prefix.in_body {
+        if !split {
             // Honoring this would split the list and replay its bound state.
             // Order the work already in this list with a global UAV barrier and
             // continue: a value produced by another queue or the CPU is not
@@ -322,7 +326,9 @@ pub(super) unsafe extern "system" fn wait_value64(
             .segments
             .try_reserve(1)
             .map_err(|_| E_OUTOFMEMORY)?;
-        let prefix = if state.prefix.pending.is_empty() {
+        let prefix = if compute_body {
+            Some(split_compute(list, state)?)
+        } else if state.prefix.pending.is_empty() {
             None
         } else {
             let mut device: Option<ID3D12Device> = None;
@@ -356,6 +362,31 @@ pub(super) unsafe extern "system" fn wait_value64(
             error.code()
         ));
         state.error = error.code();
+    }
+}
+
+// Keep the guest allocator for both native lists. The command memory and
+// referenced resources then obey the normal allocator-reset lifetime.
+fn split_compute(
+    list: &mut NativeList,
+    state: &Recording,
+) -> Result<(ID3D12CommandList, ID3D12CommandAllocator)> {
+    unsafe {
+        let mut device: Option<ID3D12Device> = None;
+        list.native.GetDevice(&mut device)?;
+        let device = device.ok_or(E_FAIL)?;
+        list.native.Close()?;
+        let tail: ID3D12GraphicsCommandList = device.CreateCommandList(
+            0, D3D12_COMMAND_LIST_TYPE_COMPUTE, &state.allocator, None,
+        )?;
+        let rt = tail.cast().ok();
+        let successor = NativeList::new(tail, list.parent.clone(), rt);
+        let previous = std::mem::replace(list, successor);
+        state.bindings.resume_compute(&list.native)?;
+        if let Some((resource, offset, op)) = &state.predicate {
+            list.native.SetPredication(resource, *offset, *op);
+        }
+        Ok((previous.native.into(), state.allocator.clone()))
     }
 }
 

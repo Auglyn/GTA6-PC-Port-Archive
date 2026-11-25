@@ -55,7 +55,7 @@ fn resolve_flagged_groups(
 }
 
 pub(super) unsafe extern "system" fn bind_root(list: &List, signature: *mut c_void) {
-    let mut state = recording(list);
+    let super::CommandRecording { list, state } = &mut *recording(list);
     if !state.can_record(&list.native) {
         return;
     }
@@ -82,7 +82,7 @@ pub(super) unsafe extern "system" fn constants<const COMPUTE: bool>(
     data: *const c_void,
     offset: u32,
 ) {
-    let mut state = recording(list);
+    let super::CommandRecording { list, state } = &mut *recording(list);
     if !state.can_record(&list.native) || count == 0 {
         return;
     }
@@ -104,7 +104,7 @@ pub(super) unsafe extern "system" fn constants<const COMPUTE: bool>(
 use super::compute_bindings::BufferView;
 
 fn root_buffer<const COMPUTE: bool>(list: &List, index: u32, guest: u64, view: fn(u64) -> BufferView) {
-    let mut state = recording(list);
+    let super::CommandRecording { list, state } = &mut *recording(list);
     if state.can_record(&list.native) {
         // A desktop root CBV has no size: vkd3d binds min(host buffer end -
         // address, 64 KiB). A one-byte import can leave a short, odd range,
@@ -117,12 +117,12 @@ fn root_buffer<const COMPUTE: bool>(list: &List, index: u32, guest: u64, view: f
         let address = match wide {
             Some((buffer, va)) => {
                 if let Some(buffer) = buffer {
-                    if let Err(e) = super::raytracing::retain(&mut state, &[&buffer]) { state.error = e.code(); return; }
+                    if let Err(e) = super::raytracing::retain(state, &[&buffer]) { state.error = e.code(); return; }
                 }
                 va
             }
             None => {
-                let Some(va) = address(list, &mut state, guest, 1) else { return };
+                let Some(va) = address(list, state, guest, 1) else { return };
                 if cbv && guest != 0 {
                     static SHORT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
                     let n = SHORT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
@@ -153,7 +153,7 @@ pub(super) unsafe extern "system" fn unordered_access<const COMPUTE: bool>(list:
 }
 
 pub(super) unsafe extern "system" fn async_compute_budget(list: &List, budget: *const [u8; 24]) {
-    let mut state = recording(list);
+    let super::CommandRecording { list, state } = &mut *recording(list);
     if !state.can_record(&list.native) {
         return;
     }
@@ -178,15 +178,15 @@ pub(super) unsafe extern "system" fn async_compute_budget(list: &List, budget: *
 }
 
 pub(super) unsafe extern "system" fn dispatch(list: &List, x: u32, y: u32, z: u32) {
-    let mut state = recording(list);
+    let super::CommandRecording { list, state } = &mut *recording(list);
     if !state.can_record(&list.native) {
         return;
     }
-    record_dispatch(list, &mut state, x, y, z);
+    record_dispatch(list, state, x, y, z);
 }
 
 pub(super) unsafe extern "system" fn dispatch_flagged(list: &List, x: u32, y: u32, z: u32, flags: u32) {
-    let mut state = recording(list);
+    let super::CommandRecording { list, state } = &mut *recording(list);
     if !state.can_record(&list.native) {
         return;
     }
@@ -224,10 +224,10 @@ pub(super) unsafe extern "system" fn dispatch_flagged(list: &List, x: u32, y: u3
             "slot 80 thread-dimension dispatch ({x},{y},{z}) rounded up for [numthreads({nx},{ny},{nz})] to ({gx},{gy},{gz}); desktop Dispatch does not mask surplus threads in the boundary group"
         ));
     }
-    record_dispatch(list, &mut state, gx, gy, gz);
+    record_dispatch(list, state, gx, gy, gz);
 }
 
-fn record_dispatch(list: &List, state: &mut super::Recording, x: u32, y: u32, z: u32) {
+fn record_dispatch(list: &super::NativeList, state: &mut super::Recording, x: u32, y: u32, z: u32) {
     if x.max(y).max(z) > D3D12_CS_DISPATCH_MAX_THREAD_GROUPS_PER_DIMENSION {
         state.error = E_INVALIDARG;
         return;
@@ -253,7 +253,7 @@ pub(super) fn buffer_offset(resource: &device::Resource, offset: u64, bytes: u64
     base.checked_add(offset)
 }
 
-pub(super) fn address(list: &List, state: &mut super::Recording, guest: u64, bytes: u64) -> Option<u64> {
+pub(super) fn address(list: &super::NativeList, state: &mut super::Recording, guest: u64, bytes: u64) -> Option<u64> {
     if guest == 0 { return Some(0); }
     let result = unsafe { device::command_buffer_address(parent(&list.parent), guest, bytes.max(1)) }
         .and_then(|(buffer, va)| {
@@ -271,7 +271,7 @@ pub(super) unsafe extern "system" fn copy_buffer(
     src_offset: u64,
     bytes: u64,
 ) {
-    let mut state = recording(list);
+    let super::CommandRecording { list, state } = &mut *recording(list);
     if !state.can_record(&list.native) {
         return;
     }

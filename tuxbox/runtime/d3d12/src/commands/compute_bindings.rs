@@ -260,7 +260,7 @@ impl Bindings {
     }
 
     pub(super) fn with_reflected_table<const COMPUTE: bool>(
-        &self, table: &ComputeTable, guest: &super::List,
+        &self, table: &ComputeTable, guest: &super::NativeList,
         arena: Option<&Arc<crate::device::descriptor_paging::Arena>>,
         leases: &mut crate::device::descriptor_paging::DescriptorLeases,
         heap: Option<&super::descriptors::ResourceHeap>, reads: &mut Vec<std::ops::Range<usize>>,
@@ -347,7 +347,7 @@ impl Bindings {
         }
     }
 
-    pub(super) fn scene_resource(&self, list: &super::List) -> Result<SceneCheck> {
+    pub(super) fn scene_resource(&self, list: &super::NativeList) -> Result<SceneCheck> {
         let scene = self.scene_root().ok_or(E_INVALIDARG)?;
         if !self
             .layout
@@ -515,6 +515,20 @@ impl Bindings {
             host.SetComputeRootSignature(self.compute.as_ref());
             self.apply_compute_args(host, &[]);
         }
+    }
+
+    pub(super) unsafe fn resume_compute(&self, host: &ID3D12GraphicsCommandList) -> Result<()> {
+        unsafe {
+            host.SetDescriptorHeaps(&self.heaps);
+            host.SetComputeRootSignature(self.compute.as_ref());
+            self.apply_compute_args(host, &[]);
+            match self.pipeline.as_ref() {
+                Some(Pipeline::Regular(pso, ..)) => host.SetPipelineState(pso),
+                Some(Pipeline::Ray(pso)) => windows::core::Interface::cast::<ID3D12GraphicsCommandList4>(host)?.SetPipelineState1(pso),
+                None => {}
+            }
+        }
+        Ok(())
     }
 
     pub(super) unsafe fn restore(&self, host: &ID3D12GraphicsCommandList4) {

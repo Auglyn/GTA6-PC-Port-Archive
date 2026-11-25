@@ -328,11 +328,11 @@ unsafe fn record_builds(
     entries: *const Entry,
     outputs: &[D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_DESC],
 ) {
-    let mut state = recording(list);
+    let super::CommandRecording { list, state } = &mut *recording(list);
     if !state.can_record(&list.native) || count == 0 {
         return;
     }
-    let Some(host) = &list.state.raytracing else {
+    let Some(host) = &list.raytracing else {
         state.error = E_NOTIMPL;
         return;
     };
@@ -374,7 +374,7 @@ unsafe fn record_builds(
         // the list still runs.
         let translated = match refusal(entry) {
             Some((reason, code)) => Err((reason, code)),
-            None => translate(&mut state, owner, host, entry.build)
+            None => translate(state, owner, host, entry.build)
                 .map_err(|e| ("translation", e.code())),
         };
         let (build, instances, bytes) = match translated {
