@@ -108,7 +108,7 @@ bool read_text(const wchar_t* path, std::string& out)
     return true;
 }
 
-// Publish only complete inputs. The offline scanner treats .a and .rtv as ready markers.
+// Publish each input atomically. The callers write the request's ready marker last.
 bool publish_shader_request(u64 key, const wchar_t* ext, const void* data, std::size_t bytes)
 {
     wchar_t path[MAX_PATH], temporary[MAX_PATH], suffix[32];
@@ -369,6 +369,57 @@ void publish_compute_request(const void* desc)
         log("x2w-draw compute request %016llx %s (code %llu bytes, data %llu bytes, state blocks %llu + %llu bytes, "
             "pointer-like blob qwords %ld)", key, present ? "already present" : written ? "published" : "not written",
             words[6], words[8], words[2], words[4], pointers);
+}
+
+// Slot 57 fixed descriptors consumed by a decoded DispatchMesh signature.
+// The vertex span must be absent. A null/zero PS span is valid for depth-only work.
+void request_slot57_mesh(Wrapper* pipeline, const std::vector<RootParameter>* bound_root)
+{
+    wchar_t marker[MAX_PATH];
+    if (!bound_root || !cache_path(marker, L"req_", 0, L".m57")) return;
+    const PipelineInfo* info = pipeline_info(pipeline);
+    for (int depth = 0; info && info->path == 55 && info->base && depth < 8; ++depth)
+        info = pipeline_info(info->base);
+    constexpr std::size_t fields = 15;  // through the MS length at +0x70
+    if (!info || info->path != 57 || info->desc.size() < fields * sizeof(u64)) return;
+    u64 words[fields];
+    std::memcpy(words, info->desc.data(), sizeof(words));
+    if (words[9] || words[10]) return;  // VS at +0x48
+    const Wrapper* root = as_wrapper(reinterpret_cast<const void*>(words[0]));
+    if (!root || root_info(root) != bound_root) return;
+    std::vector<unsigned char> root_blob;
+    {
+        AcquireSRWLockShared(&note_lock);
+        if (const auto found = root_blobs().find(root); found != root_blobs().end()) root_blob = found->second;
+        ReleaseSRWLockShared(&note_lock);
+    }
+    if (root_blob.empty()) return;
+    std::vector<unsigned char> mesh, pixel;
+    const auto copy_stage = [&words](int field, bool required, std::vector<unsigned char>& out) {
+        const auto* pointer = reinterpret_cast<const void*>(words[field]);
+        const auto bytes = words[field + 1];
+        if (!bytes) return !required && !pointer;
+        if (bytes > (1u << 20) || !x2w_local::readable(pointer, bytes)) return false;
+        out.resize(static_cast<std::size_t>(bytes));
+        return copy_title_bytes(out.data(), pointer, out.size());
+    };
+    if (!copy_stage(13, true, mesh) || !copy_stage(5, false, pixel)) return;
+    constexpr char revision[] = "x2w-startup-mesh-57-1";
+    const u64 key = fnv_part(root_blob, fnv_part(pixel, fnv_part(mesh, fnv_bytes(revision, sizeof(revision) - 1))));
+    static SRWLOCK request_lock = SRWLOCK_INIT;
+    static std::unordered_set<u64> written;
+    x2w_startup::ExclusiveNoteLock guard(request_lock);
+    if (written.count(key)) return;
+    const unsigned char none = 0;
+    if (publish_shader_request(key, L".ps57", pixel.empty() ? &none : pixel.data(), pixel.size()) &&
+        publish_shader_request(key, L".root", root_blob.data(), root_blob.size()) &&
+        publish_shader_request(key, L".m57", mesh.data(), mesh.size())) {
+        written.insert(key);
+        static LONG logged;
+        if (first_calls(logged, 12))
+            log("x2w-draw mesh request %016llx: slot57, MS %zu bytes, PS %zu bytes",
+                key, mesh.size(), pixel.size());
+    }
 }
 
 // The INPUT_LAYOUT subobject as the request text tools/startup/gfx2hlsl.py reads: "ia1 <count>", then one
@@ -774,6 +825,8 @@ struct TextureUpload {
     bool done = false, tiled = false;
     ID3D12CommandList* pending_list = nullptr;
     u64 revision = 0;
+    bool staged = false;       // the last upload attempt put the title memory into the desktop texture
+    bool gpu_written = false;  // a list copy or resolve wrote the texture; its title memory is stale and must not be uploaded
 };
 std::unordered_map<ID3D12Resource*, TextureUpload>& texture_uploads() { static std::unordered_map<ID3D12Resource*, TextureUpload> m; return m; }
 u64 address_upload_revision;
@@ -1004,6 +1057,7 @@ u64 hash_memory(const unsigned char* data, std::size_t bytes)
     for (std::size_t i = words * 8; i < bytes; ++i) h = (h ^ data[i]) * 0x100000001b3ull;
     return h;
 }
+bool list_wrote(Wrapper* list, ID3D12Resource* resource);  // list_copy.inl
 bool upload_texture(Wrapper* self, Wrapper* resource, ID3D12Resource* texture)
 {
     auto* const memory = static_cast<const unsigned char*>(resource->own().title_memory);
@@ -1027,6 +1081,8 @@ bool upload_texture(Wrapper* self, Wrapper* resource, ID3D12Resource* texture)
         }
     }
     if (!memory || !list || !uploadable) return !console;
+    if (list_wrote(self, texture)) return !console;  // this recording's own copy; not yet submitted
+    if (const auto written_by_gpu = texture_uploads().find(texture); written_by_gpu != texture_uploads().end() && written_by_gpu->second.gpu_written) return !console;
     if (desc.Flags & (D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL | D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)) return !console;
     const UINT mips = desc.MipLevels ? desc.MipLevels : 1;
     const UINT slices = desc.DepthOrArraySize ? desc.DepthOrArraySize : 1;
@@ -1097,6 +1153,7 @@ bool upload_texture(Wrapper* self, Wrapper* resource, ID3D12Resource* texture)
         if (!state.done) InterlockedIncrement(&textures_unreadable);
         if (console) return false;
         state.done = true;
+        state.staged = false;
         state.generation = generation;
         return true;
     }
@@ -1122,6 +1179,7 @@ bool upload_texture(Wrapper* self, Wrapper* resource, ID3D12Resource* texture)
         }
         std::memset(owned.cpu, 0, static_cast<std::size_t>(bytes));
     }
+    state.staged = false;
     require_state(self, texture, D3D12_RESOURCE_STATE_COPY_DEST);
     if (console) {
         for (UINT slice = 0; slice < slices; ++slice) {
@@ -1202,6 +1260,7 @@ bool upload_texture(Wrapper* self, Wrapper* resource, ID3D12Resource* texture)
     state.checked_frame = frame_number;
     state.tiled = tiled;
     state.done = true;
+    state.staged = true;
     InterlockedIncrement(&textures_uploaded);
     InterlockedExchangeAdd(&texture_bytes_uploaded, static_cast<LONG>(total >> 10));
     static LONG shown;
@@ -1460,10 +1519,11 @@ IndirectBufferView indirect_table_buffer(Wrapper* self, const std::uint32_t* wor
             return {};
         }
         const auto placed = placed_buffer_range(device, address, bytes);
-        if (placed.reject || !placed.alias || (owner && owner != placed.owner)) return {};
+        if (placed.reject || !placed.owner || (owner && owner != placed.owner)) return {};
         owner = placed.owner;
-        native = placed.alias;
+        native = static_cast<ID3D12Resource*>(owner->own().real);
         offset = address - reinterpret_cast<u64>(owner->own().title_memory);
+        if (!placed.alias && (!native || !list_copied_gpu_range(self, native, offset, bytes))) return {};
     } else if (owner && !owner->own().title_memory) {
         native = static_cast<ID3D12Resource*>(owner->own().real);
         D3D12_HEAP_PROPERTIES props{};
@@ -1831,11 +1891,15 @@ bool draw_translated(Wrapper* self, bool indexed, UINT count, UINT instances, UI
             const D3D12_INDEX_BUFFER_VIEW view{upload_ring->GetGPUVirtualAddress() + offset, static_cast<UINT>(bytes),
                                                index_bytes == 2 ? DXGI_FORMAT_R16_UINT : DXGI_FORMAT_R32_UINT};
             list->IASetIndexBuffer(&view);
+            const auto red_samples = red_producer_draw_before(self, list, "translated-draw", tr->key);
             list->DrawIndexedInstanced(count, instances ? instances : 1, 0, 0, start_instance);
+            red_producer_draw_after(self, red_samples);
             drawn = true;
         }
     } else {
+        const auto red_samples = red_producer_draw_before(self, list, "translated-draw", tr->key);
         list->DrawInstanced(rect ? count / 3 * 6 : count, instances ? instances : 1, 0, start_instance);
+        red_producer_draw_after(self, red_samples);
         drawn = true;
     }
     if (scoped_stencil_ref) list->OMSetStencilRef(pass.stencil_reference);

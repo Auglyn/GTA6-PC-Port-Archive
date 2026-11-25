@@ -1,5 +1,37 @@
 # Experiment notes and reproduction commands
 
+## Present color producer trace
+
+Set `X2W_RED_PRODUCER_AUTO=3700,12` and `X2W_PRESENT_SIGNATURE_EVERY=1` to sample the
+title-selected RGBA8 presentation texture. `X2W_RED_PRODUCER_RGB=255,0,255` selects a
+specific RGB triplet. The default match is `255,0,0`. A transition to the match at or
+after present 3700 arms the next 12 frames after the sample is published. The log also
+reports up to 64 earlier recording identities for the known presentation targets.
+Use `X2W_RED_PRODUCER_FRAMES=4100,4110` for an explicit frame window.
+
+The producer rows report one RGBA8 texel before and after a clear or supported
+graphics draw to a known present target. They include the submitting queue and
+operation order. Present samples use the same texel, and attachment rows identify
+the bound render targets and depth view. A queue fence guards the readbacks.
+Recording history gives candidate commands. Attribution requires a completed
+producer read and a matching presentation resource. The trace covers direct-list
+graphics writes to previously seen single-sample present targets. Compute writes,
+alias writes and resources upstream of those targets require separate evidence.
+The diagnostic retains up to eight present resources and 512 paired readbacks in
+an opted-in process.
+
+`startup_present_producer` uses a 16×16 source-built texture and known clears. It
+checks exact colors on both sides of each clear, compared to subsequent presents,
+then resubmits the closed recording and reverses the writes. The automatic cases
+check red and magenta, ignore an early exact match and a later near match, and
+refuse an out-of-range RGB component. Run the WARP and hardware checks separately
+when reporting adapter results.
+
+```powershell
+cmake --build --preset dev --target startup_present_producer
+ctest --preset dev --no-tests=error -R '^startup_present_producer_(warp|hardware)$' -V
+```
+
 ### Translated indirect triangles
 
 `X2W_TRANSLATED_INDIRECT_DRAW=1` lets a slot 57 cached translation record one non-indexed
@@ -30,6 +62,25 @@ leaves the target clear. A second compute writer supplies distinguishing colours
 The table's nonzero offset and stride select the second colour, the short view reads zero, and a
 non-aliased placement is refused. A raw descriptor over a recording-owned upload page reads the
 same colour and refuses a view that crosses its allocation.
+
+### Same-recording GPU copies used by an indirect draw
+
+`X2W_TRANSLATED_INDIRECT_COPY_RANGES=1` enables a bounded handoff from slot 15
+`CopyBufferRegion` to the translated indirect draw. The latter still requires
+`X2W_TRANSLATED_INDIRECT_DRAW=1`. A copied placed buffer qualifies only when one
+validated GPU copy in the current recording completely supplied the requested view.
+The source is a same-device desktop resource with no title shadow, a unique alias,
+or an already covered range. Later overlapping copies invalidate earlier coverage.
+The recording discards this proof at Close, so another recording needs its own writer.
+
+The source-built fixture reproduces a 68-byte request shape with source offset `0xbfffa0`.
+Its compute writer fills the source with contrasting colours. The consumer reads red
+from the second DWORD in the destination while the title-side green sentinel stays
+unchanged. The disabled feature, a new recording using the same destination, a copy
+of only 64 bytes, and an unproven overlapping write all leave the target clear.
+
+Run `cmake --build --preset release --target startup_indirect_draw_indexed` and
+`ctest --preset release -j1 --no-tests=error -R '^startup_indirect_copy_provenance_' -V`.
 
 ### Packed pixel position in a source-built shader
 
@@ -2841,9 +2892,13 @@ A function may use its stack frame. A forward pass over the control-flow graph g
 
 `cpu_aot_stack_frames` builds [`frame.asm`](../tests/cpu/frame.asm), with the unwind directives each prologue needs, and translates nine exports. `push_loop` pushes and pops RBX and RSI and uses them in a loop. `spill_widths` allocates 24 bytes, stores 8, 4, 2 and 1 bytes, reads them back in overlapping pieces, adds to a slot in place, and uses `SETB` into the frame and `CMOVL` from it. `home_save` has the MSVC `/O2` shape: it saves RBX and RSI into home space with `MOV [RSP+8], RBX` and `MOV [RSP+10h], RSI` before `PUSH RDI` and `SUB RSP, 20h`, restores them with `MOV` on each of two returns, and carries the unwind codes MSVC writes for that prologue. `home_args` is the `cl /Od` output for a small C function that stores its arguments to home space, writes a local on both sides of a branch and reloads it. `two_paths` pushes RSI on one path and RDI on the other, rejoins at the same depth, and returns early on a third path after restoring RBX. `home_spill` spills two arguments into home space with no allocation of its own, and `loop_counter` keeps a counter and an accumulator in the frame across a loop's back edge. `realloc_slot` releases its allocation with `ADD RSP`, allocates the same bytes again and writes the slot before reading it. `frame_bound`, whose frame array is exactly 4,096 bytes, is translated and compiled but never called. Through the register probe, each original and translated export is compared with a Python reference over the direct-call input pairs, on the return value, the guarded trace, RBX and RSI, and every path of each export is taken. The probe shows that the original saves and restores RBX and RSI and that the translation leaves the caller's RBX and RSI intact. It does not show that the translation reproduces the original's save and restore: the generated locals are not the physical registers, and the host compiler saves and restores those itself. The test checks that the built source is the translation of the export list, that each frame array has the expected size, and that `rsp` appears nowhere in the generated C++. Thirty-two controls must be rejected. Twenty-six are copies of the image with one or two instructions replaced by others of the same length: an unbalanced `POP`, two paths that join at different depths, a loop that pushes on every iteration, a nonvolatile register not restored on one path, restored from another register's slot by `MOV` or by `POP`, or loaded into RAX from its save slot, a local written on one path only, home space never written, a 4-byte store removed under a later 8-byte read, a loop counter written only on the back edge, a stack argument at entry RSP + 40, a read and a write of the return address, `LEA RAX, [RSP+8]`, `MOV RAX, RSP`, `SUB RSP, RCX`, `SUB` and `ADD RSP` by 14h, `ADD RSP` at entry, a `JAE` left reading the flags of `SUB RSP`, an access below RSP, a frame of 4,112 bytes, `realloc_slot` without the store into its second allocation, `ADD RBX, RCX` on the caller's RBX, `PUSH RAX` and `PUSH 5`. The six others are exports rejected as written: a saved RBX whose slot is released by `ADD RSP` and allocated again before `POP RBX`; a slot that `POP` read and released, allocated again and read without a new store; a RIP-relative address spilled to the frame and reloaded, refused at the store as a read of an undefined register; RBX saved twice and reloaded from the 8 bytes that straddle the two copies; RBX pushed as data after only BL was written; and a register read after `POP` restored it. With MSVC 14.52 `cl`, `link` and `ml64` run under Wine on Linux, 1,992 calls per side matched and every control was rejected. The Windows job runs the same test. Run `ctest --preset dev --no-tests=error -R '^cpu_aot_stack_frames$' -V`.
 
-The same translator follows direct calls and tail jumps to other functions of the image ([#317](https://github.com/R0Y00/Xbox2Windows/issues/317), step 2). A `CALL rel32`, or a direct `JMP` that leaves the function's owned ranges, must target a function entry of this image: the first byte of a verified primary runtime function (an unchained `.pdata` record with version 1 or 2 unwind data and a non-empty interval in executable code), or a non-forwarded code export in an executable section that lies outside every runtime-function interval. The start of a chained secondary range, an interior label (exported or not), a record start with any other unwind header, a forwarded export and a data export are not entries, and the message says which of these the target is. Each callee is translated once into the same source, as a static function named `fn_<rva>` that takes RCX, RDX, R8 and R9, and is defined before its first caller. A call to the caller's own entry is rejected as self-recursion and any longer cycle as mutual recursion. A caller is rejected when any callee is, and the message names the callee's RVA and its reason. A callee records how many low bytes of each argument register it may read while that register may still hold its entry value, and the caller must have those bytes defined at the call. After a call, RAX has the callee's return width of defined bytes. RCX, RDX and R8 to R11, the flags and the callee's 32-byte home space at RSP are undefined. The return address the `CALL` pushes and the callee's own frame lie below RSP, where the frame proof already holds every byte unwritten, because the bytes that `ADD RSP` and `POP` leave below RSP become unwritten; so they stay undefined if RSP later falls back over them. Nonvolatile registers keep their state, because each callee is itself checked to restore every one, and so do the other frame bytes, including saves by `MOV` into the caller's own home space above entry RSP, which the callee's home space cannot reach. RSP must be 8 mod 16 from entry at a call, so the native call is aligned, and the callee's home space must lie below the return address. A tail jump is checked like a `RET`, with RSP at its entry value and every nonvolatile register restored, and contributes the callee's return width. The callee's frame is its own array, so no frame address crosses a call. A frame address passed to a callee (`LEA RCX, [RSP+20h]`), stack arguments, indirect calls, callees with no reachable normal return, import thunks, and targets with no unwind entry or export (such as leaves that MSVC emits without `.pdata`) unless the invoker binds them as described below, stay rejected.
+The same translator follows direct calls and tail jumps to other functions of the image ([#317](https://github.com/R0Y00/Xbox2Windows/issues/317), step 2). A `CALL rel32`, or a direct `JMP` that leaves the function's owned ranges, must target a function entry of this image: the first byte of a verified primary runtime function (an unchained `.pdata` record with version 1 or 2 unwind data and a non-empty interval in executable code), or a non-forwarded code export in an executable section that lies outside every runtime-function interval. The start of a chained secondary range, an interior label (exported or not), a record start with any other unwind header, a forwarded export and a data export are not entries, and the message says which of these the target is. Each callee is translated once into the same source, as a static function named `fn_<rva>` that takes RCX, RDX, R8 and R9, and is defined before its first caller. A call may close a call cycle, as described below. A caller is rejected when any callee is, and the message names the callee's RVA and its reason. A callee records how many low bytes of each argument register it may read while that register may still hold its entry value, and the caller must have those bytes defined at the call. After a call, RAX has the callee's return width of defined bytes. RCX, RDX and R8 to R11, the flags and the callee's 32-byte home space at RSP are undefined. The return address the `CALL` pushes and the callee's own frame lie below RSP, where the frame proof already holds every byte unwritten, because the bytes that `ADD RSP` and `POP` leave below RSP become unwritten; so they stay undefined if RSP later falls back over them. Nonvolatile registers keep their state, because each callee is itself checked to restore every one, and so do the other frame bytes, including saves by `MOV` into the caller's own home space above entry RSP, which the callee's home space cannot reach. RSP must be 8 mod 16 from entry at a call, so the native call is aligned, and the callee's home space must lie below the return address. A tail jump is checked like a `RET`, with RSP at its entry value and every nonvolatile register restored, and contributes the callee's return width. The callee's frame is its own array, so no frame address crosses a call. A frame address passed to a callee (`LEA RCX, [RSP+20h]`), stack arguments, indirect calls, callees with no reachable normal return, import thunks, and targets with no unwind entry or export (such as leaves that MSVC emits without `.pdata`) unless the invoker binds them as described below, stay rejected.
 
-`cpu_aot_direct_calls` builds [`calls.asm`](../tests/cpu/calls.asm) and translates seven exports, which reach three unexported callees placed below them. `call_leaf` calls a leaf from a frame and keeps the trace pointer in RBX across the call. `chain3` calls `mid_step`, which spills RDX into its own frame above the callee's home space, calls the same leaf and reloads it, so the leaf is shared. `narrow_call` calls a callee that defines only AL and widens it with `MOVZX`. `narrow_tail` tail-jumps to that callee and reports width 1, `tail_call` tail-jumps to the leaf, and `tail_after_frame` pops its frame before tail-jumping to `mid_step`. `home_save_call` has the MSVC `/O2` save shapes around a call: RBX saved by `MOV` into its own home space before `SUB RSP, 28h`, and RSI saved by `MOV` into the allocation above the callee's home space. Through the register probe, the original must match a Python reference, and the translation must match the original on the defined return bytes, the guarded trace, RBX and RSI over 545 input pairs per export. The test checks that each callee is defined exactly once and that the reported return widths are 8 except for `narrow_tail`. Twenty copies must be rejected with their stated reason: a call to the caller's own entry, a call from `mid_step` back to `chain3`, calls into an instruction interior and to an instruction boundary that is not an entry, a target outside the image and one in `.rdata`, reads of RCX, R8 and the full RAX after a call, a second call to the leaf whose RCX and RDX the first call left undefined, a `SETE` after a call, a stack-argument read in a callee and an unsupported instruction two levels down, a spill and a `MOV` save of RSI moved into the callee's home space and reloaded after the call, a call at entry RSP - 0x30 and one at entry RSP - 0x8, a tail jump with a frame still allocated, a tail jump with RBX not restored, and, as built, `below_call`, which stores a slot at entry RSP - 0x40, raises RSP for a call whose return address overwrites it, and reloads it after RSP falls back (natively it returns the return address). Removing the volatile clobber accepts the RCX control, keeping RAX fully defined after a call accepts the narrow control, keeping the callee's home space defined accepts the spill control, dropping the callees' argument demands accepts the second-call control, translating a shared callee again for each caller emits it five times (and the C++ fails with `C2084`), and naming the wrong callee at a call fails `chain3`. On Windows 11 build 26200 with MSVC 19.50 and ML64, all 3,815 calls matched and every control was rejected. The C++ generated for the existing jump-table, `addr32`, entry-order, narrow, fourth-argument and frame fixtures is unchanged. Run `ctest --preset dev --no-tests=error -R '^cpu_aot_direct_calls$' -V`.
+`cpu_aot_direct_calls` builds [`calls.asm`](../tests/cpu/calls.asm) and translates seven exports, which reach three unexported callees placed below them. `call_leaf` calls a leaf from a frame and keeps the trace pointer in RBX across the call. `chain3` calls `mid_step`, which spills RDX into its own frame above the callee's home space, calls the same leaf and reloads it, so the leaf is shared. `narrow_call` calls a callee that defines only AL and widens it with `MOVZX`. `narrow_tail` tail-jumps to that callee and reports width 1, `tail_call` tail-jumps to the leaf, and `tail_after_frame` pops its frame before tail-jumping to `mid_step`. `home_save_call` has the MSVC `/O2` save shapes around a call: RBX saved by `MOV` into its own home space before `SUB RSP, 28h`, and RSI saved by `MOV` into the allocation above the callee's home space. Through the register probe, the original must match a Python reference, and the translation must match the original on the defined return bytes, the guarded trace, RBX and RSI over 545 input pairs per export. The test checks that each callee is defined exactly once and that the reported return widths are 8 except for `narrow_tail`. A copy with a call to the caller's own entry and one with a call from `mid_step` back to `chain3` must translate with a declared call cycle. Nineteen copies must be rejected with their stated reason: a call from `mid_step` back to `tail_after_frame`, which closes a cycle with that function's tail jump, calls into an instruction interior and to an instruction boundary that is not an entry, a target outside the image and one in `.rdata`, reads of RCX, R8 and the full RAX after a call, a second call to the leaf whose RCX and RDX the first call left undefined, a `SETE` after a call, a stack-argument read in a callee and an unsupported instruction two levels down, a spill and a `MOV` save of RSI moved into the callee's home space and reloaded after the call, a call at entry RSP - 0x30 and one at entry RSP - 0x8, a tail jump with a frame still allocated, a tail jump with RBX not restored, and, as built, `below_call`, which stores a slot at entry RSP - 0x40, raises RSP for a call whose return address overwrites it, and reloads it after RSP falls back (natively it returns the return address). Removing the volatile clobber accepts the RCX control, keeping RAX fully defined after a call accepts the narrow control, keeping the callee's home space defined accepts the spill control, dropping the callees' argument demands accepts the second-call control, translating a shared callee again for each caller emits it five times (and the C++ fails with `C2084`), and naming the wrong callee at a call fails `chain3`. On Windows 11 build 26200 with MSVC 19.50 and ML64, all 3,815 calls matched and every control was rejected. The C++ generated for the existing jump-table, `addr32`, entry-order, narrow, fourth-argument and frame fixtures is unchanged. Run `ctest --preset dev --no-tests=error -R '^cpu_aot_direct_calls$' -V`.
+
+A `CALL` may close a call cycle ([#317](https://github.com/R0Y00/Xbox2Windows/issues/317), the fixed-point `return_width` proposed there). An export's call to its own entry translates that entry a second time as an internal function. A call into a function whose translation is in progress uses an assumed summary, at first 8 defined RAX bytes and no argument demands. When a function of the cycle is done, its computed return width and demands are compared with the assumed ones: if the computed width is lower or a demand is higher, the cycle is translated again from the lower width and the higher demands. Both move one way through a finite set, so this ends. When no computed width is lower and no demand is higher, every return of the cycle defines the assumed bytes and the cycle reads no more argument bytes, by induction on the depth of the calls that have returned. The functions of a cycle are kept together once its first function is done, after a declaration of each, so each may call any other. A cycle inside another is kept when its own first function is done. A function that goes on hold passes its dependence on to the functions held during its translation, so a later function that reuses one of them joins the same cycle. A refusal under an assumed summary stands, because a lower width or a higher demand cannot remove it. A tail jump that closes a cycle is refused with `tail jump within a call cycle`: the original runs such a cycle in constant stack and the C++ call does not. The translation's recursion depth is bounded by the host stack, whose use per call differs from the original's, so a recursion that ends on the console can overflow the host stack, or the reverse.
+
+`cpu_aot_recursion` builds [`recursion.asm`](../tests/cpu/recursion.asm) and translates four exports. `sum_export` calls `sum_down`, which recurses through `CALL` up to 511 levels and keeps its arguments in RBX and RSI across the call. `parity_export` calls `is_even` and `is_odd`, which call each other. `is_even` defines only AL at its base case and `is_odd` all of RAX, so only the second translation of the cycle gives `is_odd` its 1-byte width. `walk_export` calls `walk_a`, which is in a cycle with `walk_b` and `walk_c`. Only `walk_a` reads R8, so only the second translation makes `walk_c` demand it; `walk_b` also calls `count_down`, whose own cycle is kept while the outer cycle is still being translated. `fold_export` calls its own exported entry up to 64 levels. Through the register probe, the original must match a Python reference, and the translation must match the original on the return value, the guarded trace, RBX and RSI over 484 input pairs per export. The test checks that each of the eight internal functions is declared once and defined once, that `is_even` and `is_odd` return 1 byte and the others 8, and that exactly `walk_a`, `walk_b`, `walk_c` and the internal `fold_export` demand R8. Five exports must be refused as written: `tail_ping` and `tail_pong`, a cycle of tail jumps; `wide_odd`, which reads all of RAX after `is_odd`; `lost_k`, which calls `walk_c` after another call left R8 undefined; `bad_a`, in a cycle with `bad_b`, which executes `CPUID`; and `stale_e`, whose callee `stale_a` reads all of RAX after `stale_t`. `stale_t` is translated after `stale_s` and `stale_q` are on hold and reuses `stale_q`, so it is in their cycle and returns only AL; a translator that keeps `stale_t` on its own, with the 8 bytes first assumed for the cycle, accepts `stale_e`. Keeping the first summary of each cycle instead of translating it again (the test replaces `at_least_as_good`) accepts `wide_odd` and `lost_k`, and the test fails unless it does. Before this change all four exports were refused, with `self-recursion` or `mutual recursion: call cycle`. Measured on Linux x86-64 with `llvm-ml` 18, `lld-link` and `clang++` at `-O0` and `-O2`, with the original image mapped in-process and called through a Windows x64 register probe: the original matched the reference and kept RBX and RSI, and 3,872 translated calls matched it. The C++ generated for 15 other `cpu_switch_aot` fixtures and for the `calls`, `chains` and `rsp` fuzz programs at their default seeds, `calls` at `0xBEEF` and `chains` at `0xCCD1` with 128 functions, is unchanged. Run `ctest --preset dev --no-tests=error -R '^cpu_aot_recursion$' -V`.
 
 `cpu_aot_call_entries` builds [`call_entries.asm`](../tests/cpu/call_entries.asm), whose `.pdata` and `.xdata` are written explicitly so the image has a primary function continued by a chained secondary range. It also exports an interior label of a primary function, a `.data` variable as `DATA` and a forwarder to `kernel32.GetTickCount`. The test reads the image's own records and checks that the translator's entries are exactly the four primary runtime functions. A framed `CALL` and a tail `JMP` to the primary leaf translate and match the original and a Python reference over 249 input pairs each. Eight retargeted copies must be rejected with the reason that names the distinction: the call retargeted to the exported interior label, the chained range's start, the data export and the forwarder; the tail jump retargeted to the interior label and the chained start; and the leaf's unwind header patched from version 1 to version 3, for both the call and the tail jump. The translator before this rule refused the first six later and for unrelated reasons (`no unique function interval`, `not in an executable section`, `edge outside owned ranges`), and accepted the last two. Removing the version check, or accepting an export at the start of an unverified record, accepts the version controls. Counting interior exports or chained ranges as entries, or classifying forwarders and data exports as code, fails the check of the entry table. Run `ctest --preset dev --no-tests=error -R '^cpu_aot_call_entries$' -V`.
 
@@ -3446,6 +3501,21 @@ exercise the existing CPU wave model.
 
 ### Bounded runtime mesh geometry lowering
 
+The two-wave64 model follows each wave to `s_endpgm`. Section 4.3 of the
+[AMD RDNA 2 ISA](https://www.amd.com/content/dam/amd/en/documents/radeon-tech-docs/instruction-set-architectures/rdna2-shader-instruction-set-architecture.pdf)
+specifies that later barriers wait for the remaining live waves. The static
+and runtime-geometry checks require both waves to meet at the same barrier PC
+while both are live. In the early-exit fixture both reach one barrier, wave 1
+branches to the exit, and wave 0 reaches two more barriers and emits geometry.
+Changing the branch to a different barrier makes the two live waves wait at
+different PCs and both lowerers refuse it. The triangle and quad draws below
+check 1,024 pixels each, including the area covered only by the second triangle.
+In the reverse order, wave 0 allocates 68 vertices and reaches the exit after
+exporting vertices 0–63. Wave 1 passes one more barrier and writes vertices
+64–67. The second triangle uses vertex 67 for its top-right corner. Giving
+it the position of vertex 2 collapses the triangle and changes 528 pixels.
+The CPU check also runs the waves in both host evaluation orders.
+
 [`tools/mesh_dynamic_aot.py`](../tools/mesh_dynamic_aot.py) emits one desktop
 mesh shader for a two-wave64 triangle entry. It splits runtime input cases
 at scalar equality tests and reruns the existing wave model for each case.
@@ -3469,6 +3539,51 @@ adds two controls. Windows WARP with the D3D12 debug layer enabled matched
 all 1,024 pixels for each of the eight cases. Physical hardware and startup
 pipeline integration remain open in [#1760](https://github.com/R0Y00/Xbox2Windows/issues/1760).
 [Windows verification](https://github.com/avt0m4t48/Xbox2Windows/actions/runs/45485172952)
+
+### Sampler heap samplers in bounded runtime mesh
+
+With `--sampler-heap-sgpr <n>` (off by default), `tools/mesh_dynamic_aot.py`
+lowers `image_sample_lz` of a 2D texture whose sampler is loaded from the sampler
+heap. Entry SGPR `s<n>` holds the 32-bit heap base. The sampler is
+`s_load_dwordx4` from that base (zero high word) plus a constant offset, or plus a
+register offset that every input case makes concrete through the existing
+geometry-word comparisons. The shader reads the table that `gfx2hlsl.py` uses
+with `X2W_SAMPLER_HEAP=1` ([#1217](https://github.com/R0Y00/Xbox2Windows/pull/1217),
+[#1237](https://github.com/R0Y00/Xbox2Windows/pull/1237)):
+`SamplerState qh[2048] : register(s0, space1)`, entry n at byte offset 16 n,
+entry 2047 reserved for the host fallback. The texture descriptor is the eight
+words at byte `0x40` of the `s17` table and becomes `Texture2D<float4> meshTexture
+: register(t1)`.
+
+Refused by name: an offset that still depends on an unknown geometry word, a
+constant offset that is not a 16-byte entry below 2047, a sampler word changed
+after the load, a heap word mixed with another value by `s_cselect`, a sampler
+operand that no longer holds the four words of one load, static sampler words,
+arithmetic on the heap base, a non-zero high address word, other image
+instructions and image modifiers. `s_mov` copies of the loaded words are kept.
+
+`tests/mesh_heap_sampler.s` is a source-built quad whose PARAM0 is one sample of a
+4x1 RGBA8 texture with a 2x1 second level at (1.25, 0.5). Geometry word 0 = `0x10`
+or `0x20` is the register offset; any other word takes the constant offset `0x30`.
+The four heap entries differ in address mode (wrap, clamp) and LOD clamp
+(`MIN_LOD` 0 or 1), so each path reads a different texel. Entry 0 holds zero words,
+the sampler of `gfx2hlsl.py`'s default shortcut. The expected colors come from an
+independent model of the program's control flow and of the sampler fields.
+
+```sh
+python -B tests/mesh_heap_sampler_check.py
+python -B tests/mesh_heap_sampler_check.py binary llvm-mc-15 llvm-objcopy-15 libLLVM-15.so.1
+ctest --preset dev --no-tests=error -R "^mesh_heap_sampler_" -V
+```
+
+The CPU mode also removes each guard in turn (offset alignment and range, bounded
+offset, four words of one load) and requires the check to fail. The draw mode reads
+back five inputs, then three controls that must change the readback: entries 1
+and 2 swapped in the table, the translated shader with every entry replaced by
+entry 0 (the default sampler), and the bounded-offset guard removed from a
+program whose constant path loads through the register instead. The fixture
+decodes `MIN_LOD` and `MAX_LOD` from sampler word 1 itself; the stand-in's
+`decode_sampler` does not read them yet.
 
 ### Constant-lane scalar spills in bounded mesh
 
@@ -4710,9 +4825,30 @@ compares all 320 output words each time. The stale reference fails on exactly
 eight stored words. The binding is limited to unsigned 32-bit words and fixed
 byte offsets.
 
+### Mesh containers with two reachable exits
+
+The static and runtime-geometry mesh CLIs pass the gfx1013 wave64 profile to
+the bounded FSSM extractor. For two decoded `s_endpgm` instructions it follows
+direct branches from the entry and checks that both exits are reachable. A
+mesh allocation message and `s_barrier` fall through in this control-flow
+check. The wave model subsequently verifies allocation, synchronization and
+exports. The allocation message is required for this two-exit mesh profile.
+
+In the source-built fixture both waves reach the allocation barrier. Wave 1
+then ends, and wave 0 skips that exit and emits a quad. Both CLIs must emit
+the same HLSL as the single-exit version. Run the binary and draw checks with:
+
+```sh
+python -B tests/mesh_two_exits_check.py binary llvm-mc-15 llvm-objcopy-15 libLLVM-15.so.1
+ctest --preset dev --no-tests=error -R '^mesh_two_exits_(warp|hardware)$' -V
+```
+
+The draws require LLVM 15, DXC and a mesh-capable adapter. Each lowering
+matches 1,024 pixels and rejects the triangle reference at exactly 528 pixels.
+
 ### Compute programs with two exits
 
-Compute programs (stage 5) now use the [pixel two-exit check](#pixel-programs-with-two-exits) from #477 when LLVM is supplied. Only exactly two aligned `s_endpgm` markers qualify. One marker is unchanged, three or more are rejected, and mesh programs (stage 13) with more than one marker are still rejected. `compute_store_aot.py` now passes `--llvm` to the extractor, and `shader_profile_audit.py` already did. This step extracts the code span only. The store profile does not lower branches, so a two-exit program now stops at its first unsupported instruction instead of at extraction.
+Compute programs (stage 5) use the [pixel two-exit check](#pixel-programs-with-two-exits) from #477 when LLVM is supplied. Only exactly two aligned `s_endpgm` markers qualify for this check. `compute_store_aot.py` passes `--llvm` to the extractor, as does `shader_profile_audit.py`. This step extracts the code span only. At the time of this experiment the store profile stopped at its first unsupported branch.
 
 The fixtures are original kernels compiled with LLVM 15 and reassembled with `llvm-mc-15`:
 
@@ -8232,20 +8368,44 @@ counts. It requires a direct list and a desktop mesh and pixel pipeline using
 an empty root signature, one matching single-sample color target, a viewport,
 and a scissor. Producers that bypass wrapper state tracking return the argument
 buffer to `COMMON` before slot 61. The mesh path uses the record's group counts
-without binding an input assembler topology or an index buffer. Amplification
-and console shader pipelines are tracked in
+without binding an input assembler topology or an index buffer. Slot 86 accepts
+desktop DXIL mesh programs under desktop tag 25 or console tag 24. Tag 24 with
+desktop amplification DXIL stays an amplification subobject and requires a
+desktop mesh stage. Any other payload under the shared tag is refused. Translation
+of console shader programs and support for other console mesh paths are tracked in
 [#1759](https://github.com/R0Y00/Xbox2Windows/issues/1759) and
 [#1760](https://github.com/R0Y00/Xbox2Windows/issues/1760).
 
 The fixture writes its group counts at byte offset four on the GPU and checks
 all eight pixels and the surrounding argument words. One group paints the
 left half. Two groups paint both halves. An omitted writer, a short argument
-range, and a missing viewport each leave the target clear. Adapters without
-mesh shader support report a capability skip.
+range, and a missing viewport each leave the target clear. The console tag
+fixture repeats the readback with a mesh program under tag 24 and checks that
+a pixel program under the same tag leaves the target clear. The amplified
+fixture passes a group index through an amplification payload and checks the
+same pixels. Adapters without mesh shader support report a capability skip.
+
+A decoded indirect mesh command can publish a fixed slot 57 pipeline as a
+separate translation request. The descriptor must have a mesh program, an
+empty vertex slot, and a recorded root signature that matches the bound
+root. The pixel program is optional for depth-only work. The cache stores
+the root in `.root`, the pixel program (or an empty file) in `.ps57`, and
+writes the mesh program last in `.m57`. The offline reader validates the
+request key and stage exports. It reports unsupported mesh code and leaves
+the dispatch unforwarded until mesh code emission and binding are available.
+The request fixture checks paired and mesh-only requests, duplicate
+publication, a mismatched root, a populated vertex slot, and an incomplete
+pixel span.
 
 ```powershell
 cmake --build --preset release --target startup_indirect_draw_indexed
-ctest --preset release --no-tests=error -R '^startup_indirect_mesh_(warp|hardware)$' -V
+ctest --preset release --no-tests=error -R '^startup_indirect_mesh_request_' -V
+.\out\pe-env\Scripts\python.exe -B tests/startup_gfx2hlsl_watch_check.py
+```
+
+```powershell
+cmake --build --preset release --target startup_indirect_draw_indexed
+ctest --preset release --no-tests=error -R '^startup_indirect_mesh_' -V
 ```
 
 On Windows build 26100, WARP 10.0.26100.33648 with the debug layer enabled
@@ -8253,6 +8413,13 @@ passed all four indirect fixtures. The baseline rejected the mesh shader stream
 and left the first mesh case clear. Physical adapter coverage is pending.
 [Candidate run](https://github.com/avt0m4t48/Xbox2Windows/actions/runs/45487176129)
 [Negative control](https://github.com/avt0m4t48/Xbox2Windows/actions/runs/45486140968)
+
+The slot 86 tag checks passed on Windows 11 build 26200.9974 with WARP
+10.0.26100.9818 and GeForce RTX 4060 Laptop GPU driver 32.0.16.1656, both
+with the debug layer enabled. Each mesh tag and the amplification payload
+produced 4/8 and 8/8 colored pixels for one and two groups. Pixel DXIL under
+tag 24 left 0/8 colored pixels on both adapters. The previous shim rejected
+the new console-tag fixture on WARP and left 0/8 colored pixels.
 
 #### D3D12.X graphics command list (XCL-12)
 
@@ -9226,6 +9393,63 @@ cmake --build --preset dev --target xmem_startup_below_40_check
 ctest --preset dev --no-tests=error -R '^xmem_startup_below_40' -V
 ```
 
+### Mapped pages committed on first touch
+
+Experimental, for [#1199](https://github.com/R0Y00/Xbox2Windows/issues/1199). Physical pages are 64 KiB slots of `SEC_RESERVE` slabs (see [Startup memory accounting](startup-runtime.md#startup-memory-accounting)). By default a fresh slot is committed when its page is first mapped. A startup run maps far more pages than it touches before the main load, and slab commit is charged to the system commit limit, not to the process. On a 16 GB host this pushes the system to its commit limit during the load.
+
+`X2W_XMEM_LAZY_COMMIT=1` leaves a fresh slot uncommitted when its page is mapped. The first CPU access faults, and a vectored exception handler installed when `xmem.dll` loads commits that slot and resumes the thread. A thread that loses the race to commit the same slot finds it committed and retries once. If the handler cannot be installed, the switch acts as off: pages are committed when they are mapped and no import is wrapped. GPU-view addresses resolve to the CPU-view slot (the same section). Reused slots and `x2w_xmem_write_physical` still commit before use, as before.
+
+Some writers cannot fault a slot in, so they commit the range first through the experimental export `x2w_xmem_commit_range(address, bytes)`:
+
+- **Kernel-mode I/O.** `ReadFile` into an uncommitted mapped page fails with `ERROR_NOACCESS` instead of faulting. The main module's `ReadFile` import is wrapped to commit the buffer first. Only that import is wrapped. Other kernel-mode accessors of an untouched page fail the same way: `ReadFileEx`, overlapped reads issued elsewhere, `WriteFile` from a lazy page, and calls from other modules' imports. The startup runs reached only the main module's `ReadFile`.
+- **GPU placement.** Device slot 133 commits a placed buffer's range before it measures the allocation.
+- **Stand-in writes behind a commit check**, such as the DirectStorage destination check.
+
+Without the switch, nothing changes: no handler is installed, no import is wrapped, and `x2w_xmem_commit_range` returns TRUE.
+
+Measured in startup runs on Windows 10 22H2 (16 GB RAM, RTX 3080 Ti), same build and input, two runs each, with `-MemoryGiB 16`: system commit stayed about 5 GiB lower from 20 s to 170 s (23.3–24.6 GiB against 29.0–29.5 GiB), and 1.6 to 3.1 GiB lower in the late load, when most mapped pages have been touched. The process's own commit charge was the same with and without the switch. Where a run ends was not changed: on that host the late load also reaches the process commit cap.
+
+| CTest case | Inputs and checks |
+|---|---|
+| `xmem_lazy_commit` | With the switch: mapping 1,024 pages (64 MiB) grows system commit by less than 24 MiB, and the pages stay `MEM_RESERVE`. A CPU write commits only its page, reads back, and the rest of the page reads zero. `ReadFile` into an untouched page fails with `ERROR_NOACCESS`; after `x2w_xmem_commit_range` the same read succeeds. Eight threads writing to the same 32 untouched pages at once all succeed. Released pages are zero-filled when their slots are reused. |
+| `xmem_lazy_commit_off` | Control, with `X2W_XMEM_LAZY_COMMIT=0`: the same 1,024-page mapping commits every page when it is mapped (system commit grows by about 64 MiB), and `x2w_xmem_commit_range` returns TRUE. |
+
+The other `xmem_` cases run without the switch and check that the default path is unchanged.
+
+```powershell
+cmake --build --preset release --target xmem_shim
+ctest --preset release --no-tests=error -R '^xmem_' -V
+```
+
+### Startup blocks committed on first touch
+
+Experimental, for [#1199](https://github.com/R0Y00/Xbox2Windows/issues/1199), on top of [Mapped pages committed on first touch](#mapped-pages-committed-on-first-touch). The [startup commit profile](#reserve-and-commit-startup-blocks) commits each block in full when it is allocated. Several of those blocks are large, and the title touches them gradually. Their commit is charged to the process, so in a startup run with `-MemoryGiB 16` the late load reaches the job's commit cap.
+
+`X2W_XMEM_LAZY_STARTUP=1` takes effect only together with `X2W_XMEM_LAZY_COMMIT=1`. Blocks of 32 MiB and up from the startup commit profile are then reserved and recorded, with the same alignment and size as before. The same vectored exception handler commits the 256 KiB chunk a first access touches. A thread that finds its chunk already committed by another thread retries once. `x2w_xmem_commit_range` also commits the chunks behind a range in such a block, so the `ReadFile` wrapper and the stand-in writers above keep working.
+
+- **GPU placement.** A GPU heap opened on a block covers the committed run from its base and is reused for later resources in that block. So device slot 133 calls the experimental export `x2w_xmem_commit_block(address)` before a placed buffer is measured. It commits the whole block once and removes it from the list.
+- **Release.** The title releases these blocks through its `VirtualFree` import. The wrapper releases the block under the list's lock and removes it from the list only if the release succeeds, so a later allocation at the same addresses is never committed as part of the old block, and a refused release (a nonzero size, for instance) leaves the block reserved and still committed on first touch. The handler and `x2w_xmem_commit_range` hold the same lock from the lookup to the commit, so a release cannot run in between.
+- **Below 2^40.** Blocks placed by [`X2W_XMEM_STARTUP_BELOW_40`](#startup-blocks-below-240) stay committed up front.
+- **Smaller blocks** are committed as before. If the list cannot record a block, the block is committed in full instead.
+
+Measured in startup runs on Windows 10 22H2 (16 GB RAM, RTX 3080 Ti), same input, with `-MemoryGiB 16` and both switches:
+
+- **Process commit:** 10.8 GiB through startup (11.8 GiB with only `X2W_XMEM_LAZY_COMMIT`), and 14.7–15.1 GiB at 180 s (15.6 GiB).
+- **Without the 40-bit placement:** three runs out of three reached the BVH builder's address check described in [#1758](https://github.com/R0Y00/Xbox2Windows/issues/1758) without a commit failure. Earlier runs with neither switch or only the first one did so in one run out of six.
+- **With `-StartupBelow40`:** system commit had 3.75 GiB free at its peak, and the run reached the builder's upload allocation (command-list slot 148, #1758). In two runs without either switch, system commit fell to 0.74 and 1.03 GiB free before that point, and a host-side commit watchdog stopped them.
+
+| CTest case | Inputs and checks |
+|---|---|
+| `xmem_lazy_startup` | With both switches: a 64 MiB block of type `0x20403000` and a 32 MiB large-page block are reserved, the second 2 MiB aligned; a 16 MiB block is committed. A CPU write commits only its 256 KiB chunk, reads back, and the rest of the chunk reads zero. `ReadFile` into an untouched chunk fails with `ERROR_NOACCESS`; after `x2w_xmem_commit_range` over a range that crosses into the next chunk, the read succeeds. Eight threads writing to the same 32 untouched chunks at once all succeed. `x2w_xmem_commit_block` commits a whole block, a write to its last bytes succeeds, and an address outside the lazy blocks returns TRUE. |
+| `xmem_lazy_startup_off` | Control, with `X2W_XMEM_LAZY_STARTUP=0` and `X2W_XMEM_LAZY_COMMIT=1`: the same 64 MiB and 32 MiB blocks are committed when they are allocated, and `x2w_xmem_commit_block` returns TRUE. |
+| `xmem_lazy_imports` | Source-built ([`tests/xmem_lazy_imports_check.cpp`](../tests/xmem_lazy_imports_check.cpp)), because the import wrappers patch the main module, which is `python.exe` in the checks above. With both switches, the program's own `ReadFile` reads a file into a mapped page that was never touched, and the bytes match. A 64 MiB startup block is released through its own `VirtualFree` and the same addresses are reserved again; a read there must still fault, and the range must stay reserved. Without the commit in the `ReadFile` wrapper the read fails with `ERROR_NOACCESS`; without the list removal in the `VirtualFree` wrapper the handler commits the new reservation. A second block is released with a nonzero size, which fails with `ERROR_INVALID_PARAMETER`; a write to an untouched page must then still be committed, and the block is released with size 0. Removing the block before the release is known to succeed fails that write. |
+| `xmem_lazy_handler_failure` | The same program on the test-controls build, with `X2W_XMEM_TEST_LAZY_HANDLER_FAILURE=1` refusing the handler: a mapped page and a 64 MiB startup block must be committed and writable. Keeping the switch on without the handler leaves both reserved. |
+
+```powershell
+cmake --build --preset release --target xmem_shim xmem_shim_test_controls xmem_lazy_imports_check
+ctest --preset release --no-tests=error -R '^xmem_lazy' -V
+```
+
 ### Second commit and protection comparison
 
 `xmem_commit_protection` ([`tests/xmem_commit_protection_check.cpp`](../tests/xmem_commit_protection_check.cpp)) is a source-built x64 check for [#870](https://github.com/R0Y00/Xbox2Windows/issues/870) using synthetic 64 KiB page patterns. Its scope is separate from the first-commit alignment/zero-fill/rounding check (`xmem_committed_memory`), the reserve-only profile in [#888](https://github.com/R0Y00/Xbox2Windows/pull/888), and the device/queue work in [#874](https://github.com/R0Y00/Xbox2Windows/issues/874).
@@ -10072,6 +10296,10 @@ Get-FileHash "$out/fitted-8253.dds" -Algorithm SHA256
 ```powershell
 python -B tools/ttpf_batch_export.py $pool -o out/exported_dds --indices 0,8253 --allow-provisional --history "$out/history.json" --tools-path "$out/Leonida/tools"
 ```
+
+With `--allow-provisional`, an explicit `--history` file must contain a UTF-8 JSON object.
+If it cannot be read, the command exits with status 2 before updating any DDS file or the manifest.
+Omit `--history` to use the decoder's default provisional history.
 
 The batch exporter uses the native BCPack kernels when the selected Leonida tools provide them. The commands below stage the measured revision separately from the reference checkout above. Pass `--require-rust` to check that the library loads before the batch starts. Individual chunks can still use the reference decoder. [Leonida native backend](https://github.com/ItsNotRexed/Leonida/pull/5116)
 
@@ -12538,6 +12766,86 @@ in X, Y and Z, point XY and mip filtering, and `MIP_POINT_PRECLAMP` set.
 ```powershell
 cmake --build --preset release --target offscreen_check
 ctest --preset release --no-tests=error -R '^startup_image_gather_lz(_warp|_hardware)?$' -V
+```
+
+## Startup translator: fixed-mip 2D comparison gathers
+
+The startup pixel translator lowers gfx1013 `image_gather4_c_lz` for a 2D
+texture with three contiguous address registers: the comparison reference
+first, then `u` and `v`. Only red `dmask:0x1` is in contract, because
+`gather4_c` compares the resource's red component and Direct3D's
+`gather4_c` takes a single-component view. The four per-tap comparison
+results go to consecutive destination registers in the same order as the
+ordinary gather: lower left, lower right, upper right, upper left.
+
+The comparison function lives in the sampler's word 0 bits 14:12
+(`SQ_TEX_DEPTH_COMPARE`, NEVER through ALWAYS in D3D12 comparison order).
+D3D compares `reference {function} texel.R` and returns `0.0` or `1.0` for
+each tap. The translator binds the guest's own four sampler words as a
+`SamplerComparisonState` and writes `smpc N w0 w1 w2 w3`; it reuses
+`pixel_aot.check_gather_sampler(..., comparison=True)`, so the profile is a
+constant sampler with normalized coordinates, CLAMP_LAST_TEXEL in X and Y,
+bilinear XY, point mip filtering, zero MIN_LOD and bias, no anisotropy and
+no TRUNC_COORD. All eight comparison functions are accepted and each has its
+own manifest line. Cache-policy bits (`glc`, `slc`, `dlc`) do not change the
+compared value; MAX_LOD is accepted but never carried into the static
+sampler, because a fixed-mip gather never selects a level.
+
+Both the guest `_lz` instruction and Direct3D gather compare at mip zero of
+the bound view. For a view that starts at a later resource mip, view mip
+zero is that first visible mip. The lowering emits
+`t = r0.GatherCmp(q0, float2(F(u), F(v)), F(reference));` and writes
+`t.x` through `t.w` to the four destination registers after the gather is
+read, so overlapping address and destination registers keep their original
+operands.
+
+The translator does not decode the image descriptor's format. The verified
+fixture contract is a single-component 32-bit float depth view
+(`R32_FLOAT`) with the reference and texels in `[0, 1]`; that is also the
+format that advertises `D3D12_FORMAT_SUPPORT1_SHADER_GATHER_COMPARISON`
+(RGBA32_FLOAT does not). Reference quantization, denormal and NaN behavior
+outside that contract, console equivalence and title-level execution are not
+claimed. The implicit-LOD, explicit-LOD, offset, array and non-red forms,
+sampler heaps and non-constant samplers stay refused by name.
+
+The source-built fixture is assembled from gfx1013 with LLVM 15 and decoded
+through the startup decoder:
+`0xf13c0108 0x00c40400` for
+`image_gather4_c_lz v[4:7], v[0:2], s[16:23], s[24:27] dmask:0x1 dim:SQ_RSRC_IMG_2D`.
+`tests/startup_image_gather_c_lz_check.py` also compiles the translated
+stage as FXC `ps_5_1` and DXC `ps_6_0`, draws an 8×8 target with up to three
+view mips, and compares all 64 pixels and four channels bitwise against a
+CPU reference computed from the Direct3D gather footprint. The positive
+matrix distinguishes all four destination positions: each position has its
+own result sequence across the cases, and the check that requires four
+distinct sequences fails on an earlier matrix whose lower-right and
+upper-right references coincided. On WARP
+10.0.26100.9818 and an Intel Iris Xe Graphics (driver 31.0.101.5333) on
+Windows 11 build 26300, both compiler paths passed all 23 positive cases and
+all 8 output-sensitivity mutants with the debug layer enabled and zero errors
+or warnings. The evidence run keeps, for every executed case, its own
+generated HLSL, compiled object, sampler and resource manifest, texture data
+and renderer log. The
+refusal controls cover zero, multi-bit and non-red DMASK, non-2D dimensions,
+destination/address/descriptor widths and ranges, NSA, A16/D16/TFE/LWE/R128/
+unorm/reserved modifiers, malformed sampler words (15 sets) and the still
+refused gather variants. The control that removes the destination-width,
+red-DMASK or sampler-profile guard makes the corresponding malformed form
+translate, so the checks cannot pass without those guards. One sensitivity
+control swaps the lower-right and upper-right destination lanes in a
+temporary copy of the translated stage; it compiles, draws and is rejected
+by the comparator. The wrong-visible-mip control changes the expectation
+only and is not a wrong-SRV mutation. This is a bounded
+slice; the whole of the comparison-gather issue is not resolved, and the
+form-coverage denominator is unchanged.
+
+```powershell
+cmake --build --preset dev --target offscreen_check
+ctest --preset dev --no-tests=error -R '^startup_image_gather_c_lz(_warp|_hardware)?$' -V
+```
+
+```bash
+python3 -B tests/startup_image_gather_c_lz_check.py --llvm-mc llvm-mc-15
 ```
 
 ## Startup translator: per-lane bit operations

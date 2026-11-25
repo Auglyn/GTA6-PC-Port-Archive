@@ -520,33 +520,33 @@ fn execz_forward_guard(
     uniform_forward_guard(insns, branch_index, reduction_end, verified_reads)
 }
 
+/// Instruction ranges from the save-EXEC prologue through the EXEC restore.
+pub(super) fn reduction_regions(insns: &[Insn], width: u32)
+    -> impl Iterator<Item = (usize, std::ops::RangeInclusive<usize>)> + '_
+{
+    insns.iter().enumerate().filter_map(move |(first, ins)| {
+        if ins.op != DPP_REDUCE || ins.aux.imm != 0 {
+            return None;
+        }
+        let prologue_len = if matches!(ins.mnemonic.as_str(), "v_min_f32" | "v_max_f32") { 3 } else { 2 };
+        let start = masked_identity(&ins.mnemonic)
+            .and_then(|neutral| masked_prologue(insns, first, neutral))
+            .map_or_else(|| first - prologue_len, |(index, _, _)| index);
+        let restore = first + if width == 32 { 7 } else { 9 };
+        Some((first, start..=restore))
+    })
+}
+
 /// Validate fixed-width reductions and return EXECZ instruction indices whose
 /// masked region and whole-wave arrival permit a wave-wide empty-EXEC vote.
 pub(super) fn check_control_flow(insns: &[Insn], width: u32) -> Result<BTreeSet<usize>, String> {
     let mut execz_guards = BTreeSet::new();
     let mut verified_reads = Vec::new();
-    for (first, ins) in insns.iter().enumerate() {
-        if ins.op != DPP_REDUCE || ins.aux.imm != 0 {
-            continue;
-        }
-        let prologue_len = if matches!(ins.mnemonic.as_str(), "v_min_f32" | "v_max_f32") {
-            3
-        } else {
-            2
-        };
-        let start = if let Some(neutral) = masked_identity(&ins.mnemonic) {
-            masked_prologue(insns, first, neutral)
-                .map(|(index, _, _)| index)
-                .unwrap_or(first - prologue_len)
-        } else {
-            first - prologue_len
-        };
-        let start = insns[start].offset as i64;
-        let last_read = first + if width == 32 { 6 } else { 8 };
-        // The readlane is the last collective; the following restore is
-        // part of the protected region too.
-        let restore = first + if width == 32 { 7 } else { 9 };
-        let end = insns[restore].offset as i64;
+    for (first, region) in reduction_regions(insns, width) {
+        let ins = &insns[first];
+        let start = insns[*region.start()].offset as i64;
+        let end = insns[*region.end()].offset as i64;
+        let last_read = *region.end() - 1;
         for (branch_index, branch) in insns.iter().enumerate().filter(|(_, i)| i.enc == Enc::Sopp) {
             let pc = branch.offset as i64;
             if branch.op == 1 && pc < start {

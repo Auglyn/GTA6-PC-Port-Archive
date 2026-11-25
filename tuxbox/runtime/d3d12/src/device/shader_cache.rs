@@ -27,6 +27,18 @@ pub(super) enum Stage {
 }
 
 impl Stage {
+    fn short(self) -> &'static str {
+        match self {
+            Self::Pixel => "PS",
+            Self::Vertex => "VS",
+            Self::Geometry => "GS",
+            Self::Library => "LIB",
+            Self::Compute => "CS",
+            Self::Mesh => "MS",
+            Self::Amplification => "AS",
+        }
+    }
+
     fn report(self, source: &str, hit: bool) {
         static PIXEL: Once = Once::new();
         static VERTEX: Once = Once::new();
@@ -335,5 +347,6 @@ fn translate(shader: &[u8], stage: Stage) -> Option<Vec<u8>> {
     let translation = read_portable("by_source", &source, stage)
         .or_else(|| compile::on_demand(shader, &source, stage));
     stage.report(&source, translation.is_some());
+    crate::failures::lookup(stage.short(), &source, translation.is_some());
     translation
 }
