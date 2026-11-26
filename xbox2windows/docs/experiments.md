@@ -15394,6 +15394,15 @@ On WARP 10.0.26100.9818 and on an AMD Radeon RX 6600 (driver 32.0.21045.29003), 
 
 `tests/startup_gfx2hlsl_swap_check.py` (`startup_gfx2hlsl_swap`) decodes the documented VOP1 words, evaluates the translated text of seven programs on the CPU against a plain exchange of two list entries, and checks the refusals. Two mutations (write before read, only one destination written) are loaded from the translator source and must fail the fixtures. `python -B tests/startup_gfx2hlsl_swap_check.py binary llvm-mc-15` also reassembles the source lines. This is translation only; no draw was run.
 
+## Signed zero in startup binary16 multiplication
+
+The `startup_gfx2hlsl_f16_alu_draw` fixture draws plain, packed and SDWA binary16 products
+with independently computed raw-word expectations. In the SDWA high-word preserve case,
+the lower 16 bits start at `abcd`. Multiplying negative zero by positive zero and applying
+the fixture's export tag must read back `e000abcd`. Losing the sign gives `6000abcd`.
+The HLSL multiply uses a `precise` binary32 product before the binary16 rounding step.
+Run `ctest --preset dev --no-tests=error -R '^startup_gfx2hlsl_f16_alu_draw_(warp|hardware)$' -V`.
+
 ## Startup translator: v_fma_mix_f32
 
 `tools/startup/gfx2hlsl.py` now lowers `v_fma_mix_f32` (VOP3P, opcode 0x20), which it used to refuse. It shares one handler with `v_fma_mixlo_f16` and `v_fma_mixhi_f16`. Each source is read as LLVM 15 selects it (`SelectVOP3PMadMixModsImpl`): `op_sel_hi` set means a binary16 source, and `op_sel` then picks its high half. abs and then neg apply after widening. The binary32 result is written to the whole VGPR, with optional `clamp`.
@@ -17270,6 +17279,22 @@ or `scalar_wide_op()`). Reads where incoming SCC is unverified are refused: at s
 control-flow joins/branch targets, after descriptor-elided SCC writes, and after unmodeled SCC writers in
 `SCC_UNMODELLED` such as `s_add_u32` (after `s_add_u32` finishes reading its own sources). Run
 `ctest --preset dev --no-tests=error -R '^startup_gfx2hlsl_src_scc$' -V`.
+
+
+## Startup translator: derivative image ops under a divergent EXEC
+
+`image_sample_b` and `image_get_lod` take implicit derivatives of the four lanes of a pixel quad. A pixel program
+with such an op and no backward branch now decides its `s_cbranch_execz` / `s_cbranch_execnz` per quad
+(`x2w_quad_any(exec)`: some lane of the 2x2 quad has its EXEC bit, from fine derivatives of the 0/1 bit), as the guest's
+wave skips a block only when no lane is active and runs it with the other lanes masked. A voted branch parts no quad,
+so it keeps `uniform_cf` (#2659); the vote reads the quad, so it is taken only while the control flow is quad-uniform
+and no lane-exec break (`s_wqm` of a narrowed EXEC, a discard under an unknown EXEC) came first. With that, a derivative
+op may sit under `v_cmpx`, inside an `execz` block, past an `execnz` kill branch, or after an EXEC restore. Still
+refused: any branch that can differ between lanes and is not an EXEC branch (VCC, SCC not proven uniform), loops with
+such a branch, and an `s_wqm` of a narrowed EXEC before the op.
+`tests/startup_image_sample_b_flow_check.py` and `tests/startup_image_get_lod_flow_check.py` draw each shape against a
+CPU reference (DXC ps_6_0 and FXC ps_5_1) with wrong-value controls.
+
 The `_dispatch_warp` and `_dispatch_hardware` tests run `s_cmp_eq_u32` then `s_mov_b32 sX, src_scc` on a D3D12
 UAV dispatch and compare each lane with the CPU reference (SCC 0 and SCC 1, distinct per-case data). A copy of the
 lowering mutated to `(scc ? 0u : 1u)` must read back wrong. Run
