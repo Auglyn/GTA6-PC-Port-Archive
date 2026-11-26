@@ -11,8 +11,6 @@ pub const GAME_EXE: &str = "game_scarlett_master.exe";
 /// The game's two DLLs warmed with its shaders by `--precompile`.
 pub const PRECOMPILED_DLLS: [&str; 2] = ["XboxBvhBuilder.dll", "amd_fidelityfx_upscaler_xbox.dll"];
 pub const SHADERS: &str = "shaders.rpf";
-/// VIctory's command that translates every shader of the files it is given into its cache.
-pub const SHADERS_COMMAND: &str = "shaders";
 
 /// Environment variables given to VIctory, in the order they are set.
 pub type Env = Vec<(String, OsString)>;
@@ -74,17 +72,15 @@ impl Victory {
         Some(command)
     }
 
-    /// `victory shaders <archives>` with the game's environment (the cache key depends on it): every
-    /// shader found translated into the shader cache. (This VIctory base's `warm` makes the host
-    /// pipelines of earlier runs instead and takes no files.)
+    /// `victory warm <archives>` with the game's environment (the cache key depends on it).
     pub fn warm_command(&self, archives: &[PathBuf], env: &Env) -> Command {
         let mut command = Command::new(&self.exe);
-        command.arg(SHADERS_COMMAND).args(archives);
+        command.arg("warm").args(archives);
         command.envs(pairs(env));
         command
     }
 
-    /// `victory shaders` on shaders.rpf, the game and its two DLLs (`--precompile`), with the game's
+    /// `victory warm` on shaders.rpf, the game and its two DLLs (`--precompile`), with the game's
     /// environment. Only these files of the game folder are read, never the folder around them.
     pub fn precompile_command(&self, game_dir: &Path, env: &Env) -> Result<Command, RunError> {
         let shaders = game_dir.join(SHADERS);
@@ -96,7 +92,7 @@ impl Victory {
         }
         let mut command = Command::new(&self.exe);
         command
-            .arg(SHADERS_COMMAND)
+            .arg("warm")
             .arg(&shaders)
             .arg(game_dir.join(GAME_EXE))
             .args(&dlls);
@@ -147,9 +143,18 @@ pub fn game_exe(game_dir: &Path) -> Result<PathBuf, RunError> {
     }
 }
 
-/// The game's environment (`settings::base`). A `Result` for the launch steps that share it.
+/// The game's environment, checked like the script (the XG library must exist).
 pub fn environment(args: &RunArgs) -> Result<Env, RunError> {
-    Ok(settings::base(args))
+    let mut env = settings::base(args);
+    if let Some(dll) = args.xg_dll.as_deref().filter(|p| !p.as_os_str().is_empty()) {
+        if !dll.is_file() {
+            return Err(RunError::NoXgDll(dll.display().to_string()));
+        }
+        let absolute =
+            std::path::absolute(dll).map_err(|e| RunError::Spawn(dll.display().to_string(), e))?;
+        env.extend(settings::xg(&absolute, args.xg_mode.as_str()));
+    }
+    Ok(env)
 }
 
 fn pairs(env: &Env) -> impl Iterator<Item = (&OsStr, &OsStr)> {

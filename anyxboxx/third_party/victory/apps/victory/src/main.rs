@@ -5,13 +5,60 @@
 
 mod census;
 mod inspect;
-#[cfg(all(windows, feature = "diagnostics"))]
-mod replay;
 mod run;
 mod shader;
 mod translate;
-#[cfg(windows)]
-mod warm;
+mod discord;
+
+/// Counts the Rust heap's live bytes and their peak for the resident line. Not in diagnostics
+/// builds, where `victory-gpu`'s allocator does the counting.
+#[cfg(not(feature = "diagnostics"))]
+struct Counting;
+
+// SAFETY: every call goes to the system's allocator unchanged; only counters are kept beside it.
+#[cfg(not(feature = "diagnostics"))]
+unsafe impl std::alloc::GlobalAlloc for Counting {
+    unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+        // SAFETY: the caller's contract, passed on.
+        let at = unsafe { std::alloc::System.alloc(layout) };
+        if !at.is_null() {
+            victory_core::heapcount::grow(layout.size());
+        }
+        at
+    }
+
+    unsafe fn alloc_zeroed(&self, layout: std::alloc::Layout) -> *mut u8 {
+        // SAFETY: the caller's contract, passed on.
+        let at = unsafe { std::alloc::System.alloc_zeroed(layout) };
+        if !at.is_null() {
+            victory_core::heapcount::grow(layout.size());
+        }
+        at
+    }
+
+    unsafe fn dealloc(&self, at: *mut u8, layout: std::alloc::Layout) {
+        victory_core::heapcount::shrink(layout.size());
+        // SAFETY: the caller's contract, passed on.
+        unsafe { std::alloc::System.dealloc(at, layout) };
+    }
+
+    unsafe fn realloc(&self, at: *mut u8, layout: std::alloc::Layout, size: usize) -> *mut u8 {
+        // SAFETY: the caller's contract, passed on.
+        let moved = unsafe { std::alloc::System.realloc(at, layout, size) };
+        if !moved.is_null() {
+            if size > layout.size() {
+                victory_core::heapcount::grow(size - layout.size());
+            } else {
+                victory_core::heapcount::shrink(layout.size() - size);
+            }
+        }
+        moved
+    }
+}
+
+#[cfg(not(feature = "diagnostics"))]
+#[global_allocator]
+static HEAP: Counting = Counting;
 
 use std::path::PathBuf;
 
@@ -30,7 +77,6 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
-#[allow(clippy::large_enum_variant)]
 enum Command {
     /// Summarise one PE image: headers, sections, imports, TLS, build id.
     Inspect {
@@ -65,8 +111,8 @@ enum Command {
     /// archives, if uncompressed) and report their layout.
     ShaderInfo {
         paths: Vec<PathBuf>,
-        /// Print one line per container found and show why paths were skipped.
-        #[arg(short, long)]
+        /// Print one line per container found.
+        #[arg(long)]
         verbose: bool,
         /// Also list the decoded native instructions (implies --verbose).
         #[arg(long)]
@@ -74,11 +120,6 @@ enum Command {
     },
     /// Run every shader found (containers, SGD5 files) through the
     /// translator and report what it cannot handle yet.
-    ///
-    /// VICTORY_HOST_WAVE overrides the host wave width, including with --warm.
-    /// VICTORY_HOST_MAX_WAVE is a compatibility alias. When both values are
-    /// valid, VICTORY_HOST_WAVE takes precedence. Zero means unknown width.
-    /// For ordinary translation, VICTORY_HOST_RDNA=1 selects RDNA float settings.
     Translate {
         paths: Vec<PathBuf>,
         /// Check emitted DXIL with dxil.dll's validator (`VICTORY_DXIL`,
@@ -102,42 +143,16 @@ enum Command {
         #[arg(long)]
         warm: Option<PathBuf>,
     },
-    /// Translate every shader found (as `translate` finds them) into the
-    /// shader cache, so that no run has to: a few minutes, once per version
-    /// of the translator. Translations an earlier build of the same version
-    /// cached are made again, and those that came out different counted.
-    /// In diagnostics builds, VICTORY_LOG=debug shows skipped paths.
-    Shaders {
+    /// Translate the shaders of a title's archives into the cache and make
+    /// their compute pipelines, so that a run finds them there.
+    Warm {
         paths: Vec<PathBuf>,
         /// Worker threads (default: every logical core).
         #[arg(long)]
         jobs: Option<usize>,
-        /// Also write every shader that does not translate to this file,
-        /// one line each: hash, where it was found, why.
+        /// Only translate: no host pipelines.
         #[arg(long)]
-        list: Option<PathBuf>,
-    },
-    /// Make the host pipelines of every pipeline the title ever created
-    /// (runs with `VICTORY_PIPELINE_BOOK=1` write them down), so that the
-    /// driver's cache on disk has them before a run needs one: once per change
-    /// of the translator or the driver. Goes on where it was stopped.
-    #[cfg(windows)]
-    Warm {
-        /// Processes at once (default: two thirds of the logical cores).
-        #[arg(long)]
-        jobs: Option<usize>,
-        /// At most this many pipelines.
-        #[arg(long)]
-        limit: Option<usize>,
-        /// Those made before too.
-        #[arg(long)]
-        again: bool,
-        /// Only the pipelines earlier runs drew with.
-        #[arg(long)]
-        used: bool,
-        /// (What the processes it starts are given.)
-        #[arg(long, hide = true)]
-        these: Option<String>,
+        no_pipelines: bool,
     },
     /// Prepare, map and bind a title executable; with --execute, run it.
     Run {
@@ -159,10 +174,6 @@ enum Command {
         #[arg(last = true)]
         title_args: Vec<String>,
     },
-    /// Run a captured frame's GPU work again (diagnostics builds; see
-    /// docs/replay.md).
-    #[cfg(all(windows, feature = "diagnostics"))]
-    Replay(replay::Replay),
     /// Show the resolved configuration and check it.
     Config,
 }
@@ -179,7 +190,33 @@ enum Console {
     SeriesS,
 }
 
+/// (Neptune) Diagnostics builds: the redistributable D3D12 runtime and debug layer in `D3D12\`
+/// beside the executable are used if they are there (`build.rs` exports these two; the
+/// version is the middle number of the package's, 1.620.2).
+#[cfg(all(windows, feature = "diagnostics"))]
+#[unsafe(no_mangle)]
+#[used]
+pub static D3D12SDKVersion: u32 = 620;
+
+#[cfg(all(windows, feature = "diagnostics"))]
+#[repr(transparent)]
+pub struct SdkPath(*const u8);
+// SAFETY: a pointer to a constant string.
+#[cfg(all(windows, feature = "diagnostics"))]
+unsafe impl Sync for SdkPath {}
+
+#[cfg(all(windows, feature = "diagnostics"))]
+#[unsafe(no_mangle)]
+#[used]
+pub static D3D12SDKPath: SdkPath = SdkPath(b".\\D3D12\\\0".as_ptr());
+
 fn main() -> Result<()> {
+    // `VICTORY_HEAP_COUNT=1`: the Rust heap's live bytes for the resident line (off: it slowed loading).
+    victory_core::heapcount::enable(std::env::var_os("VICTORY_HEAP_COUNT").is_some_and(|v| v == "1"));
+    // (Neptune) Discord Rich Presence while a title runs (`discord.rs`).
+    if std::env::args().nth(1).as_deref() == Some("run") {
+        discord::start();
+    }
     victory_core::logging::init("info");
     // The audio recorder `run` starts for `VICTORY_AUDIO_CAPTURE`.
     #[cfg(all(windows, feature = "diagnostics"))]
@@ -216,32 +253,32 @@ fn main() -> Result<()> {
             if let Some(n) = std::env::var("VICTORY_VIEW_LIMIT").ok().and_then(|v| v.parse().ok()) {
                 victory_shader::emit::set_view_heap_limit(n);
             }
-            let wave = translate::host_wave::select(
-                std::env::var("VICTORY_HOST_WAVE").ok().as_deref(),
-                std::env::var("VICTORY_HOST_MAX_WAVE").ok().as_deref(),
-                |message| eprintln!("{message}"),
-            );
-            if let Some(file) = warm {
-                return translate::warm(paths, &file, jobs, wave);
+            // `VICTORY_HOST_WAVE=32`: translate as for a GPU whose waves are at most 32 lanes
+            if let Some(n) = std::env::var("VICTORY_HOST_WAVE").ok().and_then(|v| v.parse().ok()) {
+                victory_shader::emit::set_host_max_wave(n);
             }
-            translate::run(paths, validate, pipelines, list, jobs, wave)
+            if let Some(file) = warm {
+                return translate::warm_translations(paths, &file, jobs);
+            }
+            translate::run(paths, validate, pipelines, list, jobs)
         }
-        Command::Shaders { paths, jobs, list } => translate::precompile(paths, jobs, list),
-        #[cfg(windows)]
-        Command::Warm { jobs, limit, again, used, these } => warm::run(jobs, limit, again, used, these),
+        Command::Warm { paths, jobs, no_pipelines } => translate::warm(paths, jobs, !no_pipelines),
         Command::Run {
             exe,
             unimplemented,
             strict,
             execute,
             console,
-            title_args,
+            title_args: _,
         } => {
-            victory_hle::runtime::set_title_args(title_args);
-            run::run(&exe, unimplemented, strict, execute, console)
+            let result = run::run(&exe, unimplemented, strict, execute, console);
+            // The process's own end, as `main`'s Result maps it: Ok is 0,
+            // Err is 1. A title that ends the process itself logs its own
+            // line and never returns here.
+            let code = if result.is_ok() { 0 } else { 1 };
+            tracing::info!("runtime exit: code {code}");
+            result
         }
-        #[cfg(all(windows, feature = "diagnostics"))]
-        Command::Replay(options) => replay::run(options),
         Command::Config => show_config(),
     }
 }

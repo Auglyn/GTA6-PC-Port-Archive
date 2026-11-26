@@ -27,28 +27,19 @@ pub fn dump_stacks_on_schedule() {
     let Ok(list) = std::env::var("VICTORY_STACKS") else {
         return;
     };
-    let times = schedule(&list);
+    let mut times: Vec<f64> = list
+        .split(',')
+        .filter_map(|t| t.trim().parse().ok())
+        .collect();
+    times.sort_by(f64::total_cmp);
     let start = std::time::Instant::now();
     std::thread::spawn(move || {
-        for at in times {
+        for t in times {
+            let at = std::time::Duration::from_secs_f64(t.max(0.0));
             std::thread::sleep(at.saturating_sub(start.elapsed()));
             dump_stacks();
         }
     });
-}
-
-/// The times in a `VICTORY_STACKS` list (seconds, comma-separated), in
-/// order. Negative times are now; times no `Duration` holds (`inf`, `NaN`,
-/// `1e20`) are left out instead of panicking the dump thread.
-fn schedule(list: &str) -> Vec<std::time::Duration> {
-    let mut times: Vec<_> = list
-        .split(',')
-        .filter_map(|t| t.trim().parse::<f64>().ok())
-        .filter(|t| !t.is_nan())
-        .filter_map(|t| std::time::Duration::try_from_secs_f64(t.max(0.0)).ok())
-        .collect();
-    times.sort();
-    times
 }
 
 /// `THREAD_BASIC_INFORMATION` (ntddk).
@@ -66,8 +57,10 @@ struct BasicInfo {
 #[repr(C, align(16))]
 struct Aligned(CONTEXT);
 
-/// The ids of this process's threads but the caller's.
-pub(crate) fn other_threads() -> Vec<u32> {
+/// Prints every other thread's stack to stderr. Each thread is suspended
+/// only while its context is read and unwound into a buffer allocated
+/// beforehand (it may hold the heap lock).
+pub fn dump_stacks() {
     // SAFETY: plain queries and a snapshot of this process's threads.
     let (me, process, snapshot) = unsafe {
         (
@@ -77,7 +70,7 @@ pub(crate) fn other_threads() -> Vec<u32> {
         )
     };
     if snapshot == INVALID_HANDLE_VALUE {
-        return Vec::new();
+        return;
     }
     let mut ids = Vec::new();
     // SAFETY: zeroed is a valid THREADENTRY32; its size is set before use.
@@ -94,14 +87,6 @@ pub(crate) fn other_threads() -> Vec<u32> {
     }
     // SAFETY: we opened it.
     unsafe { CloseHandle(snapshot) };
-    ids
-}
-
-/// Prints every other thread's stack to stderr. Each thread is suspended
-/// only while its context is read and unwound into a buffer allocated
-/// beforehand (it may hold the heap lock).
-pub fn dump_stacks() {
-    let ids = other_threads();
     eprintln!("VIctory: stacks of {} threads", ids.len());
     for id in ids {
         // SAFETY: opens a thread of our own process.
@@ -115,9 +100,9 @@ pub fn dump_stacks() {
         if thread.is_null() {
             continue;
         }
-        let (frames, (priority, base, affinity)) = frames_of(thread);
+        let (frames, (priority, base)) = frames_of(thread);
         eprintln!(
-            "  thread {id} \"{}\" start {} priority {priority} (base {base}) affinity {affinity:#x}",
+            "  thread {id} \"{}\" start {} priority {priority} (base {base})",
             name_of(thread),
             locate(start_of(thread))
         );
@@ -130,7 +115,7 @@ pub fn dump_stacks() {
 }
 
 /// The thread's frames and its current and base scheduling priority (0-31).
-pub(crate) fn frames_of(thread: HANDLE) -> (Vec<u64>, (i32, i32, usize)) {
+fn frames_of(thread: HANDLE) -> (Vec<u64>, (i32, i32)) {
     let mut frames = Vec::with_capacity(MAX_FRAMES);
     let mut info: BasicInfo = BasicInfo {
         exit_status: 0,
@@ -140,12 +125,6 @@ pub(crate) fn frames_of(thread: HANDLE) -> (Vec<u64>, (i32, i32, usize)) {
         priority: 0,
         base_priority: 0,
     };
-    // Suspended first: a running thread may exit and free its TEB between
-    // the query and the read below.
-    // SAFETY: a thread of this process that is not this one.
-    if unsafe { SuspendThread(thread) } == u32::MAX {
-        return (frames, (0, 0, 0));
-    }
     // SAFETY: writes `info`, whose layout and size are the system's.
     let status = unsafe {
         NtQueryInformationThread(
@@ -157,29 +136,30 @@ pub(crate) fn frames_of(thread: HANDLE) -> (Vec<u64>, (i32, i32, usize)) {
         )
     };
     if status != 0 || info.teb.is_null() {
-        // SAFETY: suspended above.
-        unsafe { ResumeThread(thread) };
-        return (frames, (0, 0, 0));
+        return (frames, (0, 0));
     }
-    // SAFETY: the TEB of a suspended thread of this process: its NT_TIB
-    // holds the stack base at +8 and the stack limit at +0x10.
+    // SAFETY: the TEB of a live thread of this process: its NT_TIB holds
+    // the stack base at +8 and the stack limit at +0x10.
     let (high, low) = unsafe { (info.teb.add(1).read(), info.teb.add(2).read()) };
     // SAFETY: zeroed is a valid CONTEXT.
     let mut context = Aligned(unsafe { std::mem::zeroed() });
     context.0.ContextFlags = CONTEXT_FULL_AMD64;
-    // SAFETY: reads and resumes the thread suspended above; nothing until
-    // the resume allocates or takes a lock the thread could hold besides
-    // the unwinder's own.
+    // SAFETY: suspends, reads and resumes a thread that is not this one;
+    // nothing between suspend and resume allocates or takes a lock the
+    // thread could hold besides the unwinder's own.
     unsafe {
+        if SuspendThread(thread) == u32::MAX {
+            return (frames, (info.priority, info.base_priority));
+        }
         if GetThreadContext(thread, &mut context.0) != 0 {
             unwind_into(context.0, low, high, &mut frames);
         }
         ResumeThread(thread);
     }
-    (frames, (info.priority, info.base_priority, info.affinity))
+    (frames, (info.priority, info.base_priority))
 }
 
-pub(crate) fn start_of(thread: HANDLE) -> usize {
+fn start_of(thread: HANDLE) -> usize {
     let mut start = 0usize;
     // SAFETY: writes one pointer-sized start address.
     unsafe {
@@ -194,7 +174,7 @@ pub(crate) fn start_of(thread: HANDLE) -> usize {
     start
 }
 
-pub(crate) fn name_of(thread: HANDLE) -> String {
+fn name_of(thread: HANDLE) -> String {
     let mut name = std::ptr::null_mut();
     // SAFETY: the system allocates the string; we free it with LocalFree.
     unsafe {
@@ -240,19 +220,5 @@ mod tests {
         dump_stacks();
         stop_tx.send(()).unwrap();
         parked.join().unwrap();
-    }
-
-    /// Times no `Duration` holds are left out instead of panicking the dump
-    /// thread (`from_secs_f64` panicked on `inf`); the rest come in order.
-    #[test]
-    fn schedules_skip_times_out_of_range() {
-        let secs = |list| {
-            schedule(list)
-                .iter()
-                .map(|d| d.as_secs_f64())
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(secs("30, 5,x,-2,inf,NaN,1e20"), [0.0, 5.0, 30.0]);
-        assert!(schedule("").is_empty());
     }
 }

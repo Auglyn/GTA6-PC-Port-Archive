@@ -3087,7 +3087,8 @@ struct DeviceState {
         std::uint8_t* mapped{};
         if (arena_allocate(size, kTitleWindowAlign, offset, arena_buffer)) {
             mapped = arena.mapped + offset;
-        } else if (stream_windows() && external_windows.allocate(*this, size, offset, mapped)) {
+        } else if (leonida::memory_breakdown::Owner owner(leonida::memory_breakdown::Consumer::windows);
+                   stream_windows() && external_windows.allocate(*this, size, offset, mapped)) {
             external_window_made.store(true, std::memory_order_release);
         } else {
             ++title_window_refusals;
@@ -8398,6 +8399,8 @@ public:
         if (heap_.Type == D3D12_HEAP_TYPE_READBACK) host_preferred = VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
         if (heap_.Type == D3D12_HEAP_TYPE_UPLOAD && device_.upload_in_vram)
             host_preferred = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+        leonida::memory_breakdown::Owner owner(host ? leonida::memory_breakdown::Consumer::upload
+                                                    : leonida::memory_breakdown::current_owner());
         memory_ = host ? device_.allocate(requirements,
                                           VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                                           host_preferred, &memory_flags_, addressable || need_bda)
@@ -8716,6 +8719,7 @@ public:
         vk.vkGetBufferMemoryRequirements(device_.info.device, buffer_, &requirements);
         // As an upload buffer (D3D-96): the CPU writes it at every submission and the GPU reads it, so VRAM through
         // Resizable BAR where there is one, system memory otherwise.
+        leonida::memory_breakdown::Owner owner(leonida::memory_breakdown::Consumer::windows);
         memory_ = device_.allocate(requirements,
                                    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                                    device_.upload_in_vram ? VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT : 0, &memory_flags_,
@@ -9251,6 +9255,7 @@ private:
                     vk.vkBindImageMemory, vk.vkDestroyImage, vk.vkFreeMemory, [&](VkDeviceSize size, std::uint32_t& type) {
                         auto page = pool_requirements;
                         page.size = size;
+                        leonida::memory_breakdown::Owner owner(leonida::memory_breakdown::Consumer::image_blocks);
                         return device_.allocate(page, 0, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, nullptr, false, &type);
                     });
                 if (pooled_image_) memory_flags_ = device_.memory.memoryTypes[pooled_image_->page->type].propertyFlags;
@@ -9853,8 +9858,12 @@ private:
         };
         VkMemoryRequirements requirements{};
         vk.vkGetBufferMemoryRequirements(dev, staging.buffer, &requirements);
-        memory = device_.allocate(requirements, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                                  write ? 0 : VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
+        {
+            leonida::memory_breakdown::Owner owner(leonida::memory_breakdown::Consumer::staging);
+            memory = device_.allocate(requirements,
+                                      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                                      write ? 0 : VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
+        }
         if (!memory || vk.vkBindBufferMemory(dev, staging.buffer, memory, 0) != VK_SUCCESS ||
             vk.vkMapMemory(dev, memory, 0, VK_WHOLE_SIZE, 0, &mapped) != VK_SUCCESS)
             return release(E_OUTOFMEMORY);
@@ -14373,6 +14382,7 @@ public:
                 block.allocationSize = bytes;
                 block.memoryTypeIndex = type;
                 VkDeviceMemory out = VK_NULL_HANDLE;
+                leonida::memory_breakdown::Owner owner(leonida::memory_breakdown::Consumer::image_blocks);
                 return make(device, &block, nullptr, &out) == VK_SUCCESS ? out : VkDeviceMemory(VK_NULL_HANDLE);
             },
             [device = info.device, free = state_.context->vk.vkFreeMemory](VkDeviceMemory block) {
@@ -14476,6 +14486,21 @@ public:
                               (unsigned long long)shadows, leonida::fsdraw::pipeline_count());
                 return std::string(text);
             };
+            facts.share = [this] {
+                leonida::memory_breakdown::DeviceShare share;
+                DeviceState& d = state_;
+                if (d.arena.buffer) {
+                    share.arena = true;
+                    std::lock_guard lock(d.arena.mutex);
+                    share.arena_reserved = d.arena.size;
+                    share.arena_bound = d.arena.size;  // one allocation behind the whole range
+                    share.arena_in_use = d.arena.in_use;
+                    for (std::size_t i = 0; i < share.arena_use.size(); ++i) share.arena_use[i] = d.arena.use_in_use[i];
+                }
+                std::lock_guard lock(d.descriptor_mutex);  // the bindless set's lock (ExecuteCommandLists' flush)
+                if (const auto* bindless = d.bindless.get()) share.bindless_table_bytes = bindless->table_buffer_bytes();
+                return share;
+            };
             leonida::mem_probe::start(std::move(facts));
         }
         if (info.conditional_rendering) {
@@ -14512,6 +14537,7 @@ public:
         state_.context->enable_copy_scratch(
             get_device,
             [this, index_scratch](const VkMemoryRequirements& requirements) {
+                leonida::memory_breakdown::Owner owner(leonida::memory_breakdown::Consumer::staging);
                 return state_.allocate(requirements, 0, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, nullptr, index_scratch);
             },
             scratch_extra, state_.families);
@@ -14939,8 +14965,11 @@ public:
                                  "device's %s\n",
                          static_cast<unsigned long long>(size.bytes >> 20),
                          static_cast<unsigned long long>(size.requested >> 20), leonida::arena_cap_name(size.capped));
-        arena.memory = state_.allocate(requirements, leonida::kArenaRequiredMemory, leonida::kArenaPreferredMemory,
-                                       nullptr, true, &arena.memory_type);
+        {
+            leonida::memory_breakdown::Owner owner(leonida::memory_breakdown::Consumer::arena);
+            arena.memory = state_.allocate(requirements, leonida::kArenaRequiredMemory,
+                                           leonida::kArenaPreferredMemory, nullptr, true, &arena.memory_type);
+        }
         void* mapped = nullptr;
         if (!arena.memory || vk.vkBindBufferMemory(state_.info.device, arena.buffer, arena.memory, 0) != VK_SUCCESS ||
             vk.vkMapMemory(state_.info.device, arena.memory, 0, VK_WHOLE_SIZE, 0, &mapped) != VK_SUCCESS) {

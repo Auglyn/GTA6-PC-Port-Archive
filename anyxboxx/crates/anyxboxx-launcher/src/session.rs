@@ -3,8 +3,10 @@
 
 use std::path::{Path, PathBuf};
 
+use anyxboxx::run::XgMode;
+
 use crate::detached;
-use crate::env::{self, EnvError};
+use crate::env::{self, EnvError, Xg};
 use crate::launch::Plan;
 use crate::options::LaunchOptions;
 use crate::processes::{self, GuardError, ProcessSource};
@@ -13,11 +15,14 @@ use crate::warm_state;
 use anyxboxx::run::Victory;
 
 /// The window's fields, as typed.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Settings {
     pub game_dir: String,
     /// The advanced panel: one `KEY=VALUE` per line.
     pub overrides: String,
+    /// Path of the user's own `xg_xs.dll`, empty for none.
+    pub xg_dll: String,
+    pub xg_mode: XgMode,
     /// Worker threads of the translate step; 0 means every core.
     pub jobs: u32,
     /// The advanced panel's override of the one-game guard (for hosts without `tasklist`).
@@ -28,6 +33,22 @@ pub struct Settings {
     pub keep_open_after_launch: bool,
     /// "Always re-warm before launch": the shader warm runs even when the marker is current.
     pub always_rewarm: bool,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Settings {
+            game_dir: String::new(),
+            overrides: String::new(),
+            xg_dll: String::new(),
+            xg_mode: XgMode::Real,
+            jobs: 0,
+            skip_process_check: false,
+            options: LaunchOptions::default(),
+            keep_open_after_launch: false,
+            always_rewarm: false,
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -51,7 +72,7 @@ impl Settings {
     }
 }
 
-/// The launch plan for `profile`, with the user's overrides applied.
+/// The launch plan for `profile`, with the user's overrides and XG library applied.
 pub fn make_plan(
     settings: &Settings,
     repo: &Path,
@@ -61,7 +82,12 @@ pub fn make_plan(
     let game_dir = settings.game_path().ok_or(SessionError::NoGameFolder)?;
     let mut overrides = settings.options.env_pairs();
     overrides.extend(env::parse_overrides(&settings.overrides)?);
-    let env = env::build_env(&game_dir, profile, &overrides)?;
+    let xg_text = settings.xg_dll.trim().trim_matches('"');
+    let xg = (!xg_text.is_empty()).then(|| Xg {
+        dll: PathBuf::from(xg_text),
+        mode: settings.xg_mode,
+    });
+    let env = env::build_env(&game_dir, profile, &overrides, xg.as_ref())?;
     let victory = match victory_exe {
         Some(exe) => Victory::prebuilt(exe),
         None => Victory::locate(repo, false),
@@ -155,7 +181,7 @@ mod tests {
         let plan = make_plan(&settings, Path::new("repo"), None, &profile()).expect("plan");
         assert_eq!(plan.jobs, Some(6));
         assert_eq!(plan.game_dir, dir.path());
-        assert!(plan.env.iter().any(|(k, _)| k == "VICTORY_RELAY"));
+        assert!(plan.env.iter().any(|(k, _)| k == "VICTORY_CARD_WINDOWS_MB"));
     }
 
     #[test]
@@ -196,6 +222,17 @@ mod tests {
             make_plan(&settings, Path::new("repo"), None, &profile()),
             Err(SessionError::Env(EnvError::Key(1, _)))
         ));
+    }
+
+    #[test]
+    fn a_typed_xg_library_that_is_missing_refuses_the_plan() {
+        let dir = game_folder();
+        let settings = Settings {
+            game_dir: dir.path().display().to_string(),
+            xg_dll: "Z:/nowhere/xg_xs.dll".to_string(),
+            ..Settings::default()
+        };
+        assert!(make_plan(&settings, Path::new("repo"), None, &profile()).is_err());
     }
 
     #[test]
