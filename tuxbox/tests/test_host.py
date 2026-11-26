@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from project_tuxbox.console_cbv import configure_console_cbv, console_cbv_layer
-from project_tuxbox.host import PINNED_PROTON, Host, claim_package_drive, configure_nvidia_shader_cache, configure_pipeline_cache, proton_installation, requires_offline, warn_scarlett_dxc
+from project_tuxbox.host import PINNED_PROTON, SHADER_CACHE, Host, claim_package_drive, configure_nvidia_shader_cache, configure_pipeline_cache, proton_installation, requires_offline, seed_shader_cache, warn_scarlett_dxc
 
 
 class ScarlettWindowsDxc(unittest.TestCase):
@@ -197,6 +197,71 @@ class SelectProton(unittest.TestCase):
 
 
 @unittest.skipUnless(sys.platform == "linux", "Network namespaces require Linux")
+class SeedShaderCache(unittest.TestCase):
+    def prefixes(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        return Path(tmp.name)
+
+    def cache(self, prefix, name, stamp):
+        cache = prefix / SHADER_CACHE
+        (cache / "by_source").mkdir(parents=True)
+        (cache / "by_source" / name).write_text(name)
+        os.utime(cache, (stamp, stamp))
+
+    def test_a_new_prefix_reuses_the_most_recent_cache(self):
+        root = self.prefixes()
+        self.cache(root / "Proton - Experimental", "recent.cso", 2000)
+        self.cache(root / "GE-Proton11-12-x86_64", "older.cso", 1000)
+        lines = []
+        seed_shader_cache(root / "GE-Proton11-14-x86_64", lines.append)
+        seeded = root / "GE-Proton11-14-x86_64" / SHADER_CACHE / "by_source"
+        self.assertEqual([p.name for p in seeded.iterdir()], ["recent.cso"])
+        self.assertEqual(lines, ["Reusing the shader cache from the Proton - Experimental prefix"])
+        # The donor keeps its own cache.
+        self.assertTrue((root / "Proton - Experimental" / SHADER_CACHE / "by_source/recent.cso").is_file())
+
+    def test_an_existing_cache_and_a_lone_prefix_are_left_alone(self):
+        root = self.prefixes()
+        self.cache(root / "GE-Proton11-14-x86_64", "own.cso", 1000)
+        self.cache(root / "Proton - Experimental", "other.cso", 2000)
+        lines = []
+        seed_shader_cache(root / "GE-Proton11-14-x86_64", lines.append)
+        seeded = root / "GE-Proton11-14-x86_64" / SHADER_CACHE / "by_source"
+        self.assertEqual([p.name for p in seeded.iterdir()], ["own.cso"])
+        seed_shader_cache(root / "wine", lines.append)
+        alone = self.prefixes()
+        seed_shader_cache(alone / "wine", lines.append)
+        self.assertFalse((alone / "wine" / SHADER_CACHE).exists())
+        self.assertEqual(lines, ["Reusing the shader cache from the Proton - Experimental prefix"])
+
+    def test_a_failed_copy_leaves_no_partial_cache(self):
+        root = self.prefixes()
+        self.cache(root / "Proton - Experimental", "recent.cso", 2000)
+        failure = subprocess.CalledProcessError(1, ["cp"], stderr="No space left on device")
+        lines = []
+        with patch("project_tuxbox.host.subprocess.run", side_effect=failure):
+            seed_shader_cache(root / "GE-Proton11-14-x86_64", lines.append)
+        temp = root / "GE-Proton11-14-x86_64" / SHADER_CACHE.parent
+        self.assertEqual(list(temp.iterdir()), [])
+        self.assertTrue(lines[0].startswith("Could not reuse the shader cache from Proton - Experimental"))
+
+    def test_only_a_new_default_prefix_is_seeded(self):
+        root = self.prefixes()
+        explicit = root / "chosen"
+        with patch("project_tuxbox.host.shutil.which", side_effect=lambda tool: f"/usr/bin/{tool}"), \
+             patch("project_tuxbox.host.subprocess.check_output", return_value="wine-10.0\n"), \
+             patch("project_tuxbox.host.seed_shader_cache") as seed, \
+             patch.dict(os.environ, {"XDG_DATA_HOME": str(root)}):
+            Host("wine", None, explicit)
+            seed.assert_not_called()
+            Host("wine", None, None)
+            seed.assert_called_once()
+            self.assertEqual(seed.call_args.args[0], (root / "project-tuxbox/prefixes/wine").resolve())
+            Host("wine", None, None)
+            seed.assert_called_once()
+
+
 class OfflineLaunch(unittest.TestCase):
     def host(self, probe_code=0, stderr=""):
         tmp = tempfile.TemporaryDirectory()

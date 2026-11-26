@@ -7,6 +7,8 @@ use tuxbox_xshader::{extract, ShaderExtract, Stage};
 
 // Used only for deterministic refusals by the HLSL emitter.
 const UNSUPPORTED_HLSL: u8 = 65;
+/// Generated HLSL above this size would need more than about 9 GB of DXC memory.
+const MAX_HLSL_BYTES: usize = 8 << 20;
 
 enum Error {
     Other(String),
@@ -219,6 +221,16 @@ fn run() -> Result<(), Error> {
         stencil_target,
         wave32_host,
     )?;
+    // DXC needs about 1.1 GB of memory per MB of generated HLSL at -O0: two
+    // 10 MB programs took 11 GB each and starved the running title. Refuse such
+    // a translation rather than hand it to the compiler.
+    if hlsl.len() > MAX_HLSL_BYTES {
+        return Err(Error::Unsupported(format!(
+            "translated HLSL of {} MiB exceeds the {} MiB compiler budget",
+            hlsl.len() >> 20,
+            MAX_HLSL_BYTES >> 20
+        )));
+    }
     if let Some(path) = profile_output {
         let stage = match shader.stage {
             Stage::Pixel => "ps",

@@ -180,6 +180,8 @@ pub(in crate::hlsl) fn translate_outputs_once(ex: &ShaderExtract, feeds_ps: Opti
     let indexed_lane = !resolve_wave32 && (election == Some(ElectionLowering::Shared64) || group_extrema || ex.stage == Stage::Compute
         && (indexed_lane::constant_reads(compute_group(ex), &mut insns, ordinary_wave)
             || indexed_lane::prepare(compute_group(ex), &mut insns)));
+    // A waterfall loop is one per-lane read of a lane; exchange it once.
+    let waterfall_gathers = ex.stage == Stage::Compute && !resolve_wave32 && lower_waterfall_gathers(&mut insns) > 0;
     // A uniform Sgpr lane operand is only expressible through the whole-wave
     // group read, which needs shared-memory exchange like a swizzle does.
     let has_dynamic_lane_read = insns.iter().any(|i| i.enc == Enc::Vop3
@@ -309,7 +311,7 @@ pub(in crate::hlsl) fn translate_outputs_once(ex: &ShaderExtract, feeds_ps: Opti
     // DS bit-mask mode operates on the low five lane bits in wave32 and wave64.
     // Map guest lanes by workgroup index, independently of the Vulkan subgroup layout.
     em.compute_swizzle = ex.stage == Stage::Compute && scan_width.is_none() && !resolve_wave32
-        && (em.insns.iter().any(|i| i.mnemonic == "ds_swizzle_b32") || has_dynamic_lane_read);
+        && (em.insns.iter().any(|i| i.mnemonic == "ds_swizzle_b32") || has_dynamic_lane_read || waterfall_gathers);
     if em.compute_swizzle {
         let [x, y, z] = compute_group(ex);
         let count = x.checked_mul(y).and_then(|n| n.checked_mul(z)).unwrap_or(0);
@@ -341,8 +343,12 @@ pub(in crate::hlsl) fn translate_outputs_once(ex: &ShaderExtract, feeds_ps: Opti
         match wave_sum::check_control_flow(&em.insns, width) {
             Ok(guards) => em.reduction_execz_guards = guards,
             Err(reason) if em.resolve_wave32 && !requires_ballot && scan_width.is_none() => {
-                if !wave_loops::uniform_dispatch(&em) {
-                    em.wave_bounded_latches = wave_loops::bounded_latches(&em).ok_or(reason)?;
+                // A termination proof lets bounded loops drop the watchdog. Without
+                // one, uniform scalars still keep the lanes together.
+                match wave_loops::bounded_latches(&em) {
+                    Some(latches) => em.wave_bounded_latches = latches,
+                    None if wave_loops::uniform_dispatch(&em) => {}
+                    None => return Err(reason),
                 }
             }
             Err(reason) => {

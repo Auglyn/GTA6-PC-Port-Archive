@@ -229,6 +229,7 @@ pub(crate) struct DescriptorHeapState {
     _placed_targets: Option<placement::HeapViews<placement::Texture>>,
     _imported_views: Option<placement::DescriptorRange<views::DescriptorBacking>>,
     _scene_views: Option<placement::DescriptorRange<blas::SceneView>>,
+    _view_strides: Option<placement::DescriptorRange<u32>>,
 }
 type DescriptorHeap = Proxy<ID3D12DescriptorHeap, DescriptorHeapState>;
 

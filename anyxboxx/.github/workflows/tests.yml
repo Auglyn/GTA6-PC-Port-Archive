@@ -52,7 +52,8 @@ jobs:
   pytest:
     # Garder « pytest » : c'est le nom du check exigé par la protection de main.
     name: pytest
-    needs: lint
+    # Pas de « needs: lint » : les trois jobs démarrent ensemble. lint reste exigé et bloque la
+    # fusion s'il échoue ; l'attendre ne faisait qu'ajouter son temps (runner compris) à celui-ci.
     runs-on: windows-latest
     timeout-minutes: 30
     env:
@@ -65,10 +66,34 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      # Le runtime C++ ne dépend que de runtime/ (sources et CMakeLists) et de l'image du runner
+      # (version de MSVC) : environ 9 Mo de build, gardés tels quels. Lu par toutes les PR, écrit
+      # seulement depuis main ; la compilation (environ 1 min) n'a lieu que si runtime/ change.
+      - name: Image du runner (version de MSVC)
+        id: image
+        shell: bash
+        run: echo "version=${ImageVersion:-inconnue}" >> "$GITHUB_OUTPUT"
+      - name: Cache du runtime C++
+        id: runtime-cpp
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            runtime/build
+            !runtime/build/tombox
+          key: runtime-cpp-${{ runner.os }}-${{ steps.image.outputs.version }}-${{ hashFiles('runtime/**') }}
       - name: Runtime C++
+        if: steps.runtime-cpp.outputs.cache-hit != 'true'
         run: |
           cmake -S runtime -B runtime/build -A x64
           cmake --build runtime/build --config Release
+      - name: Garder le runtime C++ (main seulement)
+        if: steps.runtime-cpp.outputs.cache-hit != 'true' && github.ref == 'refs/heads/main'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            runtime/build
+            !runtime/build/tombox
+          key: ${{ steps.runtime-cpp.outputs.cache-primary-key }}
       # Cache des dépendances compilées des deux espaces Cargo (rust/ et TomBox), sans nos propres
       # crates. Écrit seulement depuis main pour ne pas multiplier les gros caches de PR ; les PR
       # le lisent.
@@ -104,5 +129,7 @@ jobs:
         if: steps.tombox-dlls.outputs.cache-hit != 'true'
         run: python tools/build_tombox.py
       - run: python -m pip install -r requirements.txt -r requirements-dev.txt
+      # pytest-xdist, un processus par cœur : mesuré en local sur 1 421 tests, 61 s en série
+      # contre 15 s avec -n 4 (ANYXBOXX_REQUIRE_RUNTIME=1, GPU en WARP), mêmes résultats.
       - name: pytest (suite complète, nombre de tests comparé aux README)
-        run: python -m pytest
+        run: python -m pytest -n auto

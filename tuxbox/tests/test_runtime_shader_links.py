@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-from project_tuxbox.runtime_shaders import COMPUTE_TIMEOUT, O0_TIMEOUT, ShaderRefused, archive_request, compile_dxil, compile_request, serve, snapshot_compiler_cache
+from project_tuxbox.runtime_shaders import COMPUTE_TIMEOUT, O0_TIMEOUT, O0_TIMEOUT_MAX, ShaderRefused, archive_request, compile_dxil, compile_request, o0_timeout, serve, snapshot_compiler_cache
 from project_tuxbox.scarlett_prep import scarlett_requests
 from project_tuxbox.shader_prep import SOURCE_CACHE, ToolFailure, prepare_for_launch
 
@@ -35,6 +35,12 @@ class RuntimeShaderLinks(unittest.TestCase):
         self.cache = directory / "cache"
         self.cache.mkdir()
         self.tools = ("xshader", "dxc", "dxv")
+
+    def test_unoptimised_cap_grows_with_generated_program_size(self):
+        hlsl = self.cache / "program.hlsl"
+        for size, expected in [(0, O0_TIMEOUT), (1 << 20, O0_TIMEOUT), (5 << 19, 225), (64 << 20, O0_TIMEOUT_MAX)]:
+            hlsl.write_bytes(b" " * size)
+            self.assertEqual(o0_timeout(hlsl), expected, size)
 
     def test_invalid_persistent_dxil_falls_back_to_cli_before_publication(self):
         data = b"synthetic compute shader"

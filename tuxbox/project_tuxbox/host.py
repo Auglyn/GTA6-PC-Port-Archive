@@ -14,6 +14,7 @@ from .console_cbv import configure_console_cbv
 from .mangohud import performance_capture
 from .pipeline_profile import pipeline_capture
 from .runtime_shaders import runtime_shader_compiler
+from .shader_prep import SOURCE_CACHE
 
 
 # The Proton distribution used when none is selected. Its dxil-spirv converts
@@ -89,6 +90,45 @@ def proton_installation(selection):
     raise ValueError(f"Install {PINNED_PROTON} in {steam / 'compatibilitytools.d'} from "
                      f"https://github.com/GloriousEggroll/proton-ge-custom/releases/tag/{PINNED_PROTON}, "
                      "or select another distribution with --proton or PROTONPATH")
+
+
+# Translated shaders, compiled DXIL and recorded requests, inside the prefix. Every
+# entry is keyed by the content that produced it, so a prefix for another Proton
+# can reuse them as they are.
+SHADER_CACHE = SOURCE_CACHE.parent
+
+
+def seed_shader_cache(prefix, report):
+    """Give a new default prefix the shader cache of the most recent other one.
+
+    A new Proton release gets a new prefix, and without this the first launch
+    translates and compiles every shader again, which takes hours for a large
+    title. Copies share disk blocks where the file system allows it.
+    """
+    target = prefix / SHADER_CACHE
+    if target.exists():
+        return
+    others = [p for p in prefix.parent.iterdir()
+              if p != prefix and p.is_dir() and (p / SHADER_CACHE).is_dir()]
+    if not others:
+        return
+    donor = max(others, key=lambda other: (other / SHADER_CACHE).stat().st_mtime)
+    source = donor / SHADER_CACHE
+    target.parent.mkdir(parents=True, exist_ok=True)
+    pending = target.with_name(target.name + ".seeding")
+    shutil.rmtree(pending, ignore_errors=True)
+    try:
+        if shutil.which("cp") and sys.platform == "linux":
+            subprocess.run(["cp", "-a", "--reflink=auto", str(source), str(pending)],
+                           check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        else:
+            shutil.copytree(source, pending, symlinks=True)
+        pending.rename(target)
+    except (OSError, subprocess.CalledProcessError) as exc:
+        shutil.rmtree(pending, ignore_errors=True)
+        report(f"Could not reuse the shader cache from {donor.name}: {exc}")
+        return
+    report(f"Reusing the shader cache from the {donor.name} prefix")
 
 
 def warn_scarlett_dxc(executable, report):
@@ -315,8 +355,12 @@ class Host:
         if self.backend == "wine":
             self.version = subprocess.check_output([executable, "--version"], text=True).strip()
         data_home = Path(os.getenv("XDG_DATA_HOME") or Path.home() / ".local/share")
+        default = prefix is None
         prefix = (prefix or data_home / "project-tuxbox/prefixes" / prefix_name).expanduser().resolve()
+        fresh = not prefix.exists()
         prefix.mkdir(parents=True, exist_ok=True)
+        if default and fresh:
+            seed_shader_cache(prefix, lambda line: print(f"tuxbox: {line}", file=sys.stderr))
         self.env["WINEPREFIX"] = str(prefix)
         configure_pipeline_cache(self.env, prefix)
         self.command = [executable]

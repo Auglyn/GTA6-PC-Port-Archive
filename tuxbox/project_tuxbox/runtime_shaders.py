@@ -214,6 +214,17 @@ def archive_request(archive, source, inputs):
 # compute program (CS_Emit_Dynamic_Model_Edge, 7,813 instructions) needs
 # about 18 s at -O0, so a 15 s cap refused it on every boot.
 O0_TIMEOUT = 90
+# The raytracing resolve kernels translate to about 2.5 MB of HLSL each. One
+# needs about 77 s at -O0 while the title runs, with up to four compiling at
+# once, so a fixed 90 s cap refused them on every boot.
+O0_SECONDS_PER_MB = 90
+O0_TIMEOUT_MAX = 600
+
+
+def o0_timeout(hlsl):
+    """Seconds allowed for an unoptimised compile of `hlsl`."""
+    megabytes = hlsl.stat().st_size / (1 << 20)
+    return min(O0_TIMEOUT_MAX, max(O0_TIMEOUT, round(O0_SECONDS_PER_MB * megabytes)))
 # The longest optimised cs_6_6 compile in a ProjectScarlett sample took 40 s
 # with twelve compiles sharing the processor.
 COMPUTE_TIMEOUT = 60
@@ -253,7 +264,7 @@ def compile_dxil(dxc, dxv, target, hlsl, output, store, request, stage):
     # A dispatched program whose candidate failed, or a request that timed out
     # before, goes straight to -O0 rather than spending the cap again.
     if dispatched or (store and store.is_slow(request, target)):
-        run_tool(unoptimised, timeout=O0_TIMEOUT)
+        run_tool(unoptimised, timeout=o0_timeout(hlsl))
         return validated_dxil(dxv, output, stage)
     # See `COMPUTE_FLAGS`. -O0 remains the fallback: the largest programs still
     # compile that way when the optimiser fails or runs out of time.
@@ -269,7 +280,7 @@ def compile_dxil(dxc, dxv, target, hlsl, output, store, request, stage):
         except ValueError:
             pass
         output.unlink(missing_ok=True)
-        run_tool(unoptimised, timeout=O0_TIMEOUT)
+        run_tool(unoptimised, timeout=o0_timeout(hlsl))
         return validated_dxil(dxv, output, stage)
     try:
         run_tool([dxc, "-T", target, *entry, "-Fo", output, hlsl], timeout=15)
@@ -277,7 +288,7 @@ def compile_dxil(dxc, dxv, target, hlsl, output, store, request, stage):
         if store:
             store.mark_slow(request, target)
         output.unlink(missing_ok=True)
-        run_tool(unoptimised, timeout=O0_TIMEOUT)
+        run_tool(unoptimised, timeout=o0_timeout(hlsl))
     return validated_dxil(dxv, output, stage)
 
 

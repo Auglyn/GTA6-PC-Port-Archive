@@ -200,35 +200,46 @@ def _free_display_number(start=2, attempts=16):
     return None
 
 
+def _drm_pci_id(node):
+    """PCI vendor:device and kernel driver of a /dev/dri node, or (None, None)."""
+    device = Path("/sys/class/drm") / Path(node).name / "device"
+    try:
+        ids = [(device / key).read_text().strip().lower().removeprefix("0x") for key in ("vendor", "device")]
+        driver = Path(os.readlink(device / "driver")).name
+    except OSError:
+        return None, None
+    return ":".join(ids), driver
+
+
+def _adapter_driver(adapter):
+    """Kernel driver of the render node for a PCI vendor:device, or None."""
+    for node in sorted(Path("/dev/dri").glob("renderD*")):
+        pci, driver = _drm_pci_id(node)
+        if pci == adapter.lower():
+            return driver
+    return None
+
+
+def _server_render_device(pid):
+    """PCI vendor:device of the GPU an X server renders with, or None if it holds no DRM node."""
+    try:
+        nodes = [os.readlink(fd) for fd in Path(f"/proc/{pid}/fd").iterdir()]
+    except OSError:
+        return None
+    for node in sorted(nodes):
+        if node.startswith("/dev/dri/renderD"):
+            return _drm_pci_id(node)[0]
+    return None
+
+
 @contextmanager
-def private_x_server(directory, geometry="2560x1440", timeout=10):
-    """Yield (DISPLAY, XAUTHORITY) for a temporary rootful Xwayland, or None if one can't start.
-
-    The rootful server draws into its own Wayland window and keeps a readable root window, so
-    Wine's screen samples work on a Wayland desktop. It accepts only its own random cookie,
-    is started on a display number picked below the desktop's and is stopped when the block exits.
-
-    Xwayland takes its display number as the positional argument (":N"); "-displayfd" only
-    reports the number it took, so a free one is chosen here instead of trusting the default,
-    which is the inherited DISPLAY and collides with the desktop server.
-    """
-    xwayland = shutil.which("Xwayland")
-    if not sys.platform.startswith("linux") or not xwayland or not os.environ.get("WAYLAND_DISPLAY"):
-        yield None
-        return
-    display = _free_display_number()
-    if display is None:
-        yield None
-        return
-    auth = Path(directory) / "Xauthority"
-    descriptor = os.open(auth, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(descriptor, "wb") as stream:
-        stream.write(xauthority_entry(os.urandom(16)))
+def _xwayland(xwayland, display, auth, geometry, timeout, options=()):
+    """Yield (DISPLAY, pid) of a started rootful Xwayland, or None; stop it when the block exits."""
     read, write = os.pipe()
     try:
         server = subprocess.Popen([xwayland, f":{display}", "-displayfd", str(write), "-geometry", geometry,
-                                   "-noreset", "-auth", str(auth)], pass_fds=(write,), stdin=subprocess.DEVNULL,
-                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                   "-noreset", "-auth", str(auth), *options], pass_fds=(write,),
+                                  stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except OSError:
         os.close(read)
         os.close(write)
@@ -244,7 +255,7 @@ def private_x_server(directory, geometry="2560x1440", timeout=10):
             number += chunk
         # A server that exits before being ready is not a display we can use.
         if number.strip().isdigit() and server.poll() is None:
-            yield (f":{int(number)}", str(auth))
+            yield (f":{int(number)}", server.pid)
         else:
             yield None
     finally:
@@ -255,6 +266,46 @@ def private_x_server(directory, geometry="2560x1440", timeout=10):
         except subprocess.TimeoutExpired:
             server.kill()
             server.wait()
+
+
+@contextmanager
+def private_x_server(directory, geometry="2560x1440", timeout=10, adapter=None):
+    """Yield (DISPLAY, XAUTHORITY, environment) for a temporary rootful Xwayland, or None.
+
+    The rootful server draws into its own Wayland window and keeps a readable root window, so
+    Wine's screen samples work on a Wayland desktop. It accepts only its own random cookie,
+    is started on a display number picked below the desktop's and is stopped when the block exits.
+
+    Xwayland takes its display number as the positional argument (":N"); "-displayfd" only
+    reports the number it took, so a free one is chosen here instead of trusting the default,
+    which is the inherited DISPLAY and collides with the desktop server.
+
+    Xwayland renders on the compositor's GPU. When `adapter` is another Mesa-driven GPU, Mesa's
+    X11 swapchain must cross GPUs over DRI3, which can fail outright (RADV against an NVIDIA
+    Xwayland returns VK_ERROR_INITIALIZATION_FAILED), leaving the window unpainted. The server
+    is then restarted without glamor, and `environment` asks Mesa to present through plain X
+    images, which every GPU can do.
+    """
+    xwayland = shutil.which("Xwayland")
+    if not sys.platform.startswith("linux") or not xwayland or not os.environ.get("WAYLAND_DISPLAY"):
+        yield None
+        return
+    display = _free_display_number()
+    if display is None:
+        yield None
+        return
+    auth = Path(directory) / "Xauthority"
+    descriptor = os.open(auth, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(descriptor, "wb") as stream:
+        stream.write(xauthority_entry(os.urandom(16)))
+    with _xwayland(xwayland, display, auth, geometry, timeout) as server:
+        foreign = (server and adapter and _adapter_driver(adapter) not in (None, "nvidia")
+                   and _server_render_device(server[1]) != adapter.lower())
+        if not foreign:
+            yield server and (server[0], str(auth), {})
+            return
+    with _xwayland(xwayland, display, auth, geometry, timeout, ("-glamor", "off")) as server:
+        yield server and (server[0], str(auth), {"MESA_VK_WSI_DEBUG": "sw"})
 
 
 def screen_capture_problem(display=None, library=None, xauthority=None):
@@ -649,15 +700,17 @@ def verify(host, output, adapter, selected=None, samples=1):
             # The desktop's rootless XWayland can't be sampled; present into a private rootful
             # Xwayland instead, and fail fast with the cause if that isn't possible either.
             capture = screen_capture_problem()
-            server = private_x_server(work) if capture else nullcontext()
-            saved = {key: host.env.get(key) for key in ("DISPLAY", "XAUTHORITY")}
+            server = private_x_server(work, adapter=adapter) if capture else nullcontext()
+            saved = {key: host.env.get(key) for key in ("DISPLAY", "XAUTHORITY", "MESA_VK_WSI_DEBUG")}
             with server as private:
                 if private:
                     capture = screen_capture_problem(display=private[0], xauthority=private[1])
                     if capture is None:
-                        host.env.update(DISPLAY=private[0], XAUTHORITY=private[1])
+                        host.env.update(DISPLAY=private[0], XAUTHORITY=private[1], **private[2])
                         present_display = "private rootful Xwayland"
-                        print(f"present: sampling a private rootful Xwayland on {private[0]}", flush=True)
+                        if private[2]:
+                            present_display += " without glamor"
+                        print(f"present: sampling a {present_display} on {private[0]}", flush=True)
                 try:
                     present = check if capture is None else (lambda name, *_args, **_kwargs: unsampled(name, capture))
                     present("guest-present", "d3d12-smoke/xbox-frame.exe", [*gpu_args, "--present", "--report"],

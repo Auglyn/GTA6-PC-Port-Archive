@@ -103,6 +103,15 @@ fn cached_translation(cache: &Path, key: &str, stage: Stage) -> Option<Vec<u8>> 
     (source_digest(&bytes)?.as_bytes() == expected).then_some(bytes)
 }
 
+/// The translator's recorded reason for refusing `key`, when it refused it.
+pub(super) fn refusal_reason(key: &str) -> Option<String> {
+    let cache = compiler_cache(session()?)?;
+    if !CACHED.of(cache).contains(&format!("{key}.unsupported")) {
+        return None;
+    }
+    fs::read_to_string(cache.join(format!("{key}.reason"))).ok()
+}
+
 fn cached_refusal(cache: &Path, key: &str) -> bool {
     if !CACHED.of(cache).contains(&format!("{key}.unsupported")) {
         return false;
@@ -191,6 +200,9 @@ fn request(
         progress::record(key, Shader::Cached);
         return Some(bytes);
     }
+    // The title thread waits here for the translation (and for any request
+    // ahead of it on the same digest).
+    let _pause = crate::title_watchdog::pause();
     // Serialize the exact digest, not a hash bucket. Unrelated programs
     // must not wait behind a slow translation (or its 90-second timeout).
     static LOCKS: LazyLock<RequestLocks> = LazyLock::new(RequestLocks::default);

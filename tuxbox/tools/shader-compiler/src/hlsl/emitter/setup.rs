@@ -52,6 +52,9 @@ impl<'a> Emitter<'a> {
             heap_sampler_slots: BTreeSet::new(),
             heap_map: ex.root_sig.as_ref().is_some_and(|root| root.params.iter().any(|p| matches!(p.kind,
                 crate::meta::RootParamKind::Descriptor { kind: 3, register: 0, space: 32766 }))),
+            heap_strides: ex.root_sig.as_ref().is_some_and(|root| root.params.iter().any(|p| matches!(p.kind,
+                crate::meta::RootParamKind::Descriptor { kind: 3, register: 1, space: 32766 }))),
+            heap_strides_used: false,
             private_samplers: ex.root_sig.as_ref().filter(|r| matches!(ex.stage, Stage::Compute | Stage::Pixel)
                 // Literal samplers in heap-indexing compute shaders are recovered the same
                 // way; samplers read from the sampler heap stay unresolved and fail.

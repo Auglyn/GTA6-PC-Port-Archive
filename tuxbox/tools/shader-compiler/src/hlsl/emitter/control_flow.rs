@@ -83,6 +83,13 @@ impl<'a> Emitter<'a> {
             // skipped, and in-body flags are cleared at the bottom of each iteration.
         }
         let labels: BTreeSet<usize> = target.values().copied().collect();
+        // The earliest forward branch to each label: a label is pending at `i` when
+        // some branch before `i` targets it, which this decides without rescanning
+        // every branch for every instruction.
+        let mut earliest: HashMap<usize, usize> = HashMap::new();
+        for (&branch, &label) in &target {
+            earliest.entry(label).and_modify(|first| *first = (*first).min(branch)).or_insert(branch);
+        }
         for l in &labels {
             self.line(&format!("bool j{l} = false;"));
         }
@@ -146,7 +153,7 @@ impl<'a> Emitter<'a> {
                 self.line(&format!("tb_c{b} = false;"));
             }
             let mut active: Vec<usize> =
-                labels.iter().copied().filter(|&t| t > i && target.iter().any(|(&b, &bt)| bt == t && b < i)).collect();
+                labels.iter().copied().filter(|&t| t > i && earliest.get(&t).is_some_and(|&b| b < i)).collect();
             if self.page_waves || self.hoist_wave_exchanges {
                 let exchange = if self.page_waves {
                     page_waves::rendezvous(i, ins)?
@@ -299,7 +306,7 @@ impl<'a> Emitter<'a> {
                 self.end_guard(&mut open);
                 if !active.is_empty() {
                     let c: Vec<String> = active.iter().map(|t| format!("j{t}")).collect();
-                    self.line(&format!("if (!({})) {{", c.join(" || ")));
+                    self.line(&format!("if (!({})) {{", c.join(self.flag_or())));
                     open = true;
                 }
                 cur = active;
@@ -341,7 +348,7 @@ impl<'a> Emitter<'a> {
                     self.line(&format!("j{t} = false;"));
                 }
                 let exits: Vec<String> = labels.iter().filter(|&&t| t > i).map(|t| format!("j{t}")).collect();
-                let exit = if exits.is_empty() { String::new() } else { format!(" && !({})", exits.join(" || ")) };
+                let exit = if exits.is_empty() { String::new() } else { format!(" && !({})", exits.join(self.flag_or())) };
                 let guard = if self.wave_cull || self.light_grid || probe_trace
                     || self.wave_bounded_latches.contains(&i)
                     || self.packed.as_ref().is_some_and(|p| p.copy_backedges.contains(&i) || p.bounded_backedges.contains(&i))
@@ -536,5 +543,17 @@ impl<'a> Emitter<'a> {
         self.drop_heap_handles();
         self.loop_depth = self.loop_depth.saturating_sub(1);
         Ok(())
+    }
+}
+
+impl Emitter<'_> {
+    /// How a guard combines jump flags. `||` makes one block per flag, and a
+    /// guard can name hundreds. Compute programs compile unoptimised or under
+    /// a DXC budget, so they take `|`: the resolve kernels' unoptimised DXIL
+    /// lost a third of its blocks and DXC finished optimising in 45 s instead
+    /// of 83-110 s. Optimised graphics stages keep `||`, which DXC threads
+    /// into smaller code (a mesh shader grew from 18 to 26 KiB with `|`).
+    fn flag_or(&self) -> &'static str {
+        if self.ex.stage == Stage::Compute { " | " } else { " || " }
     }
 }

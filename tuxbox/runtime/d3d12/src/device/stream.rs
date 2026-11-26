@@ -619,6 +619,7 @@ unsafe fn create(
             Err(error) => crate::diagnostics::pipeline_stages(&hashes, error.code().0, true),
         }
         if retry.is_ok() { return retry; }
+        capture_failed_stages(&original, guest_root);
         return unsafe { null_pipeline(host, &native_desc, &fields, stream_output, geometry_record, pipeline, &hashes) }.unwrap_or(retry);
     }
     // Mesh pipelines: retranslate the mesh program against this exact pixel
@@ -652,14 +653,28 @@ unsafe fn create(
                         }
                         return retry;
                     }
-                    Err(error) => crate::diagnostics::pipeline_stages(&hashes, error.code().0, true),
+                    Err(error) => {
+                        capture_failed_stages(&original, guest_root);
+                        crate::diagnostics::pipeline_stages(&hashes, error.code().0, true)
+                    }
                 }
                 return retry;
             }
         }
     }
+    capture_failed_stages(&original, guest_root);
     crate::diagnostics::pipeline_stages(&hashes, status.0, false);
     unsafe { null_pipeline(host, &native_desc, &fields, stream_output, geometry_record, pipeline, &hashes) }.unwrap_or(initial)
+}
+
+/// With `TUXBOX_CAPTURE_RASTER_ROOTS` or `TUXBOX_CAPTURE_SHADER_INPUTS`, keep
+/// the guest root and every guest stage of a stream the host rejected, so the
+/// register layout behind a "Failed to remap" can be compared offline.
+fn capture_failed_stages(original: &[Option<(&[u8], Option<usize>)>; 8], root: Option<&super::compute_scene::RootSource>) {
+    let Some(root) = root else { return };
+    for (code, _) in original.iter().flatten() {
+        super::compute_table::capture_stage_root(code, root);
+    }
 }
 
 /// Retry a rejected stream with resource-free shaders (see `fallback`). Mesh

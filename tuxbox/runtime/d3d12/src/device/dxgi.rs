@@ -24,6 +24,9 @@ pub(super) struct DxgiDevice {
     pub(super) render_heaps: super::heap::RenderHeaps,
     pub(super) page_pools: super::heap::PagePools,
     pub(super) imported_views: std::sync::Arc<super::placement::DescriptorMap<super::views::DescriptorBacking>>,
+    /// Console buffer strides of CBV/SRV/UAV views by native CPU handle, so
+    /// copies into a paged heap carry them (see `descriptor_paging::strides`).
+    pub(super) view_strides: std::sync::Arc<super::placement::DescriptorMap<u32>>,
     pub(super) byte_offset_views: OnceLock<super::views::AddressViews>,
     pub(super) texture_addresses: std::sync::Arc<super::placement::Views<super::views::TextureAddress>>,
     pub(super) blas: super::blas::Buffers,
@@ -62,6 +65,7 @@ impl DxgiDevice {
             render_heaps: Default::default(),
             page_pools: Default::default(),
             imported_views: Default::default(),
+            view_strides: Default::default(),
             texture_addresses: Default::default(),
             byte_offset_views: Default::default(),
             emulate_stencil: Default::default(),
