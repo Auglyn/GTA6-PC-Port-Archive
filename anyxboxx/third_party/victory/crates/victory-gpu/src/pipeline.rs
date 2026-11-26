@@ -250,7 +250,11 @@ fn translate(container: &[u8]) -> Result<Translated, String> {
     // The translation depends on it (a view index past a capped heap).
     crate::descriptor::host::probe_view_limit();
     let c = Container::parse(container).map_err(|e| e.to_string())?;
-    let programs = match c.part(FourCC::DXIL) {
+    // (`ACCC`: native code another compiler made, with `VICTORY_WAVE32_NVIDIA=1`)
+    let programs = match c
+        .part(FourCC::DXIL)
+        .or_else(|| c.part(FourCC::ACCC).filter(|_| victory_shader::emit::nvidia::enabled()))
+    {
         Some(part) => victory_shader::native_programs(part.data).map_err(|e| e.to_string())?,
         None => Vec::new(),
     };
@@ -318,6 +322,7 @@ fn of_builder(shaders: &[Arc<Shader>]) -> bool {
         return false;
     };
     c.part(FourCC::DXIL)
+        .or_else(|| c.part(FourCC::ACCC).filter(|_| victory_shader::emit::nvidia::enabled()))
         .and_then(|part| victory_shader::native_programs(part.data).ok())
         .is_some_and(|programs| programs.iter().any(victory_shader::spill::is_spilled))
 }

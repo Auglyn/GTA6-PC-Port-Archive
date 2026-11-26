@@ -8,8 +8,11 @@
 //! stencil reference, topology, targets) is set on the host list as the
 //! title sets it.
 
+#[cfg(test)]
+mod heap_texture_tests;
 mod root_slots;
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use victory_shader::resource::RootIndexedView;
@@ -2014,6 +2017,10 @@ impl State {
             None => (span, per_frame),
         };
         let began = std::time::Instant::now();
+        // Several slots can show the same texture from the same mip. The list
+        // holds each upload even after its staging entry is removed. Reuse
+        // it within this pass, where there are no intervening title copies.
+        let mut uploaded = HashMap::new();
         for (index, write) in due {
             if SPENT.load(Ordering::Relaxed) >= bytes_at_most || began.elapsed() > span {
                 break;
@@ -2115,20 +2122,27 @@ impl State {
                     continue;
                 }
             };
-            let title_fills = crate::resource::host_resource(resource).is_some_and(crate::texture::title_written);
-            if !title_fills {
+            let Some(texture) = crate::resource::host_resource(resource)
+                .filter(|texture| crate::texture::title_written(texture))
+            else {
                 // a render target, a depth or unordered access texture: the host's own
                 host.texture_slot_done(index, write, None);
                 continue;
-            }
+            };
+            let first = match &view {
+                Some(View::Placed(false, _, desc)) => crate::resource::first_mip(desc),
+                _ => 0,
+            };
+            let key = (resource, texture.as_raw(), first);
+            let previous = if partly.is_none() { uploaded.get(&key).copied() } else { None };
             // A texture that has a staging buffer now is one draws read
             // through a table: they upload it, and check it at every
             // submission that samples it.
-            let tabled = crate::texture::is_staged(resource);
+            let tabled = previous.is_none() && crate::texture::is_staged(resource);
             if tabled {
                 crate::texture::upload_again(resource);
             }
-            if let Some(view) = &view {
+            if previous.is_none() && let Some(view) = &view {
                 readable(list, sampled.kind, view);
             }
             // A texture view the host refuses removes the device: name it.
@@ -2142,7 +2156,15 @@ impl State {
                 crate::host::log_removal_context();
                 return;
             }
-            let (bytes, whole) = crate::texture::staged(resource).unwrap_or((0, true));
+            if let Some(recheck) = previous {
+                host.texture_slot_done(index, write, None);
+                if let Some((memory, print)) = recheck {
+                    host.texture_slot_recheck(index, frame, memory, print);
+                }
+                continue;
+            }
+            let staged = crate::texture::staged(resource);
+            let (bytes, whole) = staged.unwrap_or((0, true));
             // Not all of it there: looked at again next frame, and from
             // then on as a slot with nothing new (a placed texture: until
             // more of it is mapped; a texture object at an address the
@@ -2184,8 +2206,12 @@ impl State {
             HEAP_TEXTURES.fetch_add(1, Ordering::Relaxed);
             host.texture_slot_done(index, write, again);
             // Whole and uploaded: looked at again (`texture_slots_rechecked`).
-            if let Some((at, len)) = memory {
-                host.texture_slot_recheck(index, frame, (at, len), crate::texture::fingerprint(at, len));
+            let recheck = memory.map(|(at, len)| ((at, len), crate::texture::fingerprint(at, len)));
+            if let Some((memory, print)) = recheck {
+                host.texture_slot_recheck(index, frame, memory, print);
+            }
+            if again.is_none() && staged.is_some() {
+                uploaded.insert(key, recheck);
             }
         }
         catching_up(began.elapsed().saturating_sub(plain));
@@ -3344,6 +3370,9 @@ impl State {
             why("arguments outside title buffers");
             return false;
         };
+        if crate::indirect::after_writer() && matches!(kind, DRAW | INDEXED | MESH) && max == 1 && count.is_none() {
+            crate::indirect::learn(arguments as usize, kind);
+        }
         let counter = match count {
             Some(at) => match crate::shadow::find_any(at, 4) {
                 Some(s) => Some((s, at)),
@@ -3411,7 +3440,39 @@ impl State {
             && count.is_none()
             && crate::indirect::ahead_layout(kind, stride, args.offset(arguments))
             && !list.gpu_written(arguments as usize, len as usize);
-        let way = route(raw_all(), raw_but_ahead(), rawable, aheadable);
+        // (Neptune) `VICTORY_CLAMP_AFTER_WRITER=1`: a single record that shaders of the list write
+        // runs raw once a pass of ours has made it safe in place (`crate::indirect::sanitized`);
+        // when none can, it is clamped as before.
+        let shape = crate::indirect::after_writer() && matches!(kind, DRAW | INDEXED | MESH) && max == 1 && count.is_none();
+        let written = shape && list.gpu_written(arguments as usize, len as usize);
+        let after_writer = written && {
+            args.refresh(list, arguments, len);
+            let (safe, ran) = crate::indirect::sanitized(list, &args, arguments, kind);
+            if ran {
+                // The pass bound a compute pipeline and root signature of its own.
+                self.host_pipeline = 0;
+                self.host_roots[1] = 0;
+            }
+            safe
+        };
+        if shape {
+            crate::indirect::SAN[if after_writer { 3 } else { 4 }].fetch_add(1, Ordering::Relaxed);
+            if !written {
+                crate::indirect::WHY[1].fetch_add(1, Ordering::Relaxed);
+            }
+            static SHOWN: AtomicU64 = AtomicU64::new(0);
+            if !after_writer && SHOWN.fetch_add(1, Ordering::Relaxed) < 5 {
+                let ranges = list.with_san(|s| s.ranges());
+                tracing::info!(
+                    args = format_args!("{arguments:#x}"),
+                    kind,
+                    written,
+                    ranges = ?ranges.iter().map(|(a, b)| format!("{a:#x}-{b:#x}")).collect::<Vec<_>>(),
+                    "VICTORY_CLAMP_AFTER_WRITER: a reader fell back to the clamp"
+                );
+            }
+        }
+        let way = if after_writer { Route::Raw } else { route(raw_all(), raw_but_ahead(), rawable, aheadable) };
         if way == Route::Raw {
             self.window = None;
             args.refresh(list, arguments, len);

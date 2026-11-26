@@ -49,6 +49,7 @@ The first run after a new build or a new setting recompiles hundreds of pipeline
 - Fast (default, measured set) or Quality (better lighting and textures, lower frame rate).
 - Frame rate counter, automatic A press through the start screens, frame time CSV in the cache folder.
 - Advanced panel: overrides of single `VICTORY_*` variables; they always win over the profile.
+- NVIDIA Smooth Motion (RTX 40 and 50 series): the driver's own frame generation, which inserts a generated picture between two of the game's. Twice the pictures shown; responsiveness stays that of the game's own frames. It is not a VIctory variable: at each PLAY the launcher writes it into the NVIDIA driver profile that holds `victory.exe` (made if none does), through NVAPI with the setting ids NVIDIA Profile Inspector uses (`0xB0D384C0` enable, `0xB0CC0875` allowed APIs: Direct3D 12). No other driver setting is touched, and no administrator rights are needed.
 
 Settings are profiles per host and GPU vendor (`crates/anyxboxx-launcher/profiles.toml`). Only the Windows + NVIDIA set is measured; the others are VIctory's defaults.
 
@@ -61,6 +62,7 @@ Settings are profiles per host and GPU vendor (`crates/anyxboxx-launcher/profile
 | `%LOCALAPPDATA%\AnyXboxX\launcher\splash\` | Optional: your own PNG or JPEG pictures, shown as a slideshow. Nothing is shipped there. |
 | `%LOCALAPPDATA%\victory\data\` | VIctory's saves, data and `crashes.log` |
 | `third_party\victory\target\release\` | The VIctory build |
+| NVIDIA driver settings | With Smooth Motion switched on or off: the Smooth Motion settings of the profile holding `victory.exe` (`AnyXboxX (victory.exe)` when the launcher makes it) |
 
 ## Troubleshooting
 

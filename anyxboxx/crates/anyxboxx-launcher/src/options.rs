@@ -239,6 +239,9 @@ pub struct LaunchOptions {
     pub auto_a: bool,
     /// Writes a frame-time CSV into the cache folder.
     pub frametime_dump: bool,
+    /// NVIDIA Smooth Motion (driver frame generation) for victory.exe: written into the driver's
+    /// profile before each launch (`smooth_motion`), not into VIctory's environment.
+    pub smooth_motion: bool,
 }
 
 impl Default for LaunchOptions {
@@ -255,6 +258,7 @@ impl Default for LaunchOptions {
             overlay: true,
             auto_a: false,
             frametime_dump: false,
+            smooth_motion: false,
         }
     }
 }

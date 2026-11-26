@@ -317,6 +317,20 @@ impl App {
                 return;
             }
         };
+        if !precompile_only {
+            // NVIDIA Smooth Motion lives in the driver's profile, not in VIctory's environment:
+            // written now, so the game starts with the switch as the Play page shows it. A failure
+            // is reported and the game starts all the same.
+            let on = self.settings.options.smooth_motion;
+            match crate::smooth_motion::sync(on) {
+                Ok(Some(done)) => self.log_line(format!("== {done} ==")),
+                Ok(None) => {}
+                Err(error) if on => {
+                    self.notice = Some(format!("Smooth Motion could not be turned on: {error}"));
+                }
+                Err(_) => {}
+            }
+        }
         let steps: Result<Vec<Step>, anyxboxx::run::RunError> = if precompile_only {
             launch::precompile_steps(&plan)
         } else {

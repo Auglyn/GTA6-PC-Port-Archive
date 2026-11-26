@@ -1730,6 +1730,41 @@ FALSE without the switch, like `x2w_d3d12_budget_snapshot`. `startup_resource_re
 runs the same steps without the switch. The hardware cases report 77 without a
 physical adapter, and the debug-layer cases report 77 where the debug layer is not installed.
 
+## D3D12 view allocation failure
+
+A new view record goes into three containers: the record vector, the vector of
+materialization flags and the map from content to id. If one of them cannot
+allocate, the record goes into none of them, the process continues and the first
+eight failures are logged:
+
+`x2w-d3d12 note_view: out of memory in <view_records|view_materialized|view_ids> -> view of slot <n> not recorded, destination descriptor untracked`
+
+The device's view slots return nothing, so the log line is the only report. The
+destination descriptor is left untracked: its shadow entry and its token in
+title memory are cleared, and the view it named before loses its reference. A
+draw then sees a descriptor without a view, not the earlier one. If the desktop
+view was created, its resources leave the retire class of
+`X2W_D3D12_RELEASE_RETIRED` and are not released early. Earlier ids stay valid,
+and a later view is recorded if its allocations succeed. Records already copied
+elsewhere are not touched.
+
+This handles the failure; it does not reduce the memory the records use, and it
+does not cover other allocations, such as the map of render and depth targets.
+
+`startup_view_alloc_<records|materialized|ids>_<warp|hardware>` fails the
+allocation at one site three times through the fixture-only export
+`x2w_d3d12_fail_view_allocations`. The failure is injected, not produced by
+exhausting memory. For `view_ids` it is raised before the insertion, so the
+fixture relies on the standard guarantee that a failed single insertion leaves
+an `unordered_map` unchanged. The `control` variants never inject it and must
+fail. The failure is exercised on slot 18 and on a slot 19 view with a counter
+resource. For slot 19 only the reference counts are checked: resources that
+allow unordered access are never in the retire class.
+
+```powershell
+ctest --preset dev --no-tests=error -R '^startup_view_alloc_' --output-on-failure
+```
+
 ## D3D12 view census
 
 The stand-in keeps one record per distinct view: slot, resource, counter,
@@ -2180,6 +2215,18 @@ These are measured on one executable; treat them as hypotheses for others.
   `ctest --preset dev --no-tests=error -R "^startup_gfx2hlsl_vcc_hi"`: the draws on WARP and hardware compare 16 x 16
   pixels of a compare, a carry and a scalar use of `vcc_hi` with a CPU reference, with translations that drop the
   compare bit, the carry or read `vcc_hi` as zero as failing controls.
+- **Wave reductions.** A whole wave32 reduction chain in a straight-line pixel stage (`s_or_saveexec_b32 sS, -1`,
+  the identity fill `v_cndmask_b32_e64 vT, <identity>, vX, sS`, four `_dpp` steps `quad_perm:[1,0,3,2]`,
+  `quad_perm:[2,3,0,1]`, `row_half_mirror`, `row_mirror`, `v_permlanex16_b32 vP, vT, 0, 0`, the combine,
+  `s_mov_b32 exec_lo, sS` and `v_readlane_b32 sD, vT, 31`) of `v_or_b32`, `v_min_u32` or `v_max_u32` is recognised
+  as one `WaveActiveBitOr`, `WaveActiveMin` or `WaveActiveMax` over the active lanes of the desktop wave (a correct
+  program cannot depend on how pixels are packed into waves). The min chain may read its lane later, as the #2125
+  censuses show: after its restore, one `v_cndmask_b32_sdwa` (lowered as usual), the saveexec of a max chain, then the
+  readlane, carried by that max chain before its fill. The entry EXEC must still hold, without `s_wqm`, so helper
+  lanes are left out on both sides. Other shapes that start like a chain are refused with their reason
+  ([the note](experiments/startup-gfx2hlsl-wave-reduce.md)). Run
+  `ctest --preset dev --no-tests=error -R "^startup_gfx2hlsl_wave_reduce"`.
+  [#2125](https://github.com/R0Y00/Xbox2Windows/issues/2125)
 - **Soft asserts.** Retail code keeps `int3` instructions followed by a continuation. Without a
   debugger the title's handler steps over them; under the startup debugger use
   `-ContinueAsserts N`. One of them fires about ten times a second in the texture-streaming path

@@ -185,6 +185,9 @@ if (-not $NoTunedSettings) {
         VICTORY_TEXTURE_ROOM_PERCENT     = '93'        # textures use up to 93 % of the card's room
         VICTORY_HEAP_PASS_DIRTY          = '1'         # the heap pass looks only at slots marked since its last pass
         VICTORY_COPY_COALESCE            = '256'       # changed runs up to 256 bytes apart go up as one range
+        VICTORY_WINDOW_SKIP_SAME         = '1'         # windows leave out pages that hold what they last sent (#358)
+        VICTORY_MERGE_SUBMISSIONS        = '1'         # consecutive title submissions as one host submission (#358)
+        VICTORY_PAGE_WRITES              = '5'         # host copies under finished reads (#358)
     }
     foreach ($name in $tuned.Keys) {
         Set-Item -Path "Env:$name" -Value $tuned[$name]

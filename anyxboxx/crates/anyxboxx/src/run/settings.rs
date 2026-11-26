@@ -49,6 +49,10 @@ pub const TUNED: &[(&str, &str)] = &[
     ("VICTORY_TEXTURE_ROOM_PERCENT", "93"),
     ("VICTORY_HEAP_PASS_DIRTY", "1"),
     ("VICTORY_COPY_COALESCE", "256"),
+    // PR #358 (measured 2026-11-26, RTX 4070 SUPER, Series X): 13.4 -> 15.2 fps median.
+    ("VICTORY_WINDOW_SKIP_SAME", "1"),
+    ("VICTORY_MERGE_SUBMISSIONS", "1"),
+    ("VICTORY_PAGE_WRITES", "5"),
 ];
 
 /// Picture first (`--quality`): applied after the tuned set, before `--override`.

@@ -49,6 +49,7 @@ Le premier lancement après un nouveau build ou un nouveau réglage recompile de
 - Rapide (par défaut, réglages mesurés) ou Qualité (meilleurs éclairages et textures, moins d'images par seconde).
 - Compteur d'images, appui automatique sur A pendant les écrans de démarrage, CSV des temps d'image dans le dossier du cache.
 - Panneau avancé : surcharge de variables `VICTORY_*` une à une ; elles priment toujours sur le profil.
+- NVIDIA Smooth Motion (RTX séries 40 et 50) : la génération d'images du pilote lui-même, qui insère une image générée entre deux images du jeu. Deux fois plus d'images affichées ; la réactivité reste celle des vraies images du jeu. Ce n'est pas une variable de VIctory : à chaque PLAY, le lanceur l'écrit dans le profil du pilote NVIDIA qui contient `victory.exe` (créé s'il n'y en a pas), via NVAPI, avec les identifiants de réglage qu'utilise NVIDIA Profile Inspector (`0xB0D384C0` activation, `0xB0CC0875` API autorisées : Direct3D 12). Aucun autre réglage du pilote n'est touché, et aucun droit administrateur n'est nécessaire.
 
 Les réglages sont des profils par système et par fabricant de carte (`crates/anyxboxx-launcher/profiles.toml`). Seul le jeu Windows + NVIDIA est mesuré ; les autres reprennent les valeurs par défaut de VIctory.
 
@@ -61,6 +62,7 @@ Les réglages sont des profils par système et par fabricant de carte (`crates/a
 | `%LOCALAPPDATA%\AnyXboxX\launcher\splash\` | Facultatif : vos propres images PNG ou JPEG, en diaporama. Rien n'y est fourni. |
 | `%LOCALAPPDATA%\victory\data\` | Sauvegardes, données et `crashes.log` de VIctory |
 | `third_party\victory\target\release\` | Le build de VIctory |
+| Réglages du pilote NVIDIA | Quand Smooth Motion est activé ou désactivé : les réglages Smooth Motion du profil qui contient `victory.exe` (`AnyXboxX (victory.exe)` quand le lanceur le crée) |
 
 ## Dépannage
 

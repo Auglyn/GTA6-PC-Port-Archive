@@ -763,6 +763,46 @@ const NO_FOOTPRINT: PlacedFootprint = PlacedFootprint {
     row_pitch: 0,
 };
 
+#[cfg(windows)]
+impl PlacedFootprint {
+    /// Restrict a 2D upload to the box's rows. Rebase the box's Y coordinates
+    /// and keep the original pitch. A cropped footprint starts at upload offset 0.
+    pub(crate) fn crop_upload_rows(
+        self,
+        region: &mut [u32; 6],
+        full_bytes: u64,
+    ) -> Option<(Self, u64, u64)> {
+        let [left, top, front, right, bottom, back] = *region;
+        let (element, block) = element(self.format)?;
+        if (self.depth, front, back) != (1, 0, 1)
+            || left >= right
+            || right > self.width
+            || top >= bottom
+            || bottom > self.height
+            || (top == 0 && bottom == self.height)
+            || !u64::from(top).is_multiple_of(block)
+            || !u64::from(bottom).is_multiple_of(block)
+        {
+            return None;
+        }
+        let pitch = u64::from(self.row_pitch);
+        if pitch < u64::from(self.width).div_ceil(block) * element {
+            return None;
+        }
+        let height = bottom - top;
+        let start = pitch * (u64::from(top) / block);
+        let cropped = Self { offset: 0, height, ..self };
+        // The title's footprint may end at the last row's final texel.
+        let bytes = (pitch * (u64::from(height) / block)).min(full_bytes.checked_sub(start)?);
+        if bytes < cropped.bytes()? {
+            return None;
+        }
+        region[1] = 0;
+        region[4] = height;
+        Some((cropped, start, bytes))
+    }
+}
+
 /// One subresource's size in an upload buffer: footprint (offset 0), rows
 /// and bytes per row. Planes of depth-stencil formats are not told apart.
 fn subresource(desc: &ResourceDesc, index: u32) -> Option<(PlacedFootprint, u32, u64)> {
@@ -3118,6 +3158,14 @@ pub(crate) fn texture_at(address: u64, desc: &[u32; 14]) -> Option<This> {
     Some(out)
 }
 
+#[cfg(all(test, windows))]
+pub(crate) fn release_test_placed_texture(address: u64, desc: [u32; 14]) {
+    let resource = PLACED_TEXTURES.lock().unwrap().remove(&(address, loose_key(desc)));
+    if let Some(resource) = resource {
+        resource_release(resource as This);
+    }
+}
+
 pub(crate) extern "system" fn create_placed(
     _: This,
     heap: This,
@@ -3292,6 +3340,36 @@ static RESOURCE_FUNCTIONS: Table<32> = {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(windows)]
+    #[test]
+    fn boxed_upload_preserves_block_rows_and_tight_last_row() {
+        let original = super::PlacedFootprint {
+            offset: 512,
+            format: 71, // BC1_UNORM
+            width: 17,
+            height: 16,
+            depth: 1,
+            row_pitch: 256,
+        };
+        let mut region = [4, 8, 0, 16, 16, 1];
+        let (cropped, start, bytes) = original
+            .crop_upload_rows(&mut region, original.bytes().unwrap())
+            .unwrap();
+        assert_eq!((cropped.offset, cropped.width, cropped.height, cropped.row_pitch), (0, 17, 8, 256));
+        assert_eq!((start, bytes), (512, 296));
+        assert_eq!(region, [4, 0, 0, 16, 8, 1]);
+
+        // A partial block row or another depth slice keeps the full layout.
+        for (footprint, outside) in [
+            (original, [4, 2, 0, 16, 12, 1]),
+            (super::PlacedFootprint { depth: 2, ..original }, [4, 8, 1, 16, 16, 2]),
+        ] {
+            let mut region = outside;
+            assert!(footprint.crop_upload_rows(&mut region, footprint.bytes().unwrap()).is_none());
+            assert_eq!(region, outside);
+        }
+    }
+
     #[test]
     fn the_hdr_stand_in_follows_its_switch() {
         assert_eq!(super::parse_hdr_stand_in(None), 26);

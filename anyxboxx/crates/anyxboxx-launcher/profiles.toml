@@ -69,6 +69,10 @@ VICTORY_PIPELINE_WAIT_MS = "2500"
 VICTORY_TEXTURE_ROOM_PERCENT = "93"
 VICTORY_HEAP_PASS_DIRTY = "1"
 VICTORY_COPY_COALESCE = "256"
+# PR #358, measured 2026-11-26 (RTX 4070 SUPER, Series X): 13.4 -> 15.2 fps median.
+VICTORY_WINDOW_SKIP_SAME = "1"
+VICTORY_MERGE_SUBMISSIONS = "1"
+VICTORY_PAGE_WRITES = "5"
 
 # ---------------------------------------------------------------------------------------------
 # Linux (Proton) + AMD: the settings of PR #199's measured Linux run (Exorion1er, Fedora 44,
