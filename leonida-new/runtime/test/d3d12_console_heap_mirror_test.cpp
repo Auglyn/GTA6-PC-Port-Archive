@@ -1,9 +1,9 @@
 // The host-RAM mirror of a console descriptor heap's GPU copy (src/console_heap_copy.h) through a heap's life, with
 // LEONIDA_CONSOLE_RELEASE_FILTER=1 (the release sweep reads the mirror to pick the slots to fix): the first refresh,
 // slots the title rewrites and zeroes after it, and a released buffer whose V#s the sweep must find and null. After
-// each step the GPU copy holds what it should and the mirror agrees with it byte for byte. Run twice by ctest: with
-// the mirror, and with LEONIDA_HEAP_MIRROR=0 (no mirror; the sweep reads the copy, as before it), where the copy must
-// come out the same. Nothing dispatches through a descriptor. No game data.
+// each step the GPU copy holds what it should and the mirror agrees with it byte for byte. Run three times by ctest:
+// with LEONIDA_HEAP_MIRROR=1 (the mirror), with 0 and with the variable unset (no mirror, the default; the sweep reads
+// the copy), where the copy must come out the same. Nothing dispatches through a descriptor. No game data.
 #include "vk_test_device.h"
 #include "../shims/d3d12_com.h"
 #include "../src/gfx10_descriptors.h"
@@ -183,7 +183,8 @@ int run(ID3D12Device* device, bool mirrored) {
 
 int main() {
     char value[4] = {};
-    const bool mirrored = !(GetEnvironmentVariableA("LEONIDA_HEAP_MIRROR", value, sizeof(value)) == 1 && value[0] == '0');
+    // Only LEONIDA_HEAP_MIRROR=1 mirrors: unset (the default) and 0 must leave the heap without one.
+    const bool mirrored = GetEnvironmentVariableA("LEONIDA_HEAP_MIRROR", value, sizeof(value)) == 1 && value[0] == '1';
     vktest::Device d;
     const auto status = d.initialize();
     if (status == vktest::DeviceStatus::unavailable) {

@@ -464,7 +464,25 @@ void test_remap_releases(const PhysicalApi& api) {
         return false;
     };
 
+    // Off by default: a remap keeps the address valid, and a root view recorded before it (or a placed buffer view)
+    // names the copy's address after it, so a copy freed then is read by the GPU (a page fault and a lost device).
+    char previous[8]{};
+    const DWORD had = GetEnvironmentVariableA("LEONIDA_GEOMETRY_REMAP_RELEASE", previous, sizeof(previous));
+    SetEnvironmentVariableA("LEONIDA_GEOMETRY_REMAP_RELEASE", nullptr);
+    rt::xmem::reload_remap_release_setting();
     const uint64_t first[kPages] = {pages[0], pages[1], pages[2]};
+    const uint64_t other[kPages] = {pages[3], pages[2], pages[1]};
+    check(api.map(window, kPages, first) == window && api.map(window, kPages, other) == window && take().empty(),
+          "remap releases: off by default, a remap releases nothing");
+    SetEnvironmentVariableA("LEONIDA_GEOMETRY_REMAP_RELEASE", "0");
+    rt::xmem::reload_remap_release_setting();
+    check(api.map(window, kPages, first) == window && take().empty(),
+          "remap releases: LEONIDA_GEOMETRY_REMAP_RELEASE=0 releases nothing");
+    check(api.map(window, kPages, nullptr) == window && !take().empty() && covers(base, base + 3 * kPage64k),
+          "remap releases: unmapping releases the range whatever the setting");
+    SetEnvironmentVariableA("LEONIDA_GEOMETRY_REMAP_RELEASE", "1");
+    rt::xmem::reload_remap_release_setting();
+
     check(api.map(window, kPages, first) == window && take().empty(),
           "remap releases: a first mapping of unmapped pages releases nothing");
     check(api.map(window + kPage64k, 1, &pages[1]) == window + kPage64k && take().empty(),
@@ -496,6 +514,9 @@ void test_remap_releases(const PhysicalApi& api) {
 
     check(api.map(window, kPages, nullptr) == window && !take().empty() && covers(base, base + 3 * kPage64k),
           "remap releases: unmapping releases the range");
+    SetEnvironmentVariableA("LEONIDA_GEOMETRY_REMAP_RELEASE",
+                            had > 0 && had < sizeof(previous) ? previous : nullptr);
+    rt::xmem::reload_remap_release_setting();
     for (uint64_t i = 0; i < kPages; ++i) watch::release(base + i * kPage64k);
     watch::unsubscribe(queue);
     api.free_pages(4, pages);

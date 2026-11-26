@@ -4531,12 +4531,13 @@ struct DeviceState {
         unbound_tsharp_tracker().note(heap.console_va, offset, words, why);
     }
 
-    // LEONIDA_HEAP_MIRROR=0: no host-RAM mirror of a console heap's copy in the arena (src/console_heap_copy.h); the
-    // release sweep then reads the copy itself, as before the mirror.
+    // LEONIDA_HEAP_MIRROR=1: a host-RAM mirror of a console heap's copy in the arena (src/console_heap_copy.h), which
+    // the release sweep reads instead of the copy. Off by default: on, a world run on the RX 7900 XTX hung in a
+    // compute program about a minute in and lost the device; off, the same run went past five minutes.
     static bool heap_mirror_enabled() {
         static const bool on = [] {
             char value[4] = {};
-            return !(GetEnvironmentVariableA("LEONIDA_HEAP_MIRROR", value, sizeof(value)) == 1 && value[0] == '0');
+            return GetEnvironmentVariableA("LEONIDA_HEAP_MIRROR", value, sizeof(value)) == 1 && value[0] == '1';
         }();
         return on;
     }

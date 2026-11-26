@@ -1737,11 +1737,18 @@ The copies:
     as VIctory keeps its copies of title memory (approach only). In a world run on the RX 7900 XTX the copies held
     4.4-6 GB of VRAM. The cost moves to the bus: the GPU reads every vertex and index of a copy from system memory,
     so a geometry-heavy pass can take longer; measure frame time with and without it before making it a default.
-  - **When a copy goes**: a view is retired when its title range is freed, decommitted or unmapped, and also when a
-    remap gives one of its pages another frame or none (`XMemMapPhysicalPages` with pages, the scatter call,
-    `CopyPageMappingsBatchX`; xmem's `RemapReleases`, `LEONIDA_GEOMETRY_REMAP_RELEASE=0` turns it off): the title
-    streams by remapping its pools' frames, and before this the copies of what those pages held stayed for the
-    device's life (`evicted 0` in every world run). A page mapped again to the frame it had is no change. A retired
+  - **When a copy goes**: a view is retired when its title range is freed, decommitted or unmapped. With
+    `LEONIDA_GEOMETRY_REMAP_RELEASE=1` (off by default) also when a remap gives one of its pages another frame or
+    none (`XMemMapPhysicalPages` with pages, the scatter call, `CopyPageMappingsBatchX`; xmem's `RemapReleases`):
+    the title streams by remapping its pools' frames, and otherwise the copies of what those pages held stay for the
+    device's life (`evicted 0` in every world run). It is off because a remap leaves the address valid on the
+    console, and not everything that names a copy's address is rewritten when the copy goes: a root view is
+    resolved while its list is recorded (`d3d12_com.cpp`, `GraphicsCommandList::address`), so a list recorded before the
+    retirement and executed after it reads the freed copy, and so does a placed buffer view written outside a
+    console heap. On by default, it retired 15 010 copies in 40 s of a world run on the
+    RX 7900 XTX (RADV) and ended it in a GPUVM page fault and a lost device; the same run without it went eight
+    minutes with no fault. Making it safe needs a copy kept until nothing recorded or written can still name it.
+    A page mapped again to the frame it had is no change. A retired
     view leaves the lookups at once, its alias ranges and translated heap slots are invalidated, its stream-pool
     extent is forgotten, and its memory is freed only after every ExecuteCommandLists replay in progress at the
     retirement has recorded its submissions and those have completed (`kAfterExecutes`). Before it leaves the
@@ -2055,7 +2062,11 @@ The game can use D3D12 descriptors in three ways, and the layer must handle all 
    arguments for direct and indirect compute dispatches with an inline signature. Bound console descriptor heap
    base addresses are remapped through `console_descriptor_table_va` so that user SGPRs receive the arena copy's
    shader virtual address (where GPU descriptor reads land, preventing `READ_INVALID` device loss during world
-   load), while unshadowed host heaps remain unchanged. An unbound heap contributes
+   load), while unshadowed host heaps remain unchanged. The CPU reads that copy too (the release sweep of
+   `LEONIDA_CONSOLE_RELEASE_FILTER=1`), uncached across PCIe when it is in ReBAR memory. `LEONIDA_HEAP_MIRROR=1`
+   gives those reads a host-RAM mirror of the copy (`src/console_heap_copy.h`). It is off by default: with it, a
+   world run on the RX 7900 XTX (RADV) hung in a library compute program about a minute in and lost the device,
+   and without it the same run went on for more than five minutes. Why is not known yet. An unbound heap contributes
    zero, and rebinding affects later commands. A heap that cannot fit in the inline user data is reported once,
    and a signature whose compute arguments spill gets nothing written (logged once). Set
    `LEONIDA_COMPUTE_DIRECT_HEAPS=0` to restore the previous compute arguments.

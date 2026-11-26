@@ -73,6 +73,12 @@ VICTORY_COPY_COALESCE = "256"
 VICTORY_WINDOW_SKIP_SAME = "1"
 VICTORY_MERGE_SUBMISSIONS = "1"
 VICTORY_PAGE_WRITES = "5"
+# PR #383, measured 2026-11-26 in one run alternating every 20 s (RTX 4070 SUPER, Series X): 12.7 -> 14.8 fps median, +17 %.
+VICTORY_STEP_INDEX = "1"
+VICTORY_CARD_SYNC_BATCH = "1"
+VICTORY_PARALLEL_REFRESH = "1"
+# Full heap scan every 16 passes, measured 2026-11-26 in one run alternating every 20 s (RTX 4070 SUPER, Series X): 14.2 -> 15.2 fps median, frames over 100 ms 4 -> 1.
+VICTORY_HEAP_SCAN_ALT = "1"
 
 # ---------------------------------------------------------------------------------------------
 # Linux (Proton) + AMD: the settings of PR #199's measured Linux run (Exorion1er, Fedora 44,

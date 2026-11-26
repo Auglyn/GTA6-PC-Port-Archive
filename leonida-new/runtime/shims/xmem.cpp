@@ -1039,13 +1039,21 @@ thread_local const char* t_unmap_cause = "unmap";
 // page now mapped to another frame than it had (or to none) is reported as released, in runs, so the geometry copies
 // over it are retired as over freed or unmapped memory (geometry_writes::note_released, GeometryViews::drain_released):
 // the title streams by remapping the frames of its pools, and the copies of what those pages held before were kept
-// for the device's life. A page mapped again to the frame it had is no change. LEONIDA_GEOMETRY_REMAP_RELEASE=0: off.
+// for the device's life. A page mapped again to the frame it had is no change.
+// Off unless LEONIDA_GEOMETRY_REMAP_RELEASE=1: a remap keeps the address valid on the console, so the title goes on
+// using what names it, and some of what names a copy's address is never rewritten when the copy is retired (a root
+// view a list resolved while it was recorded, executed after the retirement; a placed buffer view written outside a
+// console heap). On by default, it freed copies under such views: a GPUVM page fault and a lost device about 40 s
+// into the world on an RX 7900 XTX. Read once; rt::xmem::reload_remap_release_setting reads it again (for a test).
+std::atomic<int> g_remap_releases{-1};
 bool remap_releases_enabled() {
-    static const bool on = [] {
-        const char* v = std::getenv("LEONIDA_GEOMETRY_REMAP_RELEASE");
-        return !v || std::strcmp(v, "0") != 0;
-    }();
-    return on;
+    int on = g_remap_releases.load(std::memory_order_relaxed);
+    if (on < 0) {
+        char value[2]{};
+        on = GetEnvironmentVariableA("LEONIDA_GEOMETRY_REMAP_RELEASE", value, sizeof(value)) == 1 && value[0] == '1';
+        g_remap_releases.store(on, std::memory_order_relaxed);
+    }
+    return on != 0;
 }
 struct RemapReleases;
 thread_local RemapReleases* t_remap_releases = nullptr;
@@ -2420,6 +2428,8 @@ bool host_page(std::uintptr_t address, HostPage& out) {
 }  // namespace
 
 namespace rt::xmem {
+
+void reload_remap_release_setting() { g_remap_releases.store(-1, std::memory_order_relaxed); }
 
 void note_stream_reservation(uintptr_t base, size_t size, uintptr_t caller_rva) {
     if (caller_rva != 0x1e1d00f && caller_rva != 0x1e1d03e) return;

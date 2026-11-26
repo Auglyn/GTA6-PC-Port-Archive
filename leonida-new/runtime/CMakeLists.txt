@@ -3740,10 +3740,14 @@ if(TARGET Vulkan::Headers)
     target_compile_options(d3d12_console_heap_mirror_test PRIVATE /W4 /permissive- /utf-8)
     add_test(NAME d3d12_console_heap_mirror COMMAND d3d12_console_heap_mirror_test)
     set_tests_properties(d3d12_console_heap_mirror PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT
-                         "LEONIDA_CONSOLE_FIX_US=0;LEONIDA_CONSOLE_RELEASE_FILTER=1;LEONIDA_HEAP_MIRROR_CHECK=1")
+                         "LEONIDA_CONSOLE_FIX_US=0;LEONIDA_CONSOLE_RELEASE_FILTER=1;LEONIDA_HEAP_MIRROR=1;LEONIDA_HEAP_MIRROR_CHECK=1")
     add_test(NAME d3d12_console_heap_mirror_off COMMAND d3d12_console_heap_mirror_test)
     set_tests_properties(d3d12_console_heap_mirror_off PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT
                          "LEONIDA_CONSOLE_FIX_US=0;LEONIDA_CONSOLE_RELEASE_FILTER=1;LEONIDA_HEAP_MIRROR=0")
+    # The default: no mirror unless LEONIDA_HEAP_MIRROR=1.
+    add_test(NAME d3d12_console_heap_mirror_default COMMAND d3d12_console_heap_mirror_test)
+    set_tests_properties(d3d12_console_heap_mirror_default PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT
+                         "LEONIDA_CONSOLE_FIX_US=0;LEONIDA_CONSOLE_RELEASE_FILTER=1")
     add_executable(d3d12_indirect_zero_test test/d3d12_indirect_zero_test.cpp)
     target_link_libraries(d3d12_indirect_zero_test PRIVATE gta6rt_d3d12_com d3d12 dxgi)
     target_compile_definitions(d3d12_indirect_zero_test PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)

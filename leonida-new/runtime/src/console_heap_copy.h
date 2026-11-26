@@ -9,7 +9,8 @@
 // 0.9-1.0 s a sweep. Every CPU write goes through write() and zero(), which write both the copy and the mirror, so
 // view() (the mirror, or the copy when there is none) holds what the GPU reads.
 //
-// No mirror when the copy is already host RAM (the import of the heap's own scratch), when LEONIDA_HEAP_MIRROR=0, or
+// The mirror is made only with LEONIDA_HEAP_MIRROR=1 (off by default: a world run with it hung the GPU). Even then,
+// no mirror when the copy is already host RAM (the import of the heap's own scratch), or
 // once the copy is written by the GPU pass (LEONIDA_CONSOLE_HEAP_GPU: drop_mirror(); the CPU neither writes nor reads
 // the copy then). The mirror covers the heap's bytes only, not the null guard after them (written once, at creation).
 //

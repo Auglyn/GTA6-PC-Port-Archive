@@ -12,6 +12,7 @@ from emu import (rdna2, rdna2_exec_cmp64, rdna2_exec_cmpf16, rdna2_exec_dot, rdn
                  rdna2_exec_format, rdna2_exec_graphics, rdna2_exec_image, rdna2_exec_int16, rdna2_exec_memory,
                  rdna2_exec_movrel,
                  rdna2_exec_pc, rdna2_exec_pkf16, rdna2_exec_vop3, rdna2_exec_wide)
+from emu import rdna2_exec_gather
 from emu.rdna2_exec_ops import SCALAR, VECTOR, VECTOR_COMPARE, VECTOR_NO_OPERATION, BRANCHES, float_bits
 
 LANES = 32
@@ -132,6 +133,10 @@ def step(wave, data):
     if family in rdna2_exec_graphics.FAMILIES:
         word = int.from_bytes(data[wave.pc:wave.pc + 2 * rdna2.DWORD].ljust(8, b"\0"), "little")
         rdna2_exec_graphics.execute(wave, family, name, word)
+        wave.pc += size * rdna2.DWORD
+        return True
+    if rdna2_exec_gather.supports(family, name):
+        rdna2_exec_gather.execute(wave, name, int.from_bytes(data[wave.pc:wave.pc + size * rdna2.DWORD], "little"))
         wave.pc += size * rdna2.DWORD
         return True
     if family in rdna2_exec_image.FAMILIES:
@@ -282,6 +287,8 @@ def executable(family, name):
                 or name in rdna2_exec_pkf16.VOP3P)
     if family in rdna2_exec_graphics.FAMILIES:
         return rdna2_exec_graphics.supports(family, name)
+    if rdna2_exec_gather.supports(family, name):
+        return True
     if family in rdna2_exec_image.FAMILIES:
         return rdna2_exec_image.supports(family, name)
     if family in FORMAT_FAMILIES and rdna2_exec_format.supports(name):

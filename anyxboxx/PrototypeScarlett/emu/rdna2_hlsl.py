@@ -15,6 +15,7 @@ from emu import (rdna2, rdna2_exec_cmp16, rdna2_exec_div, rdna2_exec_pkf16, rdna
                  rdna2_hlsl_div, rdna2_hlsl_dot, rdna2_hlsl_ext, rdna2_hlsl_f16, rdna2_hlsl_format, rdna2_hlsl_image,
                  rdna2_hlsl_int16, rdna2_hlsl_movrel, rdna2_hlsl_pc, rdna2_hlsl_pkf16, rdna2_hlsl_sad,
                  rdna2_hlsl_scalar64, rdna2_hlsl_wide)
+from emu import rdna2_hlsl_gather
 from emu.rdna2_exec_cmpf16 import COMPAREF16
 from emu.rdna2_exec_ops import signed
 from emu.rdna2_exec_ops import SIXTEEN_BIT_RESULTS, VECTOR_NO_OPERATION
@@ -268,6 +269,9 @@ def statements(data, instruction, finish="return;", special=None, active=ACTIVE)
         return rdna2_hlsl_dot.statements(name, pair, _literal(data, instruction, 2), active)
     if family in MEMORY_FAMILIES:
         return memory_statements(family, name, pair, active)
+    if rdna2_hlsl_gather.supports(family, name):
+        end = instruction.offset + instruction.size * rdna2.DWORD
+        return rdna2_hlsl_gather.statements(name, int.from_bytes(data[instruction.offset:end], "little"), active)
     if family == "MIMG":
         end = instruction.offset + instruction.size * rdna2.DWORD
         return rdna2_hlsl_image.statements(name, int.from_bytes(data[instruction.offset:end], "little"), active)
@@ -297,7 +301,8 @@ def translate(data, sgprs=None, wave_size=32):
     helpers = "\n".join((ALU_HELPERS, rdna2_hlsl_wide.HELPERS, rdna2_hlsl_div.HELPERS, rdna2_hlsl_image.HELPERS,
                          rdna2_hlsl_format.HELPERS, rdna2_hlsl_dot.HELPERS, rdna2_hlsl_sad.HELPERS,
                          rdna2_hlsl_f16.HELPERS, rdna2_hlsl_cmpf16.HELPERS, rdna2_hlsl_int16.HELPERS,
-                         rdna2_hlsl_pkf16.HELPERS))
+                         rdna2_hlsl_pkf16.HELPERS,
+                         rdna2_hlsl_gather.HELPERS))
     prelude = PRELUDE.replace("[numthreads", helpers + "\n[numthreads", 1)
     return "\n".join([prelude.rstrip("\n"), *body(data, sgprs), "}", ""])
 
