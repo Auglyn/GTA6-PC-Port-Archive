@@ -252,7 +252,11 @@ impl<'a> Emitter<'a> {
                 self.tmp += 1;
                 let wide = m.ends_with("_b64");
                 let lane_mask = is_ps && pixel_quad::saved_exec(&self.insns, idx);
-                if s[0] == Opnd::ExecLo && lone_lane::on() {
+                let straight_entry = self.straight_pixel_quad == Some(idx) && !self.dispatched;
+                if straight_entry {
+                    // Entry WQM activates the complete quad, including helper lanes.
+                    self.line(&format!("uint t{t}l = 1u, t{t}h = 0u;"));
+                } else if s[0] == Opnd::ExecLo && lone_lane::on() {
                     self.line(&format!("uint t{t}l = exec_lo & 1u, t{t}h = 0u;"));
                 } else if s[0] == Opnd::ExecLo && !self.resolve_wave32 && !self.paired {
                     self.line("#if __SHADER_TARGET_MAJOR >= 6");
@@ -279,7 +283,7 @@ impl<'a> Emitter<'a> {
                     } else { "0u".into() };
                     self.line(&format!("uint t{t}h = {upper};"));
                 }
-                if s[0] == Opnd::ExecLo && !self.resolve_wave32 && !self.paired && !lone_lane::on() {
+                if !straight_entry && s[0] == Opnd::ExecLo && !self.resolve_wave32 && !self.paired && !lone_lane::on() {
                     self.line(&format!("scc = any(t{t}ballot != 0u);"));
                 } else if !lane_mask {
                     self.line(&format!("scc = ((t{t}l | t{t}h) != 0u);"));

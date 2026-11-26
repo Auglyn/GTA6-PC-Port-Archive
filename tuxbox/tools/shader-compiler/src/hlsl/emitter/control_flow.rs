@@ -222,6 +222,11 @@ impl<'a> Emitter<'a> {
                 }
                 if self.pixel_wave && !is_row_move(ins) {
                     self.emit_pixel_quad_exchange(i, ins)?;
+                } else if self.straight_pixel_quad.is_some() {
+                    // Prefix analysis proves converged FI=1 axis moves with full row/bank masks.
+                    let source = r(&ins.src[0])?;
+                    let axis = if ins.aux.imm == 0xb1 { "X" } else { "Y" };
+                    self.line(&format!("uint q{i} = QuadReadAcross{axis}({source});"));
                 } else {
                     let source = r(&ins.src[0])?;
                     if ins.op == OP_DPP_BINARY {

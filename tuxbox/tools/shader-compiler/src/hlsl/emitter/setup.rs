@@ -140,6 +140,7 @@ impl<'a> Emitter<'a> {
             // in the same register still occupies an attribute slot; d26fd88ff8712f9e).
             pulled_attrs: BTreeSet::new(),
             pixel_wave: false,
+            straight_pixel_quad: None,
             dispatched: false,
             pixel_sum: false,
             flat_attrs: BTreeSet::new(),

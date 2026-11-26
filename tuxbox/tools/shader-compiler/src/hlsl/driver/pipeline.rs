@@ -282,6 +282,8 @@ pub(in crate::hlsl) fn translate_outputs_once(ex: &ShaderExtract, feeds_ps: Opti
     em.pixel_wave = ex.stage == Stage::Pixel && em.pixel_heap && scan_width.is_none() && register_wave_size.is_none()
         && em.insns.iter().all(|i| i.op != wave_sum::DPP_REDUCE || i.enc != Enc::Vop2
             || matches!(i.mnemonic.as_str(), "v_and_b32" | "v_or_b32" | "v_min_u32" | "v_max_u32" | "v_min_f32" | "v_max_f32" | "v_add_nc_u32" | "v_add_f32"));
+    em.straight_pixel_quad = (ex.stage == Stage::Pixel && !em.pixel_heap)
+        .then(|| pixel_quad::straight_prefix(&em.insns)).flatten();
     let required_wave_size = if em.pixel_wave { None } else { required_wave_size };
     let required_wave_size = required_wave_size.or(scan_width).or(register_wave_size).or((requires_ballot || !em.vote_uses.is_empty()).then_some(64));
     // With more than 32 threads, rows 2 and 3 could instead be rows 0 and 1 of
@@ -295,7 +297,7 @@ pub(in crate::hlsl) fn translate_outputs_once(ex: &ShaderExtract, feeds_ps: Opti
     {
         return Err("asymmetric DPP16 row mask requires a known guest wave width".into());
     }
-    let required_wave_size = required_wave_size.or((uses_quad_add && (!em.pixel_wave || em.insns.iter().any(is_row_move)) || uses_bpermute || group_extrema).then_some(32));
+    let required_wave_size = required_wave_size.or((uses_quad_add && em.straight_pixel_quad.is_none() && (!em.pixel_wave || em.insns.iter().any(is_row_move)) || uses_bpermute || group_extrema).then_some(32));
     // A ballot or minimum over active invocations also works in the final
     // partial subgroup. Keep the full-wave requirement for every other user.
     let partial_election = required_wave_size.is_none() && election == Some(ElectionLowering::Native32);
@@ -508,7 +510,7 @@ pub(in crate::hlsl) fn translate_outputs_once(ex: &ShaderExtract, feeds_ps: Opti
         "cs_6_6"
     } else if em.compute_heap && !is_ps {
         "cs_6_6"
-    } else if em.uses_heap_sampler || em.resource_heap_base.is_some() || em.pixel_heap {
+    } else if em.uses_heap_sampler || em.resource_heap_base.is_some() || em.pixel_heap || em.straight_pixel_quad.is_some() {
         "ps_6_6"
     } else if probe_trace {
         "cs_6_5"

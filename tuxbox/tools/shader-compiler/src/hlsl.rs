@@ -361,6 +361,8 @@ struct Emitter<'a> {
     pulled_attrs: BTreeSet<usize>,
     /// Each pixel is a wave of its own.
     pixel_wave: bool,
+    /// Entry WQM proven to dominate converged nonheap pixel axis swaps.
+    straight_pixel_quad: Option<usize>,
     dispatched: bool,
     /// The reduction being emitted adds.
     pixel_sum: bool,
