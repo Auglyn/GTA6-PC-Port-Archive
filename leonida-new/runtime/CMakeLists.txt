@@ -2284,6 +2284,34 @@ if(TARGET Vulkan::Headers)
     add_test(NAME vk_null_descriptor COMMAND vk_null_descriptor_test)
     set_tests_properties(vk_null_descriptor PROPERTIES SKIP_RETURN_CODE 77)
   endif()
+  # More than 4096 live 1D, 2D-array and 3D images, each read through its bindless index, in a set sized from the
+  # device's limits; a full array's refusal reason and indices coming back. The shader is GLSL; without
+  # glslangValidator the test skips.
+  add_executable(vk_bindless_dimensions_test test/vk_bindless_dimensions_test.cpp)
+  target_link_libraries(vk_bindless_dimensions_test PRIVATE Vulkan::Headers ${CMAKE_DL_LIBS})
+  if(WIN32)
+    target_compile_definitions(vk_bindless_dimensions_test PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+  endif()
+  if(MSVC)
+    target_compile_options(vk_bindless_dimensions_test PRIVATE /W4 /permissive- /utf-8)
+  endif()
+  if(Vulkan_GLSLANG_VALIDATOR_EXECUTABLE)
+    set(_bindless_dimensions_spv ${CMAKE_CURRENT_BINARY_DIR}/generated/cs_bindless_dimensions.spv)
+    add_custom_command(OUTPUT ${_bindless_dimensions_spv}
+      COMMAND ${Vulkan_GLSLANG_VALIDATOR_EXECUTABLE} -V --target-env vulkan1.3 -o ${_bindless_dimensions_spv}
+              ${CMAKE_CURRENT_SOURCE_DIR}/test/glsl/cs_bindless_dimensions.comp
+      DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/test/glsl/cs_bindless_dimensions.comp
+      COMMENT "Compiling the bindless dimensions test shader" VERBATIM)
+    target_sources(vk_bindless_dimensions_test PRIVATE ${_bindless_dimensions_spv})
+    target_compile_definitions(vk_bindless_dimensions_test PRIVATE
+                               LEONIDA_TEST_BINDLESS_DIMENSIONS_SPV="${_bindless_dimensions_spv}")
+  else()
+    message(STATUS "glslangValidator not found: vk_bindless_dimensions_test skips")
+  endif()
+  if(BUILD_TESTING)
+    add_test(NAME vk_bindless_dimensions COMMAND vk_bindless_dimensions_test)
+    set_tests_properties(vk_bindless_dimensions PROPERTIES SKIP_RETURN_CODE 77)
+  endif()
   # CPU-only: the bindless set's array sizes from synthetic device limits.
   add_executable(bindless_sizing_test test/bindless_sizing_test.cpp)
   target_link_libraries(bindless_sizing_test PRIVATE Vulkan::Headers)
@@ -4706,12 +4734,12 @@ if(TARGET Vulkan::Headers)
       target_compile_options(title_window_plan_bounds_test PRIVATE /W4 /permissive- /utf-8)
     endif()
     add_test(NAME title_window_plan_bounds COMMAND title_window_plan_bounds_test)
-    # Host-RAM bitset of live console resource-heap V# slots (src/console_heap_vsharp_slots.h).
-    add_executable(console_heap_vsharp_slots_test test/console_heap_vsharp_slots_test.cpp)
+    # What each console resource-heap V# resolved to, and the slots a change touches (src/console_heap_slot_records.h).
+    add_executable(console_heap_slot_records_test test/console_heap_slot_records_test.cpp)
     if(WIN32 AND MSVC)
-      target_compile_options(console_heap_vsharp_slots_test PRIVATE /W4 /permissive- /utf-8)
+      target_compile_options(console_heap_slot_records_test PRIVATE /W4 /permissive- /utf-8)
     endif()
-    add_test(NAME console_heap_vsharp_slots COMMAND console_heap_vsharp_slots_test)
+    add_test(NAME console_heap_slot_records COMMAND console_heap_slot_records_test)
     # A slot-133 shadow keeps a GPU write until the title's bytes under it change (src/shadow_keep.h).
     add_executable(shadow_keep_test test/shadow_keep_test.cpp)
     if(WIN32 AND MSVC)
