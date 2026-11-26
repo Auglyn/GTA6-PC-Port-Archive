@@ -322,6 +322,7 @@ unsafe fn create_pipeline_x_inner(
             crate::big_stack::PipelineWait::Ready(result) => result,
             crate::big_stack::PipelineWait::Deferred => {
                 // The original guest shader would be a second long driver compile.
+                crate::failures::refusal("CS", "driver compile deadline");
                 unsafe { ManuallyDrop::drop(&mut host.pRootSignature) };
                 return unsafe { null_compute(this, root.map(|p| &p.native), desc, compute_threads, out) }.unwrap_or(E_NOTIMPL);
             }
@@ -333,6 +334,7 @@ unsafe fn create_pipeline_x_inner(
         native = match compile(bytes) {
             crate::big_stack::PipelineWait::Ready(result) => result,
             crate::big_stack::PipelineWait::Deferred => {
+                crate::failures::refusal("CS", "driver compile deadline");
                 unsafe { ManuallyDrop::drop(&mut host.pRootSignature) };
                 return unsafe { null_compute(this, root.map(|p| &p.native), desc, compute_threads, out) }.unwrap_or(E_NOTIMPL);
             }
@@ -342,6 +344,7 @@ unsafe fn create_pipeline_x_inner(
     if let Err(error) = &native {
         if let Some(root) = root { super::compute_table::capture_stage_root(bytes, &root.state); }
         crate::diagnostics::compute_failure(bytes, error.code().0);
+        crate::failures::refusal("CS", &format!("driver compile failed: {:#010x}", error.code().0));
         if let Some(status) = unsafe { null_compute(this, root.map(|p| &p.native), desc, compute_threads, out) } {
             return status;
         }

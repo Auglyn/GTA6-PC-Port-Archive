@@ -8,6 +8,8 @@ On Linux, the launcher prepares shaders before opening Frosty, from a profile of
 
 The launcher shows compilation progress and reuses the cache on later runs. After a TuxBox update, shaders that translate to the same source reuse their compiled output. While ProjectScarlett runs, a small panel over the game shows shader and pipeline progress. Pass `--prepare-only` to prepare the cache without opening the game, or `--no-shader-prep` to skip preparation for one launch. Place either option before the game path.
 
+On Linux, each prefix keeps its GPU caches in its `shadercache` folder: vkd3d-proton's pipeline cache and, on NVIDIA, the driver cache. TuxBox asks the NVIDIA driver not to trim its cache, with a 32 GiB limit in case it does. [Environment variables](ENVIRONMENT.md) lists these and the other settings.
+
 ## Project Scarlett graphics trials
 
 On Linux, put `--graphics-menu` before the game path to choose the packaged settings or experimental Series S mode. Use `--graphics-profile series-s` to select it from a script. Series S mode uses Bubblewrap and a temporary copy of the Wine prefix. The copy is discarded at exit.
@@ -44,17 +46,15 @@ A way for RADV to read the game's pages directly would replace it ([#191](https:
 
 ## Game logs
 
-`tuxbox.py run` shows game output in the terminal as it arrives. The first line gives the path to a saved copy. On Linux, logs go in `~/.local/state/project-tuxbox/logs/` (or under `XDG_STATE_HOME`). On Windows, they go in `%LOCALAPPDATA%\TuxBox\logs\`.
-
-To choose a file, pass `--log-file` before the game path. Each run appends to that file.
+`tuxbox.py run` shows game output in the terminal as it arrives. It saves no copy unless you pass `--log-file` before the game path. Each run appends to that file.
 
 ```sh
 python tuxbox.py run --log-file build/lanes.log --app-id Lanes build/lanes
 ```
 
-On Linux, add `--mangohud` before the game path to see FPS, frame times and hardware load while playing. TuxBox saves a CSV of presented frames and a `summary.json` with average FPS and median, p95 and p99 frame times in a capture folder beside the game log. The Frosty launcher enables this automatically when MangoHud is installed.
+On Linux, add `--mangohud` before the game path to see FPS, frame times and hardware load while playing. TuxBox saves a CSV of presented frames and a `summary.json` with average FPS and median, p95 and p99 frame times in a capture folder beside the log file. Without `--log-file`, the folder goes in `~/.local/state/project-tuxbox/logs/` (or under `XDG_STATE_HOME`). The Frosty launcher enables this automatically when MangoHud is installed.
 
-On Linux, add `--offline` before the game path to launch without network access. The game runs in a new network namespace, so its crash handler cannot upload reports. ProjectScarlett's handler sends minidumps to an online crash service unless it is blocked. Offline launches need unprivileged user namespaces.
+On Linux, add `--offline` before the game path to launch without network access. The game runs in a new network namespace, so its crash handler cannot upload reports. ProjectScarlett's handler sends minidumps to an online crash service, so TuxBox always launches it this way. Offline launches need unprivileged user namespaces.
 
 ```sh
 python tuxbox.py run --offline /path/to/game

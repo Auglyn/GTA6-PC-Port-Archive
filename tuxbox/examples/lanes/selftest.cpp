@@ -3,6 +3,7 @@
 #include "gpu.h"
 #include "screen.h"
 #include "../../runtime/d3d12/compute_fixture.h"
+#include "../../runtime/d3d12/frame_stream.h"
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
@@ -12,6 +13,7 @@
 #include "course_shader.h"
 #include "gpu_indirect_shader.h"
 #include "xbox_shader.h"
+#include "raster_shader.h"
 #include "reclaim_shader.h"
 #include <algorithm>
 #include <memory>
@@ -37,6 +39,7 @@ constexpr size_t slot_copy_memory = 62, slot_write32 = 71, slot_write64 = 72, sl
                  slot_emit_sizes = 120, slot_sync_top = 131, slot_sync_bottom = 132;
 constexpr size_t slot_compute_root = 33, device_create_compute = 62, device_create_stream = 86;
 constexpr size_t slot_bind_heaps = 32, slot_compute_table = 35, queue_wait = 17;
+constexpr size_t slot_graphics_root = 34, slot_graphics_table = 36, slot_targets = 50, slot_clear_target = 52;
 constexpr size_t slot_execute_indirect = 61, slot_root_constants = 39, slot_root_uav = 45;
 constexpr size_t queue_signal = 16, queue_execute_frame = 35, device_place = 44, device_create_list = 73;
 
@@ -60,6 +63,8 @@ using SetConstants = void (WINAPI*)(ID3D12GraphicsCommandList*, UINT, UINT, cons
 using SetUav = void (WINAPI*)(ID3D12GraphicsCommandList*, UINT, D3D12_GPU_VIRTUAL_ADDRESS);
 using BindHeaps = void (WINAPI*)(ID3D12GraphicsCommandList*, UINT, ID3D12DescriptorHeap* const*);
 using SetTable = void (WINAPI*)(ID3D12GraphicsCommandList*, UINT, D3D12_GPU_DESCRIPTOR_HANDLE);
+using SetTargets = void (WINAPI*)(ID3D12GraphicsCommandList*, UINT, const D3D12_CPU_DESCRIPTOR_HANDLE*, BOOL,
+                                  const D3D12_CPU_DESCRIPTOR_HANDLE*);
 using WaitQueue = HRESULT (WINAPI*)(ID3D12CommandQueue*, ID3D12Fence*, UINT64);
 using GpuHandle = UINT64 (WINAPI*)(ID3D12DescriptorHeap*);
 using EmitSizes = void (WINAPI*)(ID3D12GraphicsCommandList*,
@@ -482,6 +487,144 @@ void wave64_shader_scenario(ID3D12Device* device) {
             char message[128];
             std::snprintf(message, sizeof(message), "wave sum mismatch at thread %u: expected %u, found %u",
                           i, wave_shader_expected[i], got[i]);
+            throw std::runtime_error(message);
+        }
+    }
+}
+
+// A console pixel program reads a descriptor through the second of two root
+// tables. Its FSSM records and PSV binding name it t3, space2 at slot 2 of
+// table 1, which the title's root declares as t2, space1. The provider must
+// build the root the program was compiled against (`raster_fixture.py`) and
+// draw with it; under the title's root the pipeline becomes a stand-in and the
+// target keeps its clear value.
+void raster_tables(ID3D12Device* device) {
+    D3D12_DESCRIPTOR_RANGE1 ranges[]{
+        {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0, 0, D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE, 0},
+        {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 4, 0, 1, D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE, 0}};
+    D3D12_ROOT_PARAMETER1 params[3]{};
+    for (UINT i = 0; i < 2; ++i) {
+        params[i].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        params[i].DescriptorTable = {1, &ranges[i]};
+    }
+    params[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    params[2].Constants = {500, 0, 1};
+    D3D12_VERSIONED_ROOT_SIGNATURE_DESC signature{D3D_ROOT_SIGNATURE_VERSION_1_1};
+    signature.Desc_1_1 = {3, params, 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_NONE};
+    ComPtr<ID3DBlob> serialized;
+    check(D3D12SerializeVersionedRootSignature(&signature, &serialized, nullptr),
+          "serialize two-table root signature");
+    ComPtr<ID3D12RootSignature> root;
+    check(device->CreateRootSignature(0, serialized->GetBufferPointer(), serialized->GetBufferSize(),
+                                      IID_PPV_ARGS(&root)), "create two-table root signature");
+
+    frame_abi::RasterPipelineStream parts;
+    parts.root.payload = root.Get();
+    parts.vs.payload = {raster_vertex, sizeof(raster_vertex)};
+    parts.ps.payload = {raster_pixel, sizeof(raster_pixel)};
+    parts.raster.payload.FillMode = D3D12_FILL_MODE_SOLID;
+    parts.raster.payload.CullMode = D3D12_CULL_MODE_NONE;
+    parts.raster.payload.DepthClipEnable = TRUE;
+    parts.blend.payload.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    parts.dsv.payload = DXGI_FORMAT_UNKNOWN;
+    parts.formats.payload.NumRenderTargets = 1;
+    parts.formats.payload.RTFormats[0] = DXGI_FORMAT_R32_UINT;
+    D3D12_PIPELINE_STATE_STREAM_DESC stream{sizeof(parts), &parts};
+    ComPtr<ID3D12PipelineState> pipeline;
+    check(method<CreateStreamPipeline>(device, device_create_stream)(device, &stream, IID_PPV_ARGS(&pipeline)),
+          "create pipeline from console raster programs");
+
+    // Sixteen raw views. Table 0 starts at view 0 and table 1 at view 8, so the
+    // program's descriptor is view 10. Every other view holds a decoy naming it.
+    constexpr UINT views = 16, view_bytes = 256, side = 16, pitch = 256;
+    std::vector<UINT> words(views * view_bytes / 4);
+    for (UINT i = 0; i < views; ++i) words[i * view_bytes / 4] = i == 10 ? raster_expected : raster_decoy | i;
+    auto data = buffer(device, D3D12_HEAP_TYPE_UPLOAD, words.size() * 4, D3D12_RESOURCE_STATE_GENERIC_READ);
+    compute_fixture::upload(data.Get(), words.data(), words.size() * 4);
+    D3D12_DESCRIPTOR_HEAP_DESC view_desc{D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, views,
+                                         D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE, 1};
+    ComPtr<ID3D12DescriptorHeap> view_heap;
+    check(device->CreateDescriptorHeap(&view_desc, IID_PPV_ARGS(&view_heap)), "create view heap");
+    const UINT stride = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    const SIZE_T cpu_base = method<frame_abi::CpuHandle>(view_heap.Get(), 9)(view_heap.Get());
+    const UINT64 gpu_base = method<GpuHandle>(view_heap.Get(), 10)(view_heap.Get());
+    for (UINT i = 0; i < views; ++i) {
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+        srv.Format = DXGI_FORMAT_R32_TYPELESS;
+        srv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+        srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srv.Buffer = {UINT64(i) * view_bytes / 4, view_bytes / 4, 0, D3D12_BUFFER_SRV_FLAG_RAW};
+        device->CreateShaderResourceView(data.Get(), &srv, {cpu_base + SIZE_T(i) * stride});
+    }
+
+    D3D12_HEAP_PROPERTIES heap{};
+    heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+    heap.CreationNodeMask = heap.VisibleNodeMask = 1;
+    D3D12_RESOURCE_DESC target_desc{};
+    target_desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    target_desc.Width = target_desc.Height = side;
+    target_desc.DepthOrArraySize = target_desc.MipLevels = 1;
+    target_desc.SampleDesc.Count = 1;
+    target_desc.Format = DXGI_FORMAT_R32_UINT;
+    target_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+    ComPtr<ID3D12Resource> target;
+    check(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &target_desc, D3D12_RESOURCE_STATE_RENDER_TARGET,
+                                          nullptr, IID_PPV_ARGS(&target)), "create uint render target");
+    auto readback = buffer(device, D3D12_HEAP_TYPE_READBACK, side * pitch, D3D12_RESOURCE_STATE_COPY_DEST);
+    D3D12_DESCRIPTOR_HEAP_DESC target_heap_desc{D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 1, D3D12_DESCRIPTOR_HEAP_FLAG_NONE, 0};
+    ComPtr<ID3D12DescriptorHeap> target_heap;
+    check(device->CreateDescriptorHeap(&target_heap_desc, IID_PPV_ARGS(&target_heap)), "create target heap");
+    const D3D12_CPU_DESCRIPTOR_HANDLE rtv{method<frame_abi::CpuHandle>(target_heap.Get(), 9)(target_heap.Get())};
+    device->CreateRenderTargetView(target.Get(), nullptr, rtv);
+
+    Queue direct(device, D3D12_COMMAND_LIST_TYPE_DIRECT);
+    auto* list = direct.list.Get();
+    constexpr float clear[4]{};
+    method<frame_abi::Clear>(list, slot_clear_target)(list, rtv, clear, 0, nullptr);
+    method<SetRoot>(list, slot_graphics_root)(list, root.Get());
+    ID3D12DescriptorHeap* bound[]{view_heap.Get()};
+    method<BindHeaps>(list, slot_bind_heaps)(list, 1, bound);
+    method<SetTable>(list, slot_graphics_table)(list, 0, {gpu_base});
+    method<SetTable>(list, slot_graphics_table)(list, 1, {gpu_base + 8ull * stride});
+    method<SetTargets>(list, slot_targets)(list, 1, &rtv, FALSE, nullptr);
+    const D3D12_VIEWPORT viewport{0, 0, float(side), float(side), 0, 1};
+    const D3D12_RECT scissor{0, 0, LONG(side), LONG(side)};
+    list->RSSetViewports(1, &viewport);
+    list->RSSetScissorRects(1, &scissor);
+    list->SetPipelineState(pipeline.Get());
+    list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    list->DrawInstanced(3, 1, 0, 0);
+    compute_fixture::transition(list, target.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET,
+                                D3D12_RESOURCE_STATE_COPY_SOURCE);
+    D3D12_TEXTURE_COPY_LOCATION from{}, to{};
+    from.pResource = target.Get();
+    from.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    to.pResource = readback.Get();
+    to.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    to.PlacedFootprint = {0, {DXGI_FORMAT_R32_UINT, side, side, 1, pitch}};
+    method<frame_abi::Copy>(list, slot_copy_texture)(list, &to, 0, 0, 0, &from, nullptr, 0);
+    direct.submit();
+    direct.finish("draw with two root tables");
+
+    std::vector<UINT> texels(side * pitch / 4);
+    D3D12_RANGE range{0, side * pitch}, empty{};
+    void* mapped{};
+    check(readback->Map(0, &range, &mapped), "map render target readback");
+    std::memcpy(texels.data(), mapped, side * pitch);
+    readback->Unmap(0, &empty);
+    for (UINT y = 0; y < side; ++y) {
+        for (UINT x = 0; x < side; ++x) {
+            const UINT found = texels[y * pitch / 4 + x];
+            if (found == raster_expected) continue;
+            char message[160];
+            if (!found)
+                std::snprintf(message, sizeof(message), "texel %u,%u is 0: a stand-in pipeline or a skipped draw", x, y);
+            else if ((found & ~0xffu) == raster_decoy)
+                std::snprintf(message, sizeof(message), "texel %u,%u read view %u, not table 1 slot 2 (view 10)", x, y,
+                              found & 0xffu);
+            else
+                std::snprintf(message, sizeof(message), "texel %u,%u: expected %#x, found %#x", x, y,
+                              raster_expected, found);
             throw std::runtime_error(message);
         }
     }
@@ -1516,6 +1659,7 @@ constexpr Scenario scenarios[] = {
     {L"descriptor-reclaim", descriptor_reclaim},
     {L"xbox-shader", xbox_shader_scenario},
     {L"wave64-shader", wave64_shader_scenario},
+    {L"raster-tables", raster_tables},
 };
 
 // A fresh Scarlett device on the requested adapter. The factory is reached
@@ -1567,7 +1711,8 @@ const wchar_t* const selftest_scenarios[] = {L"labels",            L"cross-queue
                                              L"indirect-dispatch", L"gpu-indirect-dispatch",
                                              L"dispatch-wait", L"texture-readback", L"ray-tracing-builder",
                                              L"thread-dimensions", L"descriptor-reclaim",
-                                             L"xbox-shader", L"wave64-shader"};
+                                             L"xbox-shader", L"wave64-shader",
+                                             L"raster-tables"};
 const unsigned selftest_scenario_count = static_cast<unsigned>(std::size(selftest_scenarios));
 static_assert(std::size(selftest_scenarios) == std::size(scenarios));
 

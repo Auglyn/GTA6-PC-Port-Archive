@@ -21,6 +21,19 @@ from .runtime_shaders import runtime_shader_compiler
 PINNED_PROTON = "GE-Proton11-14"
 
 
+# Titles that are only ever launched without network access. ProjectScarlett's
+# crash handler uploads minidumps to an online service.
+OFFLINE_EXECUTABLES = ("game_scarlett_master.exe",)
+
+# Room for a title's compiled GPU pipelines. Cleanup is also switched off, so
+# this only matters to a driver that ignores that.
+NVIDIA_CACHE_BYTES = 32 << 30
+
+
+def requires_offline(executable):
+    return executable.name.casefold() in OFFLINE_EXECUTABLES
+
+
 def _descendant_pids(pid):
     """All descendants of pid, depth-first, via /proc (Linux)."""
     children = {}
@@ -224,7 +237,7 @@ def configure_nvidia_shader_cache(env, report=None):
     explicit = env.get("__GL_SHADER_DISK_CACHE_PATH")
     if explicit:
         env.setdefault("__GL_SHADER_DISK_CACHE_SKIP_CLEANUP", "1")
-        env.setdefault("__GL_SHADER_DISK_CACHE_SIZE", str(8 << 30))
+        env.setdefault("__GL_SHADER_DISK_CACHE_SIZE", str(NVIDIA_CACHE_BYTES))
         if report:
             report(f"NVIDIA shader cache: {explicit} (path set by the environment)")
         return
@@ -242,11 +255,27 @@ def configure_nvidia_shader_cache(env, report=None):
     env["__GL_SHADER_DISK_CACHE"] = "1"
     env["__GL_SHADER_DISK_CACHE_PATH"] = str(cache)
     env["__GL_SHADER_DISK_CACHE_SKIP_CLEANUP"] = "1"
-    # The default cap is about 128MB for the whole shared bucket. One Scarlett
-    # boot writes more than that, so give this directory room of its own.
-    env.setdefault("__GL_SHADER_DISK_CACHE_SIZE", str(8 << 30))
+    # The driver's default cap is far smaller than what one Scarlett boot
+    # writes, so give this directory room of its own.
+    env.setdefault("__GL_SHADER_DISK_CACHE_SIZE", str(NVIDIA_CACHE_BYTES))
     if report:
         report(f"NVIDIA shader cache: {cache}")
+
+
+def configure_pipeline_cache(env, prefix):
+    """Keep vkd3d-proton's pipeline cache in the prefix, beside the driver's.
+
+    Without a path it is written into the game's folder. A path already set,
+    including 0 to disable the cache, is kept.
+    """
+    if "VKD3D_SHADER_CACHE_PATH" in env:
+        return
+    cache = prefix / "shadercache"
+    try:
+        cache.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return
+    env["VKD3D_SHADER_CACHE_PATH"] = str(cache)
 
 
 class Host:
@@ -289,6 +318,7 @@ class Host:
         prefix = (prefix or data_home / "project-tuxbox/prefixes" / prefix_name).expanduser().resolve()
         prefix.mkdir(parents=True, exist_ok=True)
         self.env["WINEPREFIX"] = str(prefix)
+        configure_pipeline_cache(self.env, prefix)
         self.command = [executable]
         if offline:
             self.isolate_network()
@@ -298,7 +328,7 @@ class Host:
         # game and its crash handler cannot upload minidumps or reach any server.
         unshare = shutil.which("unshare")
         if not unshare:
-            raise ValueError("Install util-linux unshare to launch with --offline")
+            raise ValueError("Install util-linux unshare to launch without network access")
         wrapper = [unshare, "--user", "--map-current-user", "--net", "--"]
         probe = subprocess.run([*wrapper, "true"], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
         if probe.returncode:

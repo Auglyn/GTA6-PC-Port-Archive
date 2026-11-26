@@ -54,6 +54,7 @@ The game also imports Windows core API sets for services such as files, timing a
 | `descriptor-reclaim` | Shader-visible descriptor heap reclamation across completed batches, overlapping in-flight `Reset()`, `ClearState`, evicted-slot rebinding, and unsubmitted pin exhaustion |
 | `xbox-shader` | A console shader's pipeline and dispatch ([shader cache](#shader-cache)) |
 | `wave64-shader` | A console shader that sums across 64-lane waves, translated while the game runs; not part of `all` |
+| `raster-tables` | A console vertex and pixel pair drawn under a root with two descriptor tables, reading through the second ([raster tables](#raster-tables)) |
 
 ```sh
 python tuxbox.py verify --only lanes-selftest --output build/lanes-selftest.json
@@ -109,6 +110,18 @@ Lanes also carries a console program that sums across 64-lane waves. The `wave64
 | Wave, host | The results are the console's with whatever translation this card needs |
 
 These checks run on the Proton backend. They remove only these shaders' cache entries from the prefix.
+
+## Raster tables
+
+The `raster-tables` scenario draws a fullscreen triangle with two hand-written console programs (`raster_fixture.py`; not taken from any game). The pixel program reads one dword through slot 2 of the root's second descriptor table and writes it to a uint target. Its FSSM records and PSV binding name that descriptor `t3, space2`, while the root declares `t0` to `t3` in space 1 there. The provider has to build the root the program was compiled against, with the register at that slot, and translate both programs for it. Under the title's root the pipeline becomes a stand-in and the target keeps its clear value. A wrong table or slot reads a decoy that names its view.
+
+That root is made while the game runs, so nothing can be prepared before launch. `verify` runs the scenario with the host worker, requires the provider to report the reflected root and pipeline, and fails if either program was translated without a root.
+
+```sh
+python tuxbox.py verify --only lanes-raster-tables --output build/lanes-raster-tables.json
+```
+
+It runs on the Proton backend and removes only these programs' cache entries from the prefix.
 
 ## Deterministic replay
 

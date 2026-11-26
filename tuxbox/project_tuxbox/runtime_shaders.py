@@ -484,20 +484,27 @@ def snapshot_compiler_cache(xshader, cache_root, *, dxc_helper=None):
     return tools, cache
 
 
+RUNTIME_JOBS_LIMIT = 32
+
+
 def runtime_jobs(env, report):
-    """Bound live compiler subprocesses; honor the launcher's CPU affinity."""
+    """Bound live compiler subprocesses; honor the launcher's CPU affinity.
+
+    The game runs at the same time, so by default half the available cores
+    compile, and at least two where there are two.
+    """
     try:
         cpus = len(os.sched_getaffinity(0))
     except (AttributeError, OSError):
         cpus = os.cpu_count() or 1
-    cap = max(1, min(8, cpus))
-    default = min(4, cap)
+    cap = max(1, min(RUNTIME_JOBS_LIMIT, cpus))
+    default = min(cap, max(2, cpus // 2))
     value = env.get("TUXBOX_RUNTIME_SHADER_JOBS")
     if value is None:
         return default
     try:
         jobs = int(value)
-        if not 1 <= jobs <= 8:
+        if not 1 <= jobs <= RUNTIME_JOBS_LIMIT:
             raise ValueError
     except ValueError:
         report(f"Invalid TUXBOX_RUNTIME_SHADER_JOBS={value!r}; using {default}")

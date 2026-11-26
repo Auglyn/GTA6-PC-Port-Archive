@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from project_tuxbox.console_cbv import configure_console_cbv, console_cbv_layer
-from project_tuxbox.host import PINNED_PROTON, Host, claim_package_drive, configure_nvidia_shader_cache, proton_installation, warn_scarlett_dxc
+from project_tuxbox.host import PINNED_PROTON, Host, claim_package_drive, configure_nvidia_shader_cache, configure_pipeline_cache, proton_installation, requires_offline, warn_scarlett_dxc
 
 
 class ScarlettWindowsDxc(unittest.TestCase):
@@ -221,6 +221,10 @@ class OfflineLaunch(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Operation not permitted"):
             self.host(1, "unshare: unshare failed: Operation not permitted\n")
 
+    def test_project_scarlett_is_recognised_in_any_case(self):
+        self.assertTrue(requires_offline(Path("stage/Game_Scarlett_Master.exe")))
+        self.assertFalse(requires_offline(Path("stage/Lanes.exe")))
+
     def test_native_backend_rejects_offline(self):
         with patch("project_tuxbox.host.platform.machine", return_value="x86_64"), \
              self.assertRaisesRegex(ValueError, "--offline"):
@@ -334,6 +338,21 @@ class ConsoleConstantBuffers(unittest.TestCase):
             build.assert_called_once_with([script, layer], env=env, check=True)
 
 
+class PipelineCache(unittest.TestCase):
+    def test_defaults_to_the_prefix(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {}
+            configure_pipeline_cache(env, Path(tmp))
+            self.assertEqual(env, {"VKD3D_SHADER_CACHE_PATH": str(Path(tmp) / "shadercache")})
+            self.assertTrue((Path(tmp) / "shadercache").is_dir())
+
+    def test_a_set_path_or_disabled_cache_stays(self):
+        for value in ("/games/vkd3d", "0"):
+            env = {"VKD3D_SHADER_CACHE_PATH": value}
+            configure_pipeline_cache(env, Path("/unused"))
+            self.assertEqual(env, {"VKD3D_SHADER_CACHE_PATH": value})
+
+
 class NvidiaShaderCache(unittest.TestCase):
     def test_prefix_gets_its_own_driver_cache(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -344,7 +363,7 @@ class NvidiaShaderCache(unittest.TestCase):
             self.assertEqual(env["__GL_SHADER_DISK_CACHE"], "1")
             self.assertEqual(env["__GL_SHADER_DISK_CACHE_PATH"], str(cache))
             self.assertEqual(env["__GL_SHADER_DISK_CACHE_SKIP_CLEANUP"], "1")
-            self.assertEqual(env["__GL_SHADER_DISK_CACHE_SIZE"], str(8 << 30))
+            self.assertEqual(env["__GL_SHADER_DISK_CACHE_SIZE"], str(32 << 30))
             self.assertTrue(cache.is_dir())
 
     def test_explicit_path_and_disabled_cache_stay(self):
@@ -353,7 +372,7 @@ class NvidiaShaderCache(unittest.TestCase):
         configure_nvidia_shader_cache(env)
         self.assertEqual(env["__GL_SHADER_DISK_CACHE_PATH"], "/games/nv")
         self.assertEqual(env["__GL_SHADER_DISK_CACHE_SKIP_CLEANUP"], "0")
-        self.assertEqual(env["__GL_SHADER_DISK_CACHE_SIZE"], str(8 << 30))
+        self.assertEqual(env["__GL_SHADER_DISK_CACHE_SIZE"], str(32 << 30))
         sized = {"WINEPREFIX": "/unused", "__GL_SHADER_DISK_CACHE_PATH": "/games/nv",
                  "__GL_SHADER_DISK_CACHE_SIZE": "1024"}
         reports = []

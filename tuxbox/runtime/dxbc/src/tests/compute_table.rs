@@ -201,6 +201,22 @@ fn multi_table_raster_buffer_views_follow_psv() {
 }
 
 #[test]
+fn multi_table_raster_raw_view_keeps_the_shader_register() {
+    // The Lanes `raster-tables` pixel program: a raw SRV t3 space2 at slot 2 of
+    // table 1, under a root whose table 1 declares t0..t3 in space 1.
+    let range = |num, space| RootRange { range_type: 0, num, base_register: 0, space, offset_in_table: 0 };
+    let root = tables_then(&[RootParamKind::Table(vec![range(1, 0)]), RootParamKind::Table(vec![range(4, 1)]),
+        RootParamKind::Constants { register: 500, space: 0, num32: 1 }]);
+    let pixel = raster_shader(0, &[[3, 16, 1, 3, 0x109]], &[[0x300, 16, 3, 1, 0x1_0904]], &[[4, 2, 3, 3]]);
+    let vertex = raster_shader(1, &[], &[], &[]);
+    let merged = root_bindings(&vertex, 1, &root).zip(root_bindings(&pixel, 0, &root))
+        .and_then(|(v, p)| merge_raster_bindings(v, p));
+    assert_eq!(merged, Some(vec![Binding { table: 1, kind: 0, register: 3, space: 2, slot: 2 }]));
+    // Without the user-data row the descriptor is unconfirmed.
+    assert_eq!(root_bindings(&raster_shader(0, &[], &[[0x300, 16, 3, 1, 0x1_0904]], &[[4, 2, 3, 3]]), 0, &root), None);
+}
+
+#[test]
 fn same_register_at_two_slots_fails_closed() {
     let image = program(
         &[[3, 0xc8, 1, 28, 0x105], [3, 0xd0, 1, 28, 0x105]],
