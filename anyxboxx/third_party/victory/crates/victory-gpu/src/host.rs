@@ -9273,6 +9273,16 @@ extern "system" fn window_proc(
     unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
 }
 
+/// `VICTORY_WINDOW_MODE=borderless` makes the window a frameless one over the whole screen;
+/// anything else (or nothing) is the usual framed window.
+fn is_borderless(mode: &str) -> bool {
+    mode.trim().eq_ignore_ascii_case("borderless")
+}
+
+fn borderless_window() -> bool {
+    std::env::var("VICTORY_WINDOW_MODE").is_ok_and(|v| is_borderless(&v))
+}
+
 fn make_window(width: u32, height: u32) -> windows::core::Result<HWND> {
     const CLASS: PCWSTR = w!("VIctory");
     // SAFETY: registers our class once and creates a window of it.
@@ -9287,6 +9297,23 @@ fn make_window(width: u32, height: u32) -> windows::core::Result<HWND> {
             ..Default::default()
         };
         RegisterClassExW(&class);
+        if borderless_window() {
+            // Covers the whole screen without a frame; the client size is the screen's.
+            return CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                CLASS,
+                w!("Neptune (Victory Edit by Traffic & zm0kie)"),
+                WS_POPUP | WS_VISIBLE,
+                0,
+                0,
+                GetSystemMetrics(SM_CXSCREEN),
+                GetSystemMetrics(SM_CYSCREEN),
+                None,
+                None,
+                Some(instance.into()),
+                None,
+            );
+        }
         let mut rect = RECT {
             left: 0,
             top: 0,
@@ -9474,5 +9501,16 @@ mod batch {   // Batch::texture_due lives here; `mod tests` is already taken at 
         assert_eq!(ram_idle_ms(Some(0)), 2_000);
         // Missing falls back to normal
         assert_eq!(ram_idle_ms(None), 10_000);
+    }
+}
+
+#[cfg(test)]
+mod window_mode_tests {
+    #[test]
+    fn only_borderless_is_borderless() {
+        assert!(super::is_borderless("borderless"));
+        assert!(super::is_borderless(" Borderless "));
+        assert!(!super::is_borderless("windowed"));
+        assert!(!super::is_borderless(""));
     }
 }

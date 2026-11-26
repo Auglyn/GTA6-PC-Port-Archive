@@ -5310,6 +5310,14 @@ class Stage:
                 raise Unsupported('scc from descriptor data')
             if word_pack:
                 raise Unsupported('%s on descriptor data' % base)
+            # Every path below writes the destination's symbol directly, not through set_s, or refuses. The
+            # written word is descriptor data, so a lane-mask mark the SGPR held from an earlier write ends here as
+            # set_s ends it. lower() has already classified the sources, so a mask read by this instruction is
+            # still refused.
+            if dst and dst[0] == 's':
+                for reg in range(dst[1], dst[2] + 1):
+                    getattr(self, 'masks', set()).discard(reg)
+                    getattr(self, 'mask_high', set()).discard(reg)
             if self.pointer_add(base, dname, srcs, syms):
                 return None
             if dname == 'm0':
@@ -8653,8 +8661,9 @@ class Stage:
             return '(-%s)' % text if neg else text
 
         # v_fma_mix* is fused, but HLSL may round `a * b` before the add, so binary32 sources with long
-        # mantissas can differ from the hardware by 1 ULP (same as v_fma_f32 in VEC_F).
-        expr = '%s * %s + %s' % tuple(operand(*a) for a in zip(ops[1:4], half, hi))
+        # mantissas can differ from the hardware by 1 ULP (same as v_fma_f32 in VEC_F). mix32 is a precise
+        # mad: without it an RDNA 1 and an RDNA 4 driver drop the sign of a -0 product (#2729, #2746).
+        expr = 'mix32(%s, %s, %s)' % tuple(operand(*a) for a in zip(ops[1:4], half, hi))
         if clamp:
             expr = 'saturate(%s)' % expr
         d = reg_range(ops[0])[1]
@@ -9448,6 +9457,8 @@ VEC_F = {
     'v_min3_f32': (3, 'minmax_zero32({0}, minmax_zero32({1}, {2}, false), false)'),
     'v_max3_f32': (3, 'minmax_zero32({0}, minmax_zero32({1}, {2}, true), true)'),
 }
+# v_fma_mix*: precise keeps the sign of a zero result; mad still lets a backend fuse or round the product.
+MIX32 = 'float mix32(float a, float b, float c) { precise float result = mad(a, b, c); return result; }'
 # 16-bit VALU: (sources, source kind, float or uint expression of the sources, result kind). 'h' sources are
 # binary16 read from the low half and computed in binary32; an 'h' result is rounded back to binary16. The
 # i16/u16 conversions to binary16 read the low half as an integer; the conversions to integers truncate toward
@@ -9978,6 +9989,7 @@ class Pipeline:
                pixel_aot.SALU_HELPERS['fma16_rne'],
                # A binary16 product is exact in binary32. Keep its sign when the result is zero (#2746).
                'float mul16(float a, float b) { precise float product = a * b; return product; }',
+               MIX32,
                'float fma16o(float a, float b, float c) {',
                '    if (!isfinite(a) || !isfinite(b) || !isfinite(c)) return a * b + c;',
                '    return f16tof32(fma16_rne(f32tof16(a), f32tof16(b), f32tof16(c)));',
@@ -10566,7 +10578,7 @@ def pipeline_key(vs_code, ps_code, root_blob, layout=b'', ps_inputs=None):
     SPI_PS_INPUT_ENA and SPI_PS_INPUT_ADDR as little-endian u32. Two pipelines with the same stages, root
     signature and input layout but different masks are then two requests with their own results. Without a
     description the key is unchanged."""
-    key = fnv(root_blob, fnv(ps_code, fnv(vs_code, fnv(b'x2w-startup-shader-27'))))
+    key = fnv(root_blob, fnv(ps_code, fnv(vs_code, fnv(b'x2w-startup-shader-28'))))
     key = fnv(layout, key) if layout else key
     return key if ps_inputs is None else fnv(b'psin1' + struct.pack('<II', *ps_inputs), key)
 
@@ -10576,7 +10588,7 @@ def compute_key(cs_code, data, root_blob, desc, state_a=b'', state_b=b''):
     graphics revision followed by "cs", then each part preceded by its length as a little-endian u64: the code,
     the words 7-8 blob, the root signature, the 12 description words with their pointers zeroed and the two
     state blocks."""
-    key = fnv(b'x2w-startup-shader-27cs')
+    key = fnv(b'x2w-startup-shader-28cs')
     for part in (cs_code, data, root_blob, desc, state_a, state_b):
         key = fnv(part, fnv(struct.pack('<Q', len(part)), key))
     return key
@@ -10993,6 +11005,33 @@ def mesh57_key(ms, ps, root):
     return value
 
 
+def kill_exit_block(pixel):
+    """True when the only null export of a decoded pixel stage is the early exit of a kill.
+
+    LLVM SILateBranchLowering and Mesa ACO place that exit after the program's s_endpgm: the block is
+    `exp null off, off, off, off done vm` then the final s_endpgm, and every branch into it enters with EXEC zero,
+    so the export writes nothing. The stage's other lanes end at the earlier s_endpgm. An entry is s_cbranch_execz,
+    or the demote form: s_cbranch_scc0 directly after `s_cselect exec, exec, 0` (s_cselect leaves SCC, so the taken
+    branch follows the select of 0) with no branch landing on the s_cbranch_scc0 itself."""
+    at = [i for i, (_, _, op, a) in enumerate(pixel) if op == 'exp' and a.split()[1] == 'null']
+    if len(at) != 1 or at[0] != len(pixel) - 2 or pixel[at[0] - 1][2] != 's_endpgm':
+        return False
+    if pixel[at[0]][3] != 'exp null off, off, off, off done vm':
+        return False
+    label = 'label_0x%x' % pixel[at[0]][0]
+    end = 'label_0x%x' % pixel[-1][0]
+    targets = {a.split()[-1] for _, _, op, a in pixel if op.startswith('s_cbranch') or op == 's_branch'}
+    entries = [i for i, (_, _, _, a) in enumerate(pixel) if a.split()[-1:] in ([label], [end])]
+
+    def zero_exec(i):
+        if pixel[i][2] == 's_cbranch_execz':
+            return True
+        return (pixel[i][2] == 's_cbranch_scc0' and i > 0
+                and pixel[i - 1][3] in ('s_cselect_b64 exec, exec, 0', 's_cselect_b32 exec_lo, exec_lo, 0')
+                and 'label_0x%x' % pixel[i][0] not in targets)
+    return bool(entries) and all(zero_exec(i) for i in entries)
+
+
 def translate_mesh57(out_dir, key):
     """Translate a fixed-descriptor mesh request of the accepted shape (mesh_skeleton), or raise Unsupported.
 
@@ -11017,7 +11056,8 @@ def translate_mesh57(out_dir, key):
         if not pixel or pixel[-1][2] != 's_endpgm' or classify_decoded(pixel) != 'ps' and not null_only:
             raise Unsupported('slot 57 pixel stage has an incompatible export or termination')
         # The slot 57 depth-only profile is the null export alone; the general pixel path keeps its mixed forms.
-        if 'null' in targets and not null_only:
+        # A colour stage may also hold the null export as the early exit of a kill (kill_exit_block).
+        if 'null' in targets and not null_only and not kill_exit_block(pixel):
             raise Unsupported('slot 57 pixel stage mixes the null export with another export')
     pipe = MeshPipeline(ms, ps or None, root)
     sources = [('ms', 'ms_6_5', pipe.hlsl_ms())]

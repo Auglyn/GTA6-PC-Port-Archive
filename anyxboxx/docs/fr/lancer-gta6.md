@@ -4,7 +4,7 @@
 
 Ce guide explique comment installer et lancer le projet, et tout ce qu'il faut installer pour refaire nos essais sur le build Xbox Series 1.0.2.1 de GTA VI, jusqu'au point où nous en sommes : la première cinématique. Il ne fournit pas le jeu et n'explique pas comment l'obtenir : vous apportez votre propre copie. Ne mettez jamais de fichier du jeu dans ce dépôt et ne les joignez à aucune issue.
 
-Le lancement passe par [VIctory](https://github.com/Marvisak/VIctory) (Marvisak, GPL-3.0 ou ultérieure), copié dans ce dépôt sous `third_party/victory`, où il est notre code : rien n'est synchronisé ni épinglé. La copie part de la branche `anyxboxx/fork-7b0-lot9-murs` du fork du mainteneur [LooperSalty/victory](https://github.com/LooperSalty/victory), puis a reçu 57 commits pour Proton et les cartes AMD (voir plus bas). Cette branche assemble le fork [fxceless/victory-fork](https://github.com/fxceless/victory-fork) (GPL-3.0) au commit `7b0f736`, huit de ses pull requests précédentes, sept nouvelles, le portage de la précompilation hors ligne de #282 et des commits à nous (disposition `xg_xs.dll` servie comme la bibliothèque de Microsoft, voir plus bas), au commit `80d58f8`. Le script `tools/lancer_victory.ps1` le compile et le lance sur votre dossier du jeu.
+Le lancement passe par [VIctory](https://github.com/Marvisak/VIctory) (Marvisak, GPL-3.0 ou ultérieure), copié dans ce dépôt sous `third_party/victory`, où il est notre code : rien n'est synchronisé ni épinglé. La copie part de la branche `anyxboxx/fork-7b0-lot9-murs` du fork du mainteneur [LooperSalty/victory](https://github.com/LooperSalty/victory), puis a reçu 57 commits pour Proton et les cartes AMD (voir plus bas). Cette branche assemble le fork [fxceless/victory-fork](https://github.com/fxceless/victory-fork) (GPL-3.0) au commit `7b0f736`, huit de ses pull requests précédentes, sept nouvelles, le portage de la précompilation hors ligne de #282 et des commits à nous (disposition `xg_xs.dll` servie comme la bibliothèque de Microsoft, voir plus bas), au commit `80d58f8`. Le script `anyxboxx run` le compile et le lance sur votre dossier du jeu.
 
 ## Base Neptune (25 novembre, soir)
 
@@ -23,7 +23,7 @@ Mesuré par le mainteneur le 25 novembre (RTX 4070 SUPER, i7-13700KF, chemin Ser
 
 ### Sous Linux (Proton, AMD)
 
-La base Neptune ne reprend pas les 57 commits Proton/AMD de la base précédente (section suivante) : `main` a besoin de quatre choses sous Proton. `tools/lancer_victory.ps1` ne tourne que sous Windows : posez ces réglages à la main autour de `wine victory.exe run <dossier du jeu>\game_scarlett_master.exe --execute`, avec les mêmes variables que le lanceur.
+La base Neptune ne reprend pas les 57 commits Proton/AMD de la base précédente (section suivante) : `main` a besoin de quatre choses sous Proton. `anyxboxx run` ne tourne que sous Windows : posez ces réglages à la main autour de `wine victory.exe run <dossier du jeu>\game_scarlett_master.exe --execute`, avec les mêmes variables que le lanceur.
 
 | Quoi | Pourquoi |
 | --- | --- |
@@ -57,7 +57,7 @@ Ce qu'apportent les 57 commits :
 - **Pipelines** : un pipeline encore en création n'est attendu que dans la première image qui le demande ; attentes de pipelines pendant le chargement d'un monde bornées par lancement, programmes de résolution du ray tracing non créés tant que le constructeur de structures est coupé, liste des pipelines précoces fusionnée d'un lancement à l'autre (myokex).
 - **Diagnostics et tests** : compteurs par image, interrupteurs A/B, magenta pour les textures manquantes, test du pipeline de maillage ignoré sans mesh shaders (fork #14, oddiums).
 
-Variables lues par ce code. `tools/lancer_victory.ps1` n'en pose aucune : un lancement prend les valeurs par défaut.
+Variables lues par ce code. `anyxboxx run` n'en pose aucune : un lancement prend les valeurs par défaut.
 
 | Variable | Défaut | Rôle |
 | --- | --- | --- |
@@ -131,7 +131,7 @@ Pourquoi des objets et des murs manquent dans le monde, trouvé avec `VICTORY_D3
 
 `third_party/victory` pointait sur la branche `anyxboxx/fork-7b0-lot8-xg` de [LooperSalty/victory](https://github.com/LooperSalty/victory), au commit `19feca8650c934913063076b612e87739d8d1912` : le lot 8 (plus bas) plus un commit à nous, `xg: serve or check the title from Microsoft's own xg_xs.dll (local copy)`. Sans `VICTORY_XG_DLL`, le code tourne exactement comme le lot 8.
 
-Le jeu demande à la bibliothèque de disposition des textures de la console (`xg_xs.dll` : `XGSuggestSwizzleMode`, `XGCreateTextureComputer`) où se trouvent chaque mip et chaque tranche. VIctory répond avec sa propre réimplémentation. Le GDK fournit une version PC hors ligne de cette bibliothèque ; avec votre propre copie, `tools/lancer_victory.ps1 -XgDll <chemin de xg_xs.dll>` la laisse répondre à la place. La DLL est un fichier du GDK : elle n'entre jamais dans ce dépôt, le lanceur ne transmet que son chemin.
+Le jeu demande à la bibliothèque de disposition des textures de la console (`xg_xs.dll` : `XGSuggestSwizzleMode`, `XGCreateTextureComputer`) où se trouvent chaque mip et chaque tranche. VIctory répond avec sa propre réimplémentation. Le GDK fournit une version PC hors ligne de cette bibliothèque ; avec votre propre copie, `anyxboxx run --xg-dll <chemin de xg_xs.dll>` la laisse répondre à la place. La DLL est un fichier du GDK : elle n'entre jamais dans ce dépôt, le lanceur ne transmet que son chemin.
 
 Mesuré ou observé par le mainteneur (Windows 11, RTX 4070 Super, journaux VIctory, 25 novembre, vers 00:37 et 00:42), réglages du lanceur de `main` :
 
@@ -148,7 +148,7 @@ Mesuré ou observé par le mainteneur (Windows 11, RTX 4070 Super, journaux VIct
 
 Pourquoi : une capture PIX d'une image de cinématique montre que `IrradianceCache_Shade` et `IrradianceCache_ShadeSecondary` ne tournaient pas au lot 5 (0 dispatch). Leurs deux shaders ne se traduisaient pas (« a wave reduction where not every lane runs ») : le cache d'irradiance n'était donc jamais éclairé, et tout ce qui est hors de la lumière directe restait noir (côté ombré des visages, intérieurs). Avec le n°11, les deux shaders se traduisent et passent la validation DXIL, et leurs pipelines sont créés et liés en jeu.
 
-Mesuré ou observé par le mainteneur (Windows 11, RTX 4070 Super), avec les réglages du lanceur de `main` (`tools/lancer_victory.ps1`), d'après le journal VIctory et une capture PIX (essai du 25 novembre, vers 00:01 à 00:05) :
+Mesuré ou observé par le mainteneur (Windows 11, RTX 4070 Super), avec les réglages du lanceur de `main` (`anyxboxx run`), d'après le journal VIctory et une capture PIX (essai du 25 novembre, vers 00:01 à 00:05) :
 
 - Lot 5 : capture PIX, 0 dispatch pour les deux passes du cache d'irradiance. Mesuré.
 - Lot 8 : les deux shaders se traduisent et valident, pipelines créés et liés en jeu. Observé.
@@ -204,7 +204,7 @@ Le monde est atteint et affiché. Rien ici ne vient de la lecture du code du jeu
 
 **Premier lancement à froid.** Le premier lancement avec un cache vide a planté au chargement (compilation des pipelines, puis le plantage interne du jeu suivi sous VIctory #1464). Le deuxième lancement, avec le cache rempli, a tenu. Si le premier plante, relancez.
 
-Les réglages de l'essai réussi sont maintenant ceux par défaut de `tools/lancer_victory.ps1` (tableau de la section Lancement), sauf cinq variables que le code épinglé ne lit jamais et DRED, devenu optionnel (voir Lancement). Ils demandent la compilation `diag` (`--profile diag --features diagnostics`). Passez `-NoTunedSettings` pour les désactiver.
+Les réglages de l'essai réussi sont maintenant ceux par défaut de `anyxboxx run` (tableau de la section Lancement), sauf cinq variables que le code épinglé ne lit jamais et DRED, devenu optionnel (voir Lancement). Ils demandent la compilation `diag` (`--profile diag --features diagnostics`). Passez `-NoTunedSettings` pour les désactiver.
 
 ## Ce que vous obtenez aujourd'hui
 
@@ -276,6 +276,8 @@ Variable ajoutée au tableau ci-dessus (diagnostic, build `diag`) :
 
 ## Installation
 
+Sur la branche `rust/full`, le lanceur graphique fait la compilation, le préchauffage des shaders et le lancement : voir [lanceur.md](lanceur.md). Les étapes ci-dessous valent pour `main` et la ligne de commande.
+
 1. [Git](https://git-scm.com/).
 2. Rust via [rustup](https://rustup.rs/). La toolchain exacte est fixée par `third_party/victory/rust-toolchain.toml` et s'installe seule à la première commande `cargo`.
 3. Visual Studio 2022 ou 2026 Build Tools avec la charge « Développement Desktop en C++ » (MSVC).
@@ -296,7 +298,7 @@ cd AnyXboxX
 cargo build --profile diag -p victory --features diagnostics --manifest-path third_party/victory/Cargo.toml
 ```
 
-Le profil `diag` est nécessaire pour les touches scriptées, les captures d'images et les options de diagnostic ci-dessous. La première compilation télécharge et compile toutes les dépendances : comptez plusieurs minutes. L'exécutable est `third_party\victory\target\diag\victory.exe` (ou `%CARGO_TARGET_DIR%\diag\victory.exe` si cette variable est définie). `tools/lancer_victory.ps1` lance cette compilation à votre place à chaque lancement : cargo ne fait rien quand l'exécutable est à jour (environ 0,1 s) et le recompile après une mise à jour du sous-module, si bien qu'un ancien `victory.exe` ne tourne jamais avec des réglages qu'il ne lit pas. Si la compilation échoue, le lanceur s'arrête et donne le code de sortie de cargo.
+Le profil `diag` est nécessaire pour les touches scriptées, les captures d'images et les options de diagnostic ci-dessous. La première compilation télécharge et compile toutes les dépendances : comptez plusieurs minutes. L'exécutable est `third_party\victory\target\diag\victory.exe` (ou `%CARGO_TARGET_DIR%\diag\victory.exe` si cette variable est définie). `anyxboxx run` lance cette compilation à votre place à chaque lancement : cargo ne fait rien quand l'exécutable est à jour (environ 0,1 s) et le recompile après une mise à jour du sous-module, si bien qu'un ancien `victory.exe` ne tourne jamais avec des réglages qu'il ne lit pas. Si la compilation échoue, le lanceur s'arrête et donne le code de sortie de cargo.
 
 ## Lancement
 

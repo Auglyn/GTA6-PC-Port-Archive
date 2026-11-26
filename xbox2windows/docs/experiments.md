@@ -10137,7 +10137,32 @@ the empty `targets` line, a control without the EXEC narrowing (no discard)
 and a null export followed by a position export (still refused). A slot 57
 pixel stage that has the null export next to an `mrt0`, `mrtz` or `param0`
 export, in either order, is refused before any source or manifest is written;
-the general pixel path keeps those mixed forms. The
+the general pixel path keeps those mixed forms.
+
+One mixed form is accepted: the early exit of a kill. LLVM
+`SILateBranchLowering` and Mesa ACO place it after the program's `s_endpgm`:
+`exp null off, off, off, off done vm` then the final `s_endpgm`, and every
+branch into the block enters with EXEC zero, so the export writes nothing
+(`kill_exit_block` in `gfx2hlsl.py`). An entry is `s_cbranch_execz`, or the
+demote form: `s_cbranch_scc0` directly after `s_cselect_b32 exec_lo, exec_lo, 0`
+or `s_cselect_b64 exec, exec, 0`. `s_cselect` leaves SCC, so the taken branch
+follows the select of 0; no branch may land on the `s_cbranch_scc0` itself. The
+rest of the stage, here an `mrt0` export after the kill, is translated as usual
+and keeps its `vm` discard. `startup_mesh57_depth_only_check.py` checks both
+forms and refuses ten near misses with the mixed-export message: the colour
+export falling through into the null export, a block no branch reaches, a block
+entered by `s_branch`, an exit export without `vm`, another instruction in the
+block, and for the demote form `s_cbranch_scc0` without the `s_cselect`, an
+`s_cselect` that keeps EXEC, one into another register, an instruction between
+the two, and `s_cbranch_scc1`. The
+`startup_mesh57_skeleton_kill_exit_{warp,hardware}` CTest checks draw both
+colour pairs with `offscreen_check --mesh-indexed`; lanes whose flat attribute 0
+red is at or below 0.5 are killed, so two of the four triangles are dropped.
+Each draw must match the CPU rasteriser without them, and the same mesh with the
+pixel stage that does not kill must differ at exactly the 115 killed pixels.
+Nothing here shows that a runtime path loads the pair.
+
+The
 `startup_mesh57_skeleton_depth_{warp,hardware}` CTest checks draw a
 source-built depth-only pair (`v_interp_mov_f32`, `v_cmpx_lt_f32 0.5, v0`,
 `exp null off, off, off, off done vm`, `s_endpgm`) twice with
@@ -10450,7 +10475,7 @@ Title memory follows XMem (`src/xmem_mapped_pages.cpp`). The section pool is one
 | Path | Backing |
 |---|---|
 | `share` | The pool is opened once as a heap: `OpenExistingHeapFromAddress` on a whole-pool view of the section, or on the allocation base for the private range (`OpenExistingHeapFromFileMapping` leaks Windows commit, #2234), after `D3D12_FEATURE_EXISTING_HEAPS`. A cross-adapter buffer is placed at the slot offset. Nothing is copied. |
-| `copy` | A default buffer fed from a two-slot upload ring. The ring wraps like `reserve_upload_ring`, but refuses a slot whose fence has not completed (`DXGI_ERROR_WAS_STILL_DRAWING`). Title memory is copied into the ring at one named copy point: `bind` (as `upload_from_title`), `record` (as `frame_copy`) or `submit`, just before `ExecuteCommandLists`. The ring slot is copied into the buffer at the start of the submission. When a use declares GPU writes, the buffer is copied to readback at the end, and completion of that fence copies readback to title memory. |
+| `copy` | A default buffer fed from a two-slot upload ring. The modeled ring wraps only after a slot's fence completes; otherwise it refuses (`DXGI_ERROR_WAS_STILL_DRAWING`). Title memory is copied into the ring at one named copy point: `bind` (as `upload_from_title`), `record` (as `frame_copy`) or `submit`, just before `ExecuteCommandLists`. The ring slot is copied into the buffer at the start of the submission. When a use declares GPU writes, the buffer is copied to readback at the end, and completion of that fence copies readback to title memory. |
 | `fallback` | Sharing is forced to fail: the section through a `FILE_MAP_READ` handle, or an interior address of the private range. The fixture records the HRESULT. The path falls back to `copy` only when the copy can keep the guarantees. A GPU-written use with no completion point is refused with the sharing HRESULT. |
 | `slot133` | A model of slot 133's fallback. A non-`MEM_PRIVATE` address is refused before D3D12 with `E_INVALIDARG`, and a committed default buffer stands in with `S_OK` and no copy. A private range is aliased through its allocation base. |
 
@@ -14875,10 +14900,15 @@ ctest --preset dev --no-tests=error -R '^startup_gfx2hlsl_cselect_mask_controls$
 
 `tools/startup/gfx2hlsl.py` records the SGPRs that hold a lane mask (a `v_cmp` destination, a saveexec copy) in `Stage.masks`, and lowers a scalar logic op with a mask source as a mask op whose result is the lane's bit. The generic scalar path cleared the mark when it wrote ordinary data into such a register, but the other scalar writers did not. After `v_cmp_eq_u32_e64 s6, v0, v1` and `s_buffer_load_dword s6, s[16:19], 0x0`, s6 holds a buffer word, yet `s_or_b32 s8, s6, s7` was lowered as `s8 = (s6 | s7) & 1;`. Every write through `set_s` now clears the mark, the writers of a mask mark the register again after the write, and `s_load` clears the mark on its destination registers, also in the forms that only record a descriptor symbol.
 
-`tests/startup_gfx2hlsl_mask_overwrite_check.py` writes a mask with a compare, overwrites it with an `s_buffer_load`, an `s_load` through a root pointer, an `s_load` of a descriptor or an `s_cselect_b32`, and evaluates the following `s_or_b32` on a buffer word with the restricted evaluator of `startup_gfx2hlsl_bit_alu_check.py`. Controls: without the overwrite the OR stays a mask OR, and a compare or a mask logic op after a load marks the register again. On the translator before this change seven checks fail (the mark stays and the OR is cut to bit 0). Test: `startup_gfx2hlsl_mask_overwrite_controls`. Not covered: a draw through a translated pipeline; the other symbol-only scalar writes (for example an `s_mov` of a descriptor) still keep a mark they find.
+`tests/startup_gfx2hlsl_mask_overwrite_check.py` writes a mask with a compare, overwrites it with an `s_buffer_load`, an `s_load` through a root pointer, an `s_load` of a descriptor or an `s_cselect_b32`, and evaluates the following `s_or_b32` on a buffer word with the restricted evaluator of `startup_gfx2hlsl_bit_alu_check.py`. Controls: without the overwrite the OR stays a mask OR, and a compare or a mask logic op after a load marks the register again. On the translator before this change seven checks fail (the mark stays and the OR is cut to bit 0). Test: `startup_gfx2hlsl_mask_overwrite_controls`. Not covered: a draw through a translated pipeline.
+
+Scalar ALU on descriptor data (an `s_mov` of a descriptor word, a field extract or mask of one, an `s_add_u32` to a descriptor pointer) records only a symbol for its destination and did not clear the mark. A register that had held a mask and then a descriptor field kept the mark, so in a captured pixel program the stride clamp of a structured-to-raw conversion (`s_bfe_u32 s23, s45, 0xe0010`, then `s_max_u32 s23, s23, 1`) read as a lane-mask read. The descriptor-data path now clears the mark on its destination SGPRs before it writes them. The sources are classified before that, so a mask read by the same instruction is treated as before. The check runs these four writes after a compare in a pixel and a vertex stage and the clamp after the extract; a descriptor write into another SGPR keeps the mark on s6 (control). On the translator before this change (700522ef) six checks fail: the `s_bfe_u32` and `s_add_u32` clearing checks and the stride clamp, which is refused as `s_max_u32 reads lane mask s6 as numeric data`, each in both stages.
+
+The extract and the clamp emit no HLSL: the clamped stride is a symbol, and a numeric read of it is refused as before (`numeric use of s6 holding descnum`), with or without the earlier mask. It changes output only where it feeds the structured-to-raw conversion of a buffer store, which is recognized in compute and vertex programs. Case I-raw-mask of `tests/startup_gfx2hlsl_compute_check.py` covers that on the GPU: `v_cmp_gt_u32_e64 s21, 3, v0` in a 24-lane group, then the clamped conversion into s21 and the store of case A. The dispatch compares all 320 words with the CPU reference. The translation differs from case I-raw only by the dead compare. Control: `s_max_u32 s21, s21, 1` straight after the compare is still refused. On the translator before this change the case is refused (`s_max_u32 reads lane mask s21 as numeric data`), so the controls and the dispatch fail.
 
 ```powershell
 ctest --preset dev --no-tests=error -R '^startup_gfx2hlsl_mask_overwrite_controls$' -V
+ctest --preset dev --no-tests=error -R '^startup_gfx2hlsl_compute_(controls|warp|hardware)$' -V
 ```
 
 ## Startup translator: lane masks used as vector data
@@ -15448,6 +15478,14 @@ Measured at `741ff02c` plus the dispatch mode, `dev` preset, Windows 11 26300.99
 ```powershell
 ctest --preset dev --no-tests=error -j1 -R '^startup_gfx2hlsl_fma_mix(_fxc|_dispatch_(warp|hardware))?$' -V
 ```
+
+### Signed zero: a `precise` `mad` (cache revision 28)
+
+On an AMD Radeon RX 5700 XT (#2729) and an RX 9070 XT (#2746), the `-0` case read back `00000000` instead of `80000000`; WARP kept the sign. Their probes lost it only when a binary16 operand widened by `f16tof32` fed a non-`precise` multiply or `mad`, and kept it under `precise`. Non-`precise` HLSL arithmetic does not have to keep a zero's sign.
+
+All three forms now call `mix32(a, b, c)`, whose body is `precise float result = mad(a, b, c); return result;`. Operand order, half selection and modifiers are unchanged, and `saturate` stays outside the call. DXC 1.9.2602.17 emits it as `FMad` with `!dx.precise` on the `FMad` and on the `legacyF16ToF32` that feeds it. `mad` still lets a backend fuse or round the product, so the 1 ULP note above still applies. The dispatch mode prints `mad(4097, 4097, -16785408)` per adapter as information: `3f800000` means fused and `00000000` unfused. A second control shader uses a helper that clears the sign of a `-0` result. It must fail only the `-0` case.
+
+Measured on this branch, `dev` preset, Windows 11 26300, DXC 1.9.2602.17, D3D12 debug layer on with 0 errors and 0 warnings. WARP (1414:008c, 10.0.26100.9818): 17 of 17 words, `-0` kept, unfused. NVIDIA GeForce RTX 4090 (10de:2684, 32.0.16.1088): 17 of 17, fused. Both controls behaved as described. The RTX 4090 also passed before this change, so these runs do not show the fix on RDNA. The RX 5700 XT and RX 9070 XT retests are still pending.
 
 ## Non-fused multiply-add in the startup translator
 
@@ -16229,17 +16267,18 @@ a partial-tile BC view does after a later row copy.
 
 An upload of a console-layout texture owns its upload buffer. The buffer and the texture stay referenced
 by the recording and by each submit of it until the queue has completed that submit; the shared
-upload ring, which is reused without waiting for a queue, is not used. `startup_address_console_gate_{warp,hardware}`
+upload ring is not used. `startup_address_console_gate_{warp,hardware}`
 starts by closing and resetting an unsubmitted recording of payload 0, then records the identical bytes again. It makes the queue wait on a fence the fixture holds (queue slot 17), then records and submits eighteen
 lists on one list object, resetting the allocator and the list between them. Each republishes one
 2048 by 2048 RGBA8 texture at `0x109` (16 MiB) from the same address with a new payload and draws it,
 payload 0 over the left half of the target and the others over the right half. No submit may complete
 before the fixture signals the fence. After the last one completes, the left half must hold payload 0
 and the right half payload 17, and the log must report eighteen retained submits released.
-`startup_address_console_gate_ring_{warp,hardware}` is the control: with
-`X2W_TEST_ADDRESS_UPLOAD_RING=1` (fixtures only) the same uploads come from the 256 MiB ring, the
-later ones pass over the bytes of payload 0 before the queue copies them, and the left half must not
-hold payload 0.
+`startup_address_console_gate_ring_{warp,hardware}` uses the shared ring
+instead. It requires a reservation refusal after exhaustion, payload 0
+preserved on the left, the null view on the right, and no retained-upload
+release line. The ring no longer reuses live storage. The revised Windows
+readback control remains unmeasured on macOS.
 
 The equations are checked against addrlib and against the three existing layout headers, not against
 console memory. Which layouts a given console build writes for which textures is not established by

@@ -2055,6 +2055,10 @@ foreach(mutation IN ITEMS no-limit no-state no-root-args no-pairing no-bound)
     add_test(NAME startup_list_dispatch_${mutation}_control COMMAND startup_list_dispatch_check --mutate ${mutation})
     set_tests_properties(startup_list_dispatch_${mutation}_control PROPERTIES WILL_FAIL TRUE)
 endforeach()
+add_executable(upload_reservation_check tests/upload_reservation_check.cpp)
+target_include_directories(upload_reservation_check PRIVATE src)
+target_compile_features(upload_reservation_check PRIVATE cxx_std_17)
+add_test(NAME upload_reservation COMMAND upload_reservation_check)
 # The same slot driven through the stand-in on a desktop device: one refusal line per refused case, and the
 # forwarded calls counted by a pipeline-statistics query on the desktop list.
 add_executable(startup_list_dispatch_native tests/startup_list_dispatch_native.cpp)
@@ -9977,6 +9981,11 @@ if(EXISTS "${INTAKE_PYTHON}")
             "${CMAKE_SOURCE_DIR}/tests/startup_mesh57_skeleton_check.py" depth "${DXC_EXECUTABLE}"
             "$<TARGET_FILE:offscreen_check>" ${adapter})
         set_tests_properties(startup_mesh57_skeleton_depth_${adapter} PROPERTIES TIMEOUT 60 SKIP_RETURN_CODE 77)
+        # A slot 57 colour pair whose pixel stage leaves a kill through the early-exit null export (#2413).
+        add_test(NAME startup_mesh57_skeleton_kill_exit_${adapter} COMMAND "${INTAKE_PYTHON}" -B
+            "${CMAKE_SOURCE_DIR}/tests/startup_mesh57_skeleton_check.py" killexit "${DXC_EXECUTABLE}"
+            "$<TARGET_FILE:offscreen_check>" ${adapter})
+        set_tests_properties(startup_mesh57_skeleton_kill_exit_${adapter} PROPERTIES TIMEOUT 60 SKIP_RETURN_CODE 77)
         add_test(NAME startup_mesh57_formatted_load_${adapter} COMMAND "${INTAKE_PYTHON}" -B
             "${CMAKE_SOURCE_DIR}/tests/startup_mesh57_skeleton_check.py" formatted "${DXC_EXECUTABLE}"
             "$<TARGET_FILE:offscreen_check>" ${adapter})
