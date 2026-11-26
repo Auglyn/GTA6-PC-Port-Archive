@@ -296,3 +296,33 @@ fn without_a_prebuilt_victory_the_repository_is_required() {
     let args = parse(&["--game-dir", "G"]);
     assert!(matches!(run(&args, None), Err(RunError::NoRepo)));
 }
+
+#[test]
+fn linux_amd_profile_sets_its_variables_instead_of_windows_tuned() {
+    let env = settings::base(&parse(&["--game-dir", "G", "--profile", "linux-amd"]));
+    assert_eq!(env.len(), HEAD.len() + LINUX_AMD.len());
+    assert!(
+        LINUX_AMD
+            .iter()
+            .all(|(k, v)| value(&env, k) == Some(OsString::from(v)))
+    );
+    assert_eq!(
+        value(&env, "VKD3D_CONFIG"),
+        Some(OsString::from("descriptor_heap"))
+    );
+    assert_eq!(value(&env, "VICTORY_RELAY"), None);
+}
+
+#[test]
+fn defaults_profile_and_no_tuned_settings_leave_only_base_variables() {
+    let defaults = settings::base(&parse(&["--game-dir", "G", "--Profile", "defaults"]));
+    assert_eq!(names(&defaults), HEAD);
+    let disabled = settings::base(&parse(&[
+        "--game-dir",
+        "G",
+        "--profile",
+        "linux-amd",
+        "--no-tuned-settings",
+    ]));
+    assert_eq!(names(&disabled), HEAD);
+}

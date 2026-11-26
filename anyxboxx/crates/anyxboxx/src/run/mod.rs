@@ -11,10 +11,21 @@ use std::process::Command;
 
 use clap::{Args, ValueEnum};
 
-pub use settings::{ALWAYS, QUALITY, TUNED};
+pub use settings::{ALWAYS, LINUX_AMD, QUALITY, TUNED};
 pub use steps::{
     Env, GAME_EXE, PRECOMPILED_DLLS, SHADERS, Victory, environment, game_exe, status, warm_archives,
 };
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
+pub enum Profile {
+    /// Windows + NVIDIA measured tuned set (`TUNED`).
+    #[default]
+    WindowsNvidia,
+    /// Linux (Proton) + AMD measured set (`LINUX_AMD`, including `VKD3D_CONFIG=descriptor_heap`).
+    LinuxAmd,
+    /// VIctory's own defaults (no profile variables).
+    Defaults,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum XgMode {
@@ -56,6 +67,9 @@ pub struct RunArgs {
     /// Do not set the tuned variables (VICTORY_GAME_DIR, VICTORY_DISCORD and VICTORY_OCEAN_READBACK stay set).
     #[arg(long, alias = "NoTunedSettings")]
     pub no_tuned_settings: bool,
+    /// Launch profile whose variables are applied unless `--no-tuned-settings` is set.
+    #[arg(long, alias = "Profile", value_enum, default_value_t = Profile::WindowsNvidia)]
+    pub profile: Profile,
     /// Picture first: windows and buffers read fresh each frame (about half the frame rate).
     #[arg(long, alias = "Quality")]
     pub quality: bool,

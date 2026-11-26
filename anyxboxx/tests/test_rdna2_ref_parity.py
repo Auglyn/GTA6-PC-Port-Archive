@@ -1660,3 +1660,76 @@ def test_buffer_cache_controls_match_the_python_model():
                                 low | noise & 0xFFFF_FFFF, high | noise >> 32,
                                 *mubuf("buffer_load_dword", vdata=3, vaddr=0, srsrc=1, offen=1))
                 assert_same(exe, lanes, False, scalars, words)
+
+
+def test_image_atomic_programs_match_the_python_model():
+    """Parité Rust/Python pour les 16 image_atomic_* (32 et 64 bits, glc=0/1, OOB, NSA,
+    contention, flottants NaN/±0, formats entiers 32/64 bits et refus de dmask/format)."""
+    exe = binary()
+    glc_bit = 1 << 13
+    init32 = [0x0000_0000, 0x8000_0000, 0x7FC0_0000, 0xFFFF_FFFF,
+              0xFFFF_FFFB, 5, 42, 0x3F80_0000] * 2
+    init64 = [0xFFFF_FFFF, 0x0000_0001, 0x0000_0000, 0x8000_0000,
+              0x0000_0000, 0x7FF8_0000, 0x3333_4444, 0x1111_2222] * 4
+    mem32 = [(IMAGE_ADDRESS, init32)]
+    mem64 = [(IMAGE_ADDRESS, init64)]
+
+    # 1) Tous les 16 image_atomic_* en 32 bits (glc=0 et glc=1, wave32 et wave64, avec OOB + contention)
+    for fmt in (rdna2_image.FORMAT_32_UINT, rdna2_image.FORMAT_32_SINT, rdna2_image.FORMAT_32_FLOAT):
+        t_words = rdna2_image.encode_image(IMAGE_ADDRESS, fmt, 4, 4)
+        scalars = [(16 + i, v) for i, v in enumerate(t_words) if v]
+        insts = [
+            vop2("v_and_b32", 1, 128 + 3, 0),            # x = lane & 3
+            vop2("v_lshrrev_b32", 2, 128 + 2, 0),        # y = lane >> 2 (>= 4 est OOB)
+        ]
+        for idx, name in enumerate(sorted(rdna2_image.ATOMIC_OPS)):
+            dmask = 0x3 if name in rdna2_image.ATOMIC_CMPSWAP_OPS else 0x1
+            insts += [
+                vop1("v_mov_b32", 4, LITERAL), 0xFFFF_FFFB if "s" in name else 0x4000_0000,
+                vop1("v_mov_b32", 5, LITERAL), 0x0000_0000 if "f" in name else 42,
+                *words(mimg(name, vdata=4, vaddr=1, dmask=dmask, first_flags=glc_bit if idx & 1 else 0)),
+            ]
+        # Contention multi-lignes + NSA + chevauchement vdata == vaddr
+        insts += [
+            vop1("v_mov_b32", 10, 129),
+            vop1("v_mov_b32", 14, 129),
+            *words(mimg("image_atomic_add", vdata=10, dmask=0x1, first_flags=glc_bit, nsa=(10, 14))),
+        ]
+        for lanes in (32, 64):
+            assert_same(exe, lanes, False, scalars, program(*insts), mem32)
+
+    # 2) Tous les 16 image_atomic_* en 64 bits (dmask=0x3 / 0xF) + load/store formats entiers 32/64 bits
+    for fmt in (rdna2_image.FORMAT_32_32_UINT, rdna2_image.FORMAT_32_32_SINT, rdna2_image.FORMAT_32_32_FLOAT):
+        t_words = rdna2_image.encode_image(IMAGE_ADDRESS, fmt, 4, 4)
+        scalars = [(16 + i, v) for i, v in enumerate(t_words) if v]
+        insts = [
+            vop2("v_and_b32", 1, 128 + 3, 0),
+            vop2("v_lshrrev_b32", 2, 128 + 2, 0),
+            *words(mimg("image_load", vdata=8, vaddr=1, dmask=0xF)),
+            *words(mimg("image_store", vdata=8, vaddr=1, dmask=0x3)),
+        ]
+        for idx, name in enumerate(sorted(rdna2_image.ATOMIC_OPS)):
+            dmask = 0xF if name in rdna2_image.ATOMIC_CMPSWAP_OPS else 0x3
+            insts += [
+                vop1("v_mov_b32", 4, LITERAL), 0x0000_0002,
+                vop1("v_mov_b32", 5, LITERAL), 0x4008_0000,
+                vop1("v_mov_b32", 6, LITERAL), 0x0000_0000,
+                vop1("v_mov_b32", 7, LITERAL), 0x0000_0000,
+                *words(mimg(name, vdata=4, vaddr=1, dmask=dmask, first_flags=glc_bit if idx & 1 else 0)),
+            ]
+        assert_same(exe, 32, False, scalars, program(*insts), mem64)
+
+    # 3) Refus partagés (dmask invalide et format incompatible avec la largeur)
+    bad_cases = [
+        (rdna2_image.FORMAT_32_UINT, mimg("image_atomic_add", vdata=4, vaddr=1, dmask=0x5)),
+        (rdna2_image.FORMAT_32_UINT, mimg("image_atomic_cmpswap", vdata=4, vaddr=1, dmask=0x1)),
+        (rdna2_image.FORMAT_8_8_8_8_UNORM, mimg("image_atomic_add", vdata=4, vaddr=1, dmask=0x1)),
+        (rdna2_image.FORMAT_32_UINT, mimg("image_atomic_add", vdata=4, vaddr=1, dmask=0x3)),
+        (rdna2_image.FORMAT_32_32_UINT, mimg("image_atomic_add", vdata=4, vaddr=1, dmask=0x1)),
+    ]
+    for fmt, inst in bad_cases:
+        t_words = rdna2_image.encode_image(IMAGE_ADDRESS, fmt, 4, 4)
+        scalars = [(16 + i, v) for i, v in enumerate(t_words) if v]
+        pw = words(inst)
+        assert run_python(32, False, scalars, pw) == "error untranslated\n"
+        assert_same(exe, 32, False, scalars, pw)

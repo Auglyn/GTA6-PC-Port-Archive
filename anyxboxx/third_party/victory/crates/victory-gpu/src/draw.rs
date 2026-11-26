@@ -2025,6 +2025,10 @@ impl State {
             if SPENT.load(Ordering::Relaxed) >= bytes_at_most || began.elapsed() > span {
                 break;
             }
+            // (cool_fox `ab75ac3`) Under low commit the rest waits for a pass with room.
+            if !crate::commit_gate::admit() {
+                break;
+            }
             // A placed texture whose memory is not mapped (not streamed in
             // yet, or streamed out again: the heap keeps tens of thousands
             // of such views) gets no host texture; looked at again soon (a

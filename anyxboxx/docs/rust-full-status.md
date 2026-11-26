@@ -47,7 +47,7 @@ VKD3D_CONFIG=descriptor_heap "$PROTON/files/bin/wine" target/x86_64-pc-windows-m
 ```
 
 - `anyxboxx run` sets the Windows tuned set (`TUNED`), not the `linux-amd` profile, which only the graphical launcher reads. Wine passes the Linux environment on, so export `VKD3D_CONFIG=descriptor_heap` (the title's view heap is larger than vkd3d-proton's default cap) and, for the `linux-amd` values, add `--no-tuned-settings` and export them yourself.
-- The graphical launcher has no `--victory-exe` yet: its Play and Shaders pages start with the cargo build, which fails under Proton.
+- The graphical launcher also accepts `--victory-exe <path>` (or `--victory-exe=<path>`) to run a prebuilt `victory.exe` on its Play and Shaders pages without a cargo build or a local repository checkout.
 
 ### Graphical launcher (`crates/anyxboxx-launcher`)
 

@@ -936,6 +936,11 @@ impl Written {
                 at.cast::<u64>().write_unaligned(value);
             }
         }
+        // (cool_fox `e05d463`) Threads sleeping on that word see it now.
+        #[cfg(windows)]
+        if crate::fence::value_wake_on() {
+            crate::fence::wake_word(at.cast());
+        }
     }
 }
 

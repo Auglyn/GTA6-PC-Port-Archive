@@ -13,6 +13,8 @@ use crate::warm_state;
 #[derive(Debug, Clone)]
 pub struct Plan {
     pub repo: PathBuf,
+    /// Prebuilt `victory.exe` (`--victory-exe`); when set, skips `cargo build` and needs no repo.
+    pub victory_exe: Option<PathBuf>,
     pub game_dir: PathBuf,
     pub env: Env,
     /// Worker threads of the warm step; `None` lets VIctory use every core.
@@ -31,12 +33,19 @@ pub struct WarmState {
     pub fingerprint: String,
 }
 
+fn resolve_victory(plan: &Plan) -> Result<Victory, RunError> {
+    match &plan.victory_exe {
+        Some(exe) => Victory::prebuilt(exe),
+        None => Victory::locate(&plan.repo, false),
+    }
+}
+
 /// The steps of a launch, in order. `warm_first` also runs the shaders.rpf/exe/DLL preload.
 ///
 /// When VIctory is built first, a warm that looked unneeded is still listed: it checks the
 /// fingerprint again once the build is over, because a rebuilt `victory.exe` changes it.
 pub fn play_steps(plan: &Plan, warm_first: bool) -> Result<Vec<Step>, RunError> {
-    let victory = Victory::locate(&plan.repo, false)?;
+    let victory = resolve_victory(plan)?;
     anyxboxx::run::game_exe(&plan.game_dir)?;
     let build = build_step(&victory);
     let rebuilds = build.is_some();
@@ -62,7 +71,7 @@ pub fn play_steps(plan: &Plan, warm_first: bool) -> Result<Vec<Step>, RunError> 
 
 /// "Warm now": the full warm of the game's archives, whatever the marker says.
 pub fn precompile_steps(plan: &Plan) -> Result<Vec<Step>, RunError> {
-    let victory = Victory::locate(&plan.repo, false)?;
+    let victory = resolve_victory(plan)?;
     anyxboxx::run::game_exe(&plan.game_dir)?;
     let mut steps: Vec<Step> = build_step(&victory).into_iter().collect();
     let marker = plan.warm.as_ref().and_then(|warm| warm.marker.clone());
@@ -192,6 +201,7 @@ mod tests {
         }
         let plan = Plan {
             repo: repo.path().to_path_buf(),
+            victory_exe: None,
             game_dir: game.path().to_path_buf(),
             game_log: None,
             warm: None,
@@ -276,5 +286,39 @@ mod tests {
         plan.repo = empty.path().to_path_buf();
         assert!(!has_victory(&plan.repo));
         assert!(play_steps(&plan, false).is_err());
+    }
+
+    #[test]
+    fn prebuilt_victory_exe_skips_build_without_requiring_a_repo() {
+        let (_repo, _game, mut plan) = fixture();
+        let prebuilt_dir = tempfile::tempdir().expect("tempdir");
+        let exe = prebuilt_dir.path().join("victory.exe");
+        std::fs::write(&exe, b"MZ").expect("write");
+        plan.repo = PathBuf::new();
+        plan.victory_exe = Some(exe.clone());
+
+        let play = play_steps(&plan, false).expect("play steps");
+        let play_labels: Vec<&str> = play.iter().map(|s| s.label.as_str()).collect();
+        assert_eq!(play_labels, vec!["Running the game"]);
+        assert_eq!(Path::new(play[0].command.get_program()), exe.as_path());
+
+        let warm = precompile_steps(&plan).expect("warm steps");
+        let warm_labels: Vec<&str> = warm.iter().map(|s| s.label.as_str()).collect();
+        assert_eq!(warm_labels, vec!["Warming the shader cache"]);
+        assert_eq!(Path::new(warm[0].command.get_program()), exe.as_path());
+    }
+
+    #[test]
+    fn a_missing_prebuilt_victory_exe_refuses_the_launch() {
+        let (_repo, _game, mut plan) = fixture();
+        plan.victory_exe = Some(PathBuf::from("Z:/no/such/victory.exe"));
+        assert!(matches!(
+            play_steps(&plan, false),
+            Err(RunError::NoVictoryExe(_))
+        ));
+        assert!(matches!(
+            precompile_steps(&plan),
+            Err(RunError::NoVictoryExe(_))
+        ));
     }
 }

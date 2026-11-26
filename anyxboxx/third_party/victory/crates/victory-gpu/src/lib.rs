@@ -24,6 +24,7 @@ pub mod descriptor;
 pub mod device;
 #[cfg(windows)]
 mod alloc_backoff;
+mod commit_gate;
 #[cfg(windows)]
 mod ambient;
 #[cfg(windows)]
@@ -86,7 +87,7 @@ mod watch;
 #[cfg(windows)]
 pub use host::on_failure;
 #[cfg(windows)]
-pub use inplace::{title_memory_freeing, title_memory_section, title_memory_view};
+pub use inplace::{title_memory_freeing, title_memory_section, title_memory_section_closed, title_memory_view};
 #[cfg(windows)]
 pub use watch::{
     Remapping, notify_view_writes, title_memory_reading, title_memory_reading_range, title_memory_remapped,

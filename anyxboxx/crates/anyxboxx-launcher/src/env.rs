@@ -75,6 +75,7 @@ pub fn build_env(
         skip_pipelines: None,
         // The profile replaces the tuned set, so the base must not add it a second time.
         no_tuned_settings: true,
+        profile: anyxboxx::run::Profile::Defaults,
         quality: false,
         overrides: Vec::new(),
         auto_a: false,
