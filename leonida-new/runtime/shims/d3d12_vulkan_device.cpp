@@ -57,6 +57,7 @@
 #include "../src/resource_detile.h"
 #include "../src/console_texture_layout.h"
 #include "../src/shader_library.h"
+#include "../src/shadow_keep.h"
 #include "../src/dstorage_trace.h"
 #include "../src/title_page_watch.h"
 #include "../src/guarded_copy.h"
@@ -378,6 +379,7 @@ public:
         last_ = (end_ + kPage - 1) & ~(kPage - 1);
         state_.assign((last_ - first_) / kPage, 0);
         idle_.assign(state_.size(), 0);
+        sums_.assign(state_.size() * kPieces, 0);
         cover_.assign(state_.size(), 1);
         targets_.push_back({begin_, end_, shadow});
         index_targets();
@@ -593,6 +595,7 @@ public:
                     if (state_[i] & kZero) continue;
                     const auto [offset, bytes] = span_of(i, i + 1);
                     zero_targets(offset, bytes);
+                    leonida::shadow_keep::forget(sums_.data(), first_, begin_ + offset, begin_ + offset + bytes);
                     if (!zeroed_.empty() && zeroed_.back().offset + zeroed_.back().bytes == offset)
                         zeroed_.back().bytes += bytes;
                     else
@@ -660,6 +663,10 @@ public:
         pieces_.walk_ms = std::chrono::duration<double, std::milli>(copy_start - walk_start).count();
         std::size_t copied = 0;
         for (const Job& job : jobs_) {
+            if (keep_gpu_writes()) {  // only the pieces whose title bytes changed (src/shadow_keep.h)
+                copied += copy_changed(job);
+                continue;
+            }
             std::uint8_t* run_dst = nullptr;
             const std::uint8_t* run_src = nullptr;
             std::size_t run_bytes = 0;
@@ -710,12 +717,14 @@ public:
             const std::size_t n = (first_ - first) / kPage;
             state_.insert(state_.begin(), n, std::uint8_t(0));
             idle_.insert(idle_.begin(), n, std::uint8_t(0));
+            sums_.insert(sums_.begin(), n * kPieces, std::uint64_t(0));
             cover_.insert(cover_.begin(), n, 0u);
             first_ = first;
         }
         if (last > last_) {
             state_.resize((last - first_) / kPage, 0);
             idle_.resize(state_.size(), 0);
+            sums_.resize(state_.size() * kPieces, 0);
             cover_.resize(state_.size(), 0);
             last_ = last;
         }
@@ -735,6 +744,8 @@ public:
             state_[at + i] |= other.state_[i];
             cover_[at + i] += other.cover_[i];
             idle_[at + i] = other.idle_[i];
+            std::copy_n(other.sums_.begin() + std::ptrdiff_t(i * kPieces), kPieces,
+                        sums_.begin() + std::ptrdiff_t((at + i) * kPieces));
         }
         targets_.insert(targets_.end(), other.targets_.begin(), other.targets_.end());
         if (other.map_generation_ != map_generation_) map_generation_ = ~std::uint64_t(0);
@@ -779,12 +790,39 @@ public:
                 kind = classify(region);
             }
             const std::uintptr_t from = std::max(at, begin), to = std::min(next, end);
-            if (kind == Kind::zero)
+            if (kind == Kind::zero) {
                 std::memset(shadow + (from - begin), 0, to - from);
-            else
-                copy_run(shadow + (from - begin), reinterpret_cast<const std::uint8_t*>(from), to - from,
-                         (region.Protect & PAGE_WRITECOMBINE) != 0);
+            } else {
+                const bool streaming = (region.Protect & PAGE_WRITECOMBINE) != 0;
+                copy_run(shadow + (from - begin), reinterpret_cast<const std::uint8_t*>(from), to - from, streaming);
+                // The sums stand for what every target holds. The new target now holds the title's current bytes, so
+                // the pieces where those differ from the sums are brought to the other targets too, and the sums
+                // follow; otherwise a title that later writes the old bytes back would leave the new target behind.
+                // Whole pieces (inside this page, so this region) up to the targets' ends, as a refresh sums them: a
+                // piece cut at the new target's edge would be summed short and copied again at the next refresh.
+                constexpr std::uintptr_t kPiece = leonida::shadow_keep::kPiece;
+                if (keep_gpu_writes())
+                    reconcile(std::max(from & ~(kPiece - 1), begin_), std::min((to + kPiece - 1) & ~(kPiece - 1), end_),
+                              streaming);
+            }
             at = next;
+        }
+    }
+
+    // [from, to), readable title pages: the pieces whose bytes differ from the sums are copied to every target over
+    // them and their sums updated, as a refresh does.
+    void reconcile(std::uintptr_t from, std::uintptr_t to, bool streaming) {
+        alignas(64) std::uint8_t page[kPage];
+        for (std::uintptr_t va = from; va < to;) {
+            const std::size_t n = std::min<std::size_t>(to - va, kPage - (va & (kPage - 1)));
+            copy_run(page, reinterpret_cast<const std::uint8_t*>(va), n, streaming);
+            leonida::shadow_keep::copy_changed(
+                page, va, n, sums_.data(), first_, [&](std::uintptr_t a, std::uintptr_t b, const std::uint8_t* source) {
+                    for_each_target(a, b, [&](const Target& t, std::uintptr_t lo, std::uintptr_t hi) {
+                        std::memcpy(t.shadow + (lo - t.begin), source + (lo - a), hi - lo);
+                    });
+                });
+            va += n;
         }
     }
 
@@ -1082,6 +1120,40 @@ private:
         jobs_.push_back({offset, bytes, streaming, aliased});
     }
 
+    // LEONIDA_SHADOW_KEEP (on; 0: every job copied whole, as before): a job's bytes reach the copies only where they
+    // differ from those copied last (src/shadow_keep.h), so a shader's write into a copy of pages copied without a
+    // sign that the title wrote them stays until the title changes those bytes.
+    // shortcut: a title that rewrites the same bytes to reset a GPU-written value is not seen; needs a real write
+    // signal (a write-back to the title's pages) then.
+    static bool keep_gpu_writes() {
+        static const bool on = [] {
+            char value[2] = {};
+            std::size_t length = 0;
+            return getenv_s(&length, value, sizeof(value), "LEONIDA_SHADOW_KEEP") != 0 || length == 0 ||
+                   value[0] != '0';
+        }();
+        return on;
+    }
+    static constexpr std::size_t kPieces = kPage / leonida::shadow_keep::kPiece;
+    std::size_t copy_changed(const Job& job) {
+        std::size_t copied = 0;
+        alignas(64) std::uint8_t page[kPage];
+        for (std::size_t at = job.offset, end = job.offset + job.bytes; at < end;) {
+            const std::uintptr_t va = begin_ + at;
+            const std::size_t n = std::min<std::size_t>(end - at, kPage - (va & (kPage - 1)));
+            copy_run(page, reinterpret_cast<const std::uint8_t*>(va), n, job.streaming);
+            leonida::shadow_keep::copy_changed(
+                page, va, n, sums_.data(), first_, [&](std::uintptr_t a, std::uintptr_t b, const std::uint8_t* source) {
+                    for_each_target(a, b, [&](const Target& t, std::uintptr_t from, std::uintptr_t to) {
+                        std::memcpy(t.shadow + (from - t.begin), source + (from - a), to - from);
+                        copied += to - from;
+                    });
+                });
+            at += n;
+        }
+        return copied;
+    }
+
     // The targets sorted by start, the bytes they hold, and reach_[k], the furthest end among targets_[0..k]: the
     // targets over [from, to) are found from the first whose reach passes `from`.
     void index_targets() {
@@ -1208,6 +1280,7 @@ private:
     std::uint64_t reader_ = 0;
     std::size_t watched_pages_ = 0, hot_pages_ = 0;  // covered pages write-watched, and hot
     Vector<std::uint8_t> idle_;  // per 4 KiB page: refreshes a hot page went without a write (kCool)
+    Vector<std::uint64_t> sums_;  // per 256-byte piece from first_: sum of the bytes copied last, 0: not known
     bool runs_stale_ = false;         // a page became hot or cold: watch_runs_ is rebuilt at the next refresh
     std::uint64_t refresh_asks_ = 0;
     std::uint64_t refresh_written_ = 0;
@@ -1625,6 +1698,7 @@ bool merge_session_pipeline_cache(const leonida::VulkanDeviceFunctions& vk, VkDe
 // never built and every dispatch of theirs is dropped ("all" or "*": every compute program). For getting past a
 // program that hangs the GPU, such as a translated loop that never ends on the input it is given here, while the
 // program or its input is being fixed. What the program would have written keeps its previous contents.
+// gta6rt --precompile-pipelines builds the listed programs anyway unless it is given --skip-listed.
 bool skip_compute(const std::string& name) {
     static const std::vector<std::string> parts = [] {
         std::vector<std::string> out;
@@ -22236,10 +22310,10 @@ public:
     DeviceState& state() { return *device_; }
     const leonida::ShaderLibrary* library() const { return library_; }
 
-    // Why create_compute would refuse the entry, or null.
+    // Why create_compute could not build the entry on this device, or null. LEONIDA_SKIP_COMPUTE is not a reason here:
+    // it drops a program's dispatches at play, and each caller decides whether it also keeps the program unbuilt.
     const char* unbuildable(const leonida::ShaderEntry& entry, std::size_t bytes) const {
         if (!bytes) return "no .spv";
-        if (skip_compute(entry.name)) return "LEONIDA_SKIP_COMPUTE";
         if (entry.binding_count && !with_set0_) return "set-0 bindings and no bindless set";
         if (entry.lds_bytes && max_shared_ && entry.lds_bytes > max_shared_) return "workgroup memory over the limit";
         return nullptr;
@@ -22271,13 +22345,15 @@ int precompile_compute_pipelines(const PrecompileOptions& options) {
     if (!host.open()) return 1;
     const leonida::ShaderLibrary* library = host.library();
 
-    // What to build: every compute entry the runtime could create a pipeline for.
+    // What to build: every compute entry the runtime could create a pipeline for. LEONIDA_SKIP_COMPUTE is a setting
+    // for play (the game drops the listed programs' dispatches); the journal is kept for every program unless
+    // --skip-listed asks to leave them out too, so a later run without the list finds them built.
     struct Job {
         const leonida::ShaderEntry* entry;
         std::size_t bytes;
     };
     std::vector<Job> jobs;
-    std::size_t not_buildable = 0, filtered = 0;
+    std::size_t not_buildable = 0, filtered = 0, listed = 0, listed_left_out = 0;
     for (const leonida::ShaderEntry* entry : library->stage_entries("cs")) {
         if (!options.filters.empty() &&
             std::none_of(options.filters.begin(), options.filters.end(),
@@ -22290,6 +22366,15 @@ int precompile_compute_pipelines(const PrecompileOptions& options) {
             ++filtered;
             continue;
         }
+        if (skip_compute(entry->name)) {
+            ++listed;
+            if (options.skip_listed) {
+                ++listed_left_out;
+                std::fprintf(stderr, "[precompile] %s: not built (LEONIDA_SKIP_COMPUTE, --skip-listed)\n",
+                             entry->name.c_str());
+                continue;
+            }
+        }
         if (const char* why = host.unbuildable(*entry, bytes)) {
             ++not_buildable;
             std::fprintf(stderr, "[precompile] %s: not built (%s)\n", entry->name.c_str(), why);
@@ -22300,14 +22385,22 @@ int precompile_compute_pipelines(const PrecompileOptions& options) {
     std::stable_sort(jobs.begin(), jobs.end(), [&](const Job& a, const Job& b) {
         return options.smallest_first ? a.bytes < b.bytes : a.bytes > b.bytes;
     });
-    if (options.limit && jobs.size() > options.limit) jobs.resize(options.limit);
+    if (options.limit && jobs.size() > options.limit) {
+        filtered += jobs.size() - options.limit;
+        jobs.resize(options.limit);
+    }
     std::uint64_t total_bytes = 0;
     for (const Job& job : jobs) total_bytes += job.bytes;
     const unsigned threads = (std::max)(1u, options.threads);
     const unsigned big_threads = options.big_threads ? (std::min)(options.big_threads, threads) : threads;
-    std::fprintf(stderr, "[precompile] %zu compute entries to build (%.1f MB of SPIR-V; %zu filtered out, %zu not "
-                         "buildable), %s first, %u thread(s), at most %u on modules over %zu bytes; journal %ls\n",
-                 jobs.size(), double(total_bytes) / 1e6, filtered, not_buildable,
+    if (listed && !options.skip_listed)
+        std::fprintf(stderr, "[precompile] LEONIDA_SKIP_COMPUTE names %zu of the entries: built anyway, since the list "
+                             "drops their dispatches at play only (--skip-listed leaves them out of this run)\n",
+                     listed);
+    std::fprintf(stderr, "[precompile] %zu compute entries to build (%.1f MB of SPIR-V; %zu filtered out, %zu left "
+                         "out by --skip-listed, %zu not buildable), %s first, %u thread(s), at most %u on modules over "
+                         "%zu bytes; journal %ls\n",
+                 jobs.size(), double(total_bytes) / 1e6, filtered, listed_left_out, not_buildable,
                  options.smallest_first ? "smallest" : "largest", threads, big_threads, options.big_bytes,
                  pipeline_journal_dir().c_str());
     if (options.dry_run) {
@@ -22317,7 +22410,7 @@ int precompile_compute_pipelines(const PrecompileOptions& options) {
 
     std::atomic<std::size_t> next{0};
     std::mutex progress_mutex;
-    std::size_t done = 0, compiled = 0, skipped = 0, hits = 0, failed = 0;
+    std::size_t done = 0, compiled = 0, skipped = 0, hits = 0, failed = 0, journaled = 0, elsewhere = 0;
     std::uint64_t done_bytes = 0;
     std::mutex big_mutex;
     std::condition_variable big_free;
@@ -22356,8 +22449,8 @@ int precompile_compute_pipelines(const PrecompileOptions& options) {
             ++done;
             done_bytes += job.bytes;
             const char* what = "failed";
-            if (build.skipped) ++skipped, what = "journaled already";
-            else if (build.busy) ++skipped, what = "being built by another process";
+            if (build.skipped) ++skipped, ++journaled, what = "journaled already";
+            else if (build.busy) ++skipped, ++elsewhere, what = "being built by another process";
             else if (build.result != VK_SUCCESS || (!build.pipeline && !build.skipped)) ++failed;
             else if (build.journal_hit || build.from_shared) ++hits, what = "found in a cache";
             else ++compiled, what = build.journaled ? "compiled and journaled" : "compiled (not journaled)";
@@ -22374,8 +22467,12 @@ int precompile_compute_pipelines(const PrecompileOptions& options) {
     std::vector<std::thread> pool;
     for (unsigned t = 0; t < threads; ++t) pool.emplace_back(worker);
     for (std::thread& t : pool) t.join();
-    std::fprintf(stderr, "[precompile] done: %zu compiled, %zu from a cache, %zu journaled already, %zu failed, %zu "
-                         "not buildable, in %.0f s\n", compiled, hits, skipped, failed, not_buildable,
+    // One line for the whole run: what was built, what was there already, and what was left out and why.
+    std::fprintf(stderr, "[precompile] done: %zu built (%zu compiled, %zu from a cache), %zu journaled already, %zu "
+                         "being built by another process, %zu failed; left out: %zu of %zu listed in "
+                         "LEONIDA_SKIP_COMPUTE%s, %zu not buildable, %zu filtered out; in %.0f s\n",
+                 compiled + hits, compiled, hits, journaled, elsewhere, failed, listed_left_out, listed,
+                 options.skip_listed ? " (--skip-listed)" : "", not_buildable, filtered,
                  std::chrono::duration<double>(Clock::now() - began).count());
     return failed ? 2 : 0;
 }
@@ -22494,6 +22591,7 @@ int compile_server(const CompileServerOptions& options) {
             const leonida::ShaderEntry* entry = it == by_name.end() ? nullptr : it->second;
             const std::size_t bytes = entry ? library->spirv_bytes(*entry) : 0;
             if (!entry) failure = "no compute entry of that name in this library";
+            else if (skip_compute(entry->name)) failure = "LEONIDA_SKIP_COMPUTE";  // the game drops its dispatches
             else if (const char* why = host.unbuildable(*entry, bytes)) failure = why;
             // LOCAL FIX (compile helper: the journal name was checked after the build): the name is hashed from the
             // module and this device's environment, which costs no driver call. A request from a game whose environment
@@ -22618,7 +22716,7 @@ int compile_server(const CompileServerOptions& options) {
                 return;
             }
             const leonida::ShaderEntry& entry = *fill_order[i];
-            if (host.unbuildable(entry, fill_bytes[i])) continue;
+            if (skip_compute(entry.name) || host.unbuildable(entry, fill_bytes[i])) continue;
             std::error_code stat;
             const auto spv = library->spirv_file(entry);
             const long long mtime = static_cast<long long>(std::filesystem::last_write_time(spv, stat).time_since_epoch().count());
