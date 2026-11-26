@@ -1,15 +1,15 @@
 # xcl GitHub export
 
-Issues, pull requests and comments from `ivall/xcl`, exported from the GitHub REST API on 2026-11-25.
+Issues, pull requests and comments from `ivall/xcl`, exported from the GitHub REST API on 2026-11-26.
 
 Each file in `data/` is gzipped JSON Lines: one API object per line, unchanged.
 
 | File | Contents | Items |
 |---|---|---|
-| `issues_and_prs.jsonl.gz` | every issue and PR (title, body, labels, state, author) | 1,114 |
-| `pulls.jsonl.gz` | PR details (head and base branch, merge state) | 2,101 |
-| `issue_comments.jsonl.gz` | conversation comments on issues and PRs | 13,201 |
-| `review_comments.jsonl.gz` | inline code-review comments | 51 |
+| `issues_and_prs.jsonl.gz` | every issue and PR (title, body, labels, state, author) | 1,115 |
+| `pulls.jsonl.gz` | PR details (head and base branch, merge state) | 2,115 |
+| `issue_comments.jsonl.gz` | conversation comments on issues and PRs | 13,326 |
+| `review_comments.jsonl.gz` | inline code-review comments | 53 |
 | `labels.jsonl.gz` | labels | 15 |
 
 Not included: PR approval reviews and images attached to comments (only their links).
