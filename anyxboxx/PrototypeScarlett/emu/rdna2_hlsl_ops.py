@@ -8,7 +8,7 @@ référence emu/rdna2_exec*, contre lequel la traduction est vérifiée.
 """
 import re
 
-from emu.rdna2_exec_ops import SOPP_NO_EFFECT, float_bits, signed
+from emu.rdna2_exec_ops import SOPK_NO_EFFECT, SOPP_NO_EFFECT, float_bits, signed
 from emu.rdna2_hlsl_helpers import HELPERS  # noqa: F401  (réexporté : rdna2_hlsl, graphics, wave64)
 
 NULL, VCC, EXEC, OFF = 125, 106, 126, 0x7D
@@ -139,7 +139,7 @@ for _op in ("andn1", "andn2"):
 for _name in ("s_nop", "s_waitcnt", "s_waitcnt_vscnt", "s_waitcnt_vmcnt", "s_waitcnt_expcnt",
               "s_waitcnt_lgkmcnt", "s_barrier", "s_sleep", "s_setprio", "s_ttracedata",
               "s_dcache_inv", "s_gl1_inv", "buffer_gl0_inv", "buffer_gl1_inv", "s_clause",
-              "s_inst_prefetch", *SOPP_NO_EFFECT):
+              "s_inst_prefetch", *SOPP_NO_EFFECT, *SOPK_NO_EFFECT):
     SCALAR[_name] = ""
 COMPARE_OPERATORS = {"eq": "==", "lg": "!=", "ne": "!=", "neq": "!=", "gt": ">", "ge": ">=", "lt": "<", "le": "<="}
 for _op, _symbol in COMPARE_OPERATORS.items():
@@ -196,7 +196,7 @@ VECTOR = {
     "v_floor_f32": "asuint(floor(asfloat({a})))",
     "v_ceil_f32": "asuint(ceil(asfloat({a})))",
     "v_trunc_f32": "asuint(trunc(asfloat({a})))",
-    "v_rndne_f32": "asuint(round(asfloat({a})))",
+    "v_rndne_f32": "RndneF32({a})",
     # frac(-1e-20) rend 1.0 sur RTX 4060, 0x3F7FFFFF sur WARP et Intel UHD : borné comme rdna2_exec_ops._fract
     "v_fract_f32": "(frac(asfloat({a})) >= 1.0f ? 0x3F7FFFFFu : asuint(frac(asfloat({a}))))",
     "v_ldexp_f32": "asuint(ldexp(asfloat({a}), (float)asint({b})))",

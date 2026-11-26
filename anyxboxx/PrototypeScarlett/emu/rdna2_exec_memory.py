@@ -47,8 +47,10 @@ HALF_BITS, HALF_MASK = 16, 0xFFFF
 # p. 204). {name: direction}
 LDS_ADD_TID = {"ds_write_addtid_b32": "write", "ds_read_addtid_b32": "read"}
 M0 = 124
+# s_atc_probe(_buffer): "Probe or prefetch an address into the SQC data cache" (ISA section 12.6, opcodes
+# 38-39, p. 130): a hint that writes no register, like the cache invalidations.
 CACHE_CONTROL = frozenset({"s_dcache_inv", "s_gl1_inv", "s_dcache_wb", "buffer_gl0_inv", "buffer_gl1_inv",
-                           "ds_nop"})
+                           "ds_nop", "s_atc_probe", "s_atc_probe_buffer"})
 OTHER = frozenset({"s_memtime", "s_memrealtime", *rdna2_exec_lanes.NAMES})
 # No VGPR address: memory_Addr = sgpr_addr(64) + inst_offset(12) + tid*4 (ISA section 12.18.3, opcodes 22-23,
 # p. 230). The ISA gives no address without SADDR: SADDR = off is refused. {name: plain access}

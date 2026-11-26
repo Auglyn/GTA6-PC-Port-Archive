@@ -7,8 +7,8 @@ ne sont pas synchrones, d'où une barrière de groupe après chaque écriture.
 """
 from emu import rdna2_exec_lanes, rdna2_exec_smem, rdna2_hlsl_format, rdna2_hlsl_smem, rdna2_swizzle as swz
 from emu.rdna2_exec_atomic import STRIDE64
-from emu.rdna2_exec_memory import (ADD_TID, LDS_ADD_TID, LDS_ATOMIC, LDS_PATTERN, M0, SCALAR_PATTERN, VECTOR_ATOMIC,
-                                   VECTOR_PATTERN, WIDTHS, flat_offset)
+from emu.rdna2_exec_memory import (ADD_TID, CACHE_CONTROL, LDS_ADD_TID, LDS_ATOMIC, LDS_PATTERN, M0, SCALAR_PATTERN,
+                                   VECTOR_ATOMIC, VECTOR_PATTERN, WIDTHS, flat_offset)
 from emu.rdna2_exec_ops import signed
 from emu.rdna2_hlsl_ops import NULL, OFF, Untranslatable, hexa, source
 
@@ -171,7 +171,7 @@ def _swizzle_source(offset):
 
 def memory_statements(family, name, word, active):
     """Instructions HLSL d'une instruction mémoire RDNA 2 (`word` : 64 bits)."""
-    if name in ("s_dcache_inv", "s_gl1_inv", "s_dcache_wb", "buffer_gl0_inv", "buffer_gl1_inv", "ds_nop"):
+    if name in CACHE_CONTROL:
         return []
     if family == "SMEM" and rdna2_exec_smem.supports(name):
         return rdna2_hlsl_smem.statements(name, word)

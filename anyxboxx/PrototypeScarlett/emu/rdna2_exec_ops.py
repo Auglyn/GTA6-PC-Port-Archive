@@ -177,9 +177,11 @@ COMPARISONS = {"eq": lambda a, b: a == b, "lg": lambda a, b: a != b, "gt": lambd
 # invalidation du cache d'instructions, compteurs de performance, trace, attentes sur les compteurs.
 SOPP_NO_EFFECT = ("s_icache_inv", "s_incperflevel", "s_decperflevel", "s_ttracedata_imm", "s_wait_idle",
                   "s_waitcnt_depctr")
+# s_version (SOPK) : « Do nothing. Argument is ignored by hardware » (ISA RDNA 2, §12.2, opcode 1, p. 106).
+SOPK_NO_EFFECT = ("s_version",)
 NO_OPERATION = ("s_nop", "s_waitcnt", "s_barrier", "s_sleep", "s_setprio", "s_clause", "s_inst_prefetch",
                 "s_waitcnt_vscnt", "s_waitcnt_vmcnt", "s_waitcnt_expcnt", "s_waitcnt_lgkmcnt", "s_ttracedata",
-                *SOPP_NO_EFFECT)
+                *SOPP_NO_EFFECT, *SOPK_NO_EFFECT)
 
 SCALAR = {
     "s_add_u32": _sop2(lambda a, b, w: (a + b, (a + b) >> 32 != 0)),

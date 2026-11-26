@@ -393,6 +393,18 @@ ctest --preset dev --no-tests=error -R '^startup_vertex_fetch_formats_(controls|
 
 `BUF_FMT_16_16_SNORM` (format 24, DXGI `R16G16_SNORM` 37) sign-extends each half, divides by 32767 and clamps to -1.0, so -32768 and -32767 both give -1.0 (the Direct3D and Vulkan SNORM rule, as in LLVM 15 and Mesa `ac_formats`). The device run compares `round(v * 32767)` against the same byte decode, with a wrong reference that reads the halves unsigned and a mutated translation that does the same. The pattern the harness writes to t0 holds no 0x8000, so `startup_vertex_fetch_formats_controls` also evaluates the emitted expressions on 0x8000, 0x8001, 0x7fff, 0x0000, 0xffff and 0x4000 in each half, and four wrong forms (unsigned read, no clamp, divisor 32768, one half for both) must fail that check. The D3D12 draw has not been run on Linux.
 
+In a graphics shader with only forward branches, a 32-bit root-table pointer
+can be advanced by a literal byte offset and copied with `s_mov_b32`. At a
+join the table and its offset must agree on every incoming path. A later
+write to the source register leaves the copy intact. A path that changes the
+copy to another address makes the subsequent descriptor load ambiguous.
+
+The `startup_joined_table_pointer` checks use two R8 textures with distinct
+red values. The guest table stores their 32-byte records at offsets 0 and 32.
+Each draw reads the table and exports the branch's root constant in green.
+Swapping the textures reverses the red values. Changing the compiled
+manifest's byte offset changes all 32 pixels and preserves the green values.
+
 `buffer_load_format_x`, `_xy`, `_xyz` and `_xyzw` (MUBUF) use FORMAT (word 3 bits 12 to 18) and DST_SEL (bits 0 to 11) from the buffer descriptor. The draw snapshots the hardware table descriptor and provides word 3 as `udsrc <n> descword3 <srv>`. It refuses missing hardware descriptor metadata, unsupported FORMAT codes and unresolved buffer ranges before submitting the draw. The shader decodes using the same expressions as the tbuffer path. Selectors 4 to 7 choose x, y, z and w, while selectors 0 and 1 choose constants 0 and 1. For a load after a branch, the vertex or pixel shader must load all four descriptor words in the same basic block as the use. The root table pointer must reach the load or its local pointer copy without any intervening write along the control-flow predecessors. It refuses rewritten descriptor words. `startup_vertex_fetch_formats_*` covers twelve formats, component swizzles, integer 1 and mutations that must differ on readback, plus three `buffer_load_format_xyzw` device cases (identity, a two-channel format whose z and w are the defaults 0 and 1, and the word (w, 1, 0, x)), each of which must also fail through the xyz translation of the same load. `startup_mubuf_descriptor_*` draws with the real binding path on WARP and hardware. Missing metadata, unsupported FORMAT and unresolved backing leave the target blue, while valid zero and one draw black and red.
 `BUF_FMT_8_8_8_8_UINT` (gfx10 format 60, DXGI `R8G8B8A8_UINT` 30) reads four unsigned bytes into X, Y, Z and W in increasing address order. With stride 5 and byte offset 3, the 16-vertex fixture visits all four dword alignments. On WARP, all 64 component words matched the byte reference. Swapping channels in the reference or normalizing the green byte in the generated shader each triggered a mismatch.
 
@@ -6199,6 +6211,12 @@ On the invalid runs, these mutated sources must fail:
 
 Dropping only the -1 clamp is not observable: long division of 32768 by 32767 also gives 1.0. With the lowering removed, or with its channel count changed, the translation controls fail. LLVM 15 assembles the fixture, and `lower` of the disassembly and the CLI output both match `lower` of the source.
 
+The seven matching and fourteen intentionally wrong references use the same shader. The fixture passes
+them to `offscreen_check <adapter> --compute-store-batch <shader.cso> <case.bin>...` in order. They share
+one D3D12 device, root signature and pipeline. Each case gets fresh buffers, submits its own dispatch and
+compares all 320 words after the fence. The renderer reports `pass`, `mismatch` or `error` for each case
+and exits with status 1 if any case fails. The eleven shader mutations still compile and dispatch separately.
+
 ```powershell
 cmake --build --preset dev --target offscreen_check
 ctest --preset dev --no-tests=error -R '^compute_(store_aot_descriptor_load_format_|load_format_controls$)' -V
@@ -6270,6 +6288,10 @@ Every slot and one slot past the records are dispatched on WARP and the hardware
 cmake --build --preset dev --target offscreen_check
 ctest --preset dev --no-tests=error -R '^compute_(store_aot_heap_view_load_|heap_view_controls$)' -V
 ```
+
+The 56 matching references and seven wrong references run in two shader batches, one for XY and one for
+XYZW. Each dispatch still checks all 320 words. Each wrong reference must report its first differing
+word, including the expected and actual values. The fourteen recompiled mutations run individually.
 
 ```sh
 python3 -B tests/compute_heap_view_check.py binary llvm-mc-15 llvm-objcopy-15 libLLVM-15.so.1
@@ -7987,6 +8009,26 @@ one. Only the low five bits of the index are used. EXEC, VCC and SGPRs tracked
 as lane masks are refused because their per-lane projections lose the other
 bits. Run `ctest --preset dev --no-tests=error -R '^startup_gfx2hlsl_s_bitcmp$' -V`.
 
+**Scalar absolute value.** Startup translation lowers `s_abs_i32` to
+`(asint(S0) < 0 ? (0u - S0) : S0)` with `SCC = (D != 0)`, matching `pixel_aot`
+(INT_MIN stays). Lane masks and descriptor-bearing sources are refused. Run
+`ctest --preset dev --no-tests=error -R '^startup_gfx2hlsl_s_abs$' -V`
+(or `python3 -B tests/startup_gfx2hlsl_s_abs_check.py`). The `_dispatch_warp`
+/ `_dispatch_hardware` variants compile the translated expression into a
+compute shader and compare UAV readback for INT_MIN, -1, 0 and a positive
+word (plus an SCC-dependent branch token) against the same reference:
+`ctest --preset dev --no-tests=error -R '^startup_gfx2hlsl_s_abs_dispatch_warp$' -V`.
+[Refs #1723](https://github.com/R0Y00/Xbox2Windows/issues/1723).
+
+**Scalar bit set and clear.** Startup translation lowers `s_bitset0_b32` and
+`s_bitset1_b32` in place: bit `S0[4:0]` of the destination is cleared or set,
+and SCC is unchanged (same form as `pixel_aot` / #1579; Refs #2023 Item J).
+Lane masks and descriptor-bearing SGPRs are refused. A known constant
+destination with a known bit index folds. Run
+`ctest --preset dev --no-tests=error -R '^startup_gfx2hlsl_s_bitset$' -V`
+(or `python3 -B tests/startup_gfx2hlsl_s_bitset_check.py`). The fixture is
+CPU-only; Windows WARP/hardware draws are left for an independent retest.
+
 **Scalar immediate comparisons.** The startup translator sign-extends the
 16-bit field of `s_movk_i32` and `s_cmpk_*_i32`, and zero-extends the field
 of `s_cmpk_*_u32`. The source-built check covers all six relations against
@@ -9507,6 +9549,16 @@ and unproven wave masks remain unsupported. Use
 `python -B tests/startup_mesh57_skeleton_check.py` for translations and refusals.
 Append `draw <dxc> <offscreen_check> <warp|hardware>` for CPU-reference readback
 of the SCC paths and lane-masked if/else.
+
+The `startup_mesh57_loop_refusal` check is a source-built program with the same
+exchanges plus one deliberate back-edge after the count exchange
+(`tests/startup_mesh57_loop_refusal.s`). Tip refuses it with
+`slot 57 mesh: a loop outside the group-memory exchanges is not covered`. The
+mutant replaces that back-edge with a second `s_nop` and must not stop on that
+loop message. The oracle is an exact string match; a stub that only checks for
+any `unsupported:` result would accept a wrong reason and is rejected by the
+check. Host-only (no WARP/hardware draw). Run
+`python -B tests/startup_mesh57_loop_refusal_check.py`, or the matching CTest.
 
 A forward `s_cbranch_vccz` or `s_cbranch_vccnz` can also branch on the
 lane's VCC bit when EXEC is full and every incoming path last wrote VCC with
@@ -13988,6 +14040,16 @@ python3 -B tests/rdna2_tools_check.py
 
 Scope: recognition only. No translator lowers these forms through this change, and no hardware or Windows run backs them.
 
+## RDNA2 lane permutations in the unsupported-shader report
+
+`tools/scan_unsupported_shaders.py` reports `v_permlane16_b32` and
+`v_permlanex16_b32` as `VALU (Cross-lane)` in `unsupported_details`.
+The former can gather a value from another lane in the same 16-lane row.
+The latter selects from the paired row. Both remain unsupported by the
+pixel translator with either a declared wave32 or wave64 layout. The
+lane-local byte-selection instruction `v_perm_b32` retains its ordinary
+VALU classification. [AMD RDNA 2 ISA, §12.12](https://www.amd.com/content/dam/amd/en/documents/radeon-tech-docs/instruction-set-architectures/rdna2-shader-instruction-set-architecture.pdf)
+
 ## gfx1013 VOP1 rounding, frexp and operand-free opcodes
 
 `tools/disasm_rdna2.py` named only part of the VOP1 table; eleven opcodes in two contiguous gaps printed as `v_vop1_NN`
@@ -14153,11 +14215,20 @@ ctest --preset dev --no-tests=error -R '^startup_gfx2hlsl_cselect_mask_controls$
 ctest --preset dev --no-tests=error -R '^startup_gfx2hlsl_mask_overwrite_controls$' -V
 ```
 
+## Startup translator: lane masks used as vector data
+
+The one-lane model stores a mask as the current lane's bit. RDNA 2 reads the whole mask word when the register is
+a data source. For example, after `v_cmp_eq_u32_e64 s[30:31], 0, v0`, reading s30 as data gives
+`0xffffffff` if all 32 lanes pass. The translator refuses lane masks in either data operand of
+`v_cndmask_b32` and in the source of `v_mov_b32`, including SDWA DWORD. Source modifiers still identify the
+underlying mask register. Lane masks remain valid as selectors, and ordinary scalar words remain valid as data.
+The synthetic controls run under `startup_gfx2hlsl_mask_data_controls`.
+
 ## Startup translator: 32-bit add and subtract with a carry out
 
 `tools/startup/gfx2hlsl.py` refused the VOP3b forms `v_add_co_u32`, `v_sub_co_u32` and `v_subrev_co_u32` as unknown instructions. It now lowers them from the AMD RDNA 2 ISA description: `D = S0 + S1` with the carry out of bit 31, `D = S0 - S1` with a borrow when `S1 > S0`, and `SUBREV` with the sources swapped. These forms take no carry-in. The carry goes to the lane's bit of VCC or of the SGPR destination, which becomes a lane mask and is never a uniform source. The result and the carry are computed into the scratch registers `a` and `w` before either destination is written, so a destination may overlap a source. When `exec` is not known, an inactive lane keeps D and writes a 0 carry, as the compare lowering does. `clamp`, other modifiers, an EXEC carry-out and a wrong operand count are refused.
 
-`tests/startup_gfx2hlsl_add_sub_co_check.py` decodes synthetic VOP3b words for the three forms with an SGPR and a VCC carry-out, evaluates the emitted lines with the restricted evaluator of `startup_gfx2hlsl_bit_alu_check.py` on a grid of edge values, and compares them with Python references written from the ISA description. It also checks that the carry-out SGPR is a lane mask, that a readfirstlane of a copy of it is refused, the exec-masked form, an overlapping destination and the refusals. Negative control: a borrow with the comparison reversed disagrees with the reference on the grid. On the translator before this change every form is refused. Test: `startup_gfx2hlsl_add_sub_co_controls`. Not covered: DXC compilation and a draw through a translated pipeline; the check evaluates the emitted HLSL text only.
+`tests/startup_gfx2hlsl_add_sub_co_check.py` decodes synthetic VOP3b words for the three forms with an SGPR and a VCC carry-out, evaluates the emitted lines with the restricted evaluator of `startup_gfx2hlsl_bit_alu_check.py` on a grid of edge values, and compares them with Python references written from the ISA description. It also checks that the carry-out SGPR is a lane mask, that moving it as vector data is refused, the exec-masked form, an overlapping destination and the refusals. Negative control: a borrow with the comparison reversed disagrees with the reference on the grid. On the translator before this change every form is refused. Test: `startup_gfx2hlsl_add_sub_co_controls`. Not covered: DXC compilation and a draw through a translated pipeline; the check evaluates the emitted HLSL text only.
 
 ```powershell
 ctest --preset dev --no-tests=error -R '^startup_gfx2hlsl_add_sub_co_controls$' -V
@@ -15686,6 +15757,34 @@ ctest --preset dev --no-tests=error -R '^(cpu_aot_switch_sal|cpu_aot_switch_shif
 The [MASM fixture](../tests/cpu/switch_sal.asm) emits explicit `/6` byte sequences (because ML64 assembles the `sal` mnemonic as `/4` `SHL`) across 24 translated functions covering all 12 `SAL` `Code` encodings (`SAL_RM{8,16,32,64}_{1,CL,IMM8}`), register and memory destinations, count-`1` all-16 `SETcc` checks, count->1 10-condition `SETcc` checks, `Jcc`, `CMOVcc`, narrow returns, and nonvolatile/stack-frame operands, plus 11 negative exports. [The differential check](../tests/cpu/switch_sal_check.py) verifies 28,024 `dev` and 28,024 `/O2` comparisons against native execution and the Python reference, four `/O2` mutated-C++ controls (`shift_dir`, `cf_mask`, `of_mask`, `cl_mask`), 11 MASM, 4 unit, and 7 PE-patched rejection controls, and records decoded mnemonics via `iced_x86.Mnemonic` to `FORM_COVERAGE_RECORD`.
 
 Not covered by this experiment: `SAL` outside leaf/switch-lifted functions, and title CPU code execution.
+
+## Startup list Dispatch
+
+Command-list slot 14 (`Dispatch`) is recorded on the desktop list only when the list is open and direct or compute, a desktop compute pipeline and a desktop compute root signature are bound, the compute root declares no static samplers and only root SRV parameters (slot 43), the compute pipeline was built against that same root signature, every root SRV the root declares was set since the root was bound (a rejected or unaligned replacement clears its binding), and every group count is at most 65535. Zero groups on an axis is forwarded and runs nothing. A root with other parameters is refused with `compute root arguments are not forwarded`, a pipeline from another root with `compute pipeline was built against another root signature`, an unset or rejected root SRV with `a compute root SRV is not bound`. Of the compute root arguments, only root SRVs (slot 43) reach the desktop list: slot 35 records descriptor tables without setting them, and slots 37, 39, 41 and 45 have no handler yet, so a dispatch under any other argument would run with it unset. The first 16 refusals in a process are logged as `x2w-render Dispatch(x, y, z) refused: <reason>`.
+
+`tests/startup_list_dispatch_check.cpp` checks the decision without a device; its five mutated runs must fail. `tests/startup_list_dispatch_native.cpp` drives slots 86, 25, 33, 43, 148, 14, 9 and 139 of the stand-in on a desktop device, on WARP and on a hardware adapter (77 without one), with the debug layer when it is installed. Each refused case must log exactly one refusal line with the expected reason: a root SRV never set, a rejected or misaligned slot 43 replacement after a valid one, a root changed and changed back without slot 43, a pipeline built against another root, a root with a descriptor table, a root with a static sampler, an unset root SRV with zero groups, more than 65535 groups, a closed list, and a Reset list without new bindings. A forwarded case must log no line. Around each call on an open list the fixture records a pipeline-statistics query on the desktop list: `CSInvocations` must be 4 per group for a forwarded call and 0 for a refused one. The fully bound call is recorded alone and counted first, so a slot 14 that records nothing fails on its count. Each of the three recordings is executed to a fence, and the debug layer must report no error. The shader only declares its root SRV, so this shows that the desktop `Dispatch` is recorded and runs, not what a shader reads through the bound SRV. The `skip_srv` control drops slot 43 from the first forwarded case and must report that case as refused.
+
+```powershell
+cmake --build --preset dev --target startup_list_dispatch_check startup_list_dispatch_native
+ctest --preset dev --no-tests=error -R "^startup_list_dispatch" -V
+```
+
+## Startup translator: explicit-gradient image_sample_d
+
+`tools/startup/gfx2hlsl.py` lowers the gfx1013 `image_sample_d` form in a pixel stage to `tex.SampleGrad(smp, uv, ddx, ddy)`. The address dwords are ddx, then ddy (one register per coordinate axis each), then the coordinates: six registers for 2D, seven for a 2D array (slice last), nine for a volume (a contiguous nine-dword volume address encoded as a sixteen-register range is trimmed to nine). Only `dim:`, `dmask:` and the cache-policy bits `dlc`, `glc`, `slc` are accepted.
+
+Refused with a named reason: `image_sample_c_d` (it would need `SampleCmpGrad`, shader model 6.8; only `image_sample_c` and `_c_lz` are lowered), `image_sample_d_o` and every other offset, bias, clamp, `a16`, `tfe` or `lwe` form, an empty `dmask`, a 1D image, and an address count that does not match the dimension.
+
+The guest sampler LOD range is kept: a constant sampler carries MIN_LOD and MAX_LOD to the static sampler through the same `smpl` line as `image_sample`, `_l` and `_lz` (sampler words `(0, 0, 0x04000000, 0)` stay capped at mip 0), with the same refusals for a LOD bias and for MIN_LOD above MAX_LOD. A mip filter of 0 keeps the ordinary sampler, and a heap sampler is not validated and is logged once per module.
+
+Verified: the Python translation checks (address order, refusals, the LOD cap, fixture words against `llvm-mc`) and a D3D12 draw on WARP and hardware (`tests/startup_image_sample_d_draw_check.py`): four `SampleGrad` probes on a three-mip, two-slice fixture read back against a CPU reference, with a MAX_LOD 0 sampler and an implicit `Sample` as negative controls.
+
+```bash
+./out/pe-env/bin/python -B tests/startup_image_sample_d_check.py
+./out/pe-env/bin/python -B tests/startup_image_sample_d_check.py binary <llvm-mc>
+ctest --preset dev --no-tests=error -R "^startup_image_sample_d" -V
+ctest --preset dev --no-tests=error -R "^startup_image_sample_d_draw_(warp|hardware)$" -V
+```
 
 ### Startup 24-bit multiplies, v_xnor_b32 and the funnel shifts
 

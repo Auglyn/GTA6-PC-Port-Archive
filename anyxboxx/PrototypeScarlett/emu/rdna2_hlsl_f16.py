@@ -68,6 +68,17 @@ uint F16Max(uint a, uint b) {
   return F16Key(a) >= F16Key(b) ? a : b;
 }
 uint F16Clamp(uint h) { return F16IsNan(h) || (h & 0x8000u) != 0u ? 0u : min(h, 0x3C00u); }
+uint F16Rndne(uint h) {                           // au plus proche pair, en entiers : pas de Round_ne (#227)
+  uint s = h & 0x8000u, a = h & 0x7FFFu, e = a >> 10;
+  if (a > 0x7C00u) return 0x7E00u;
+  if (e >= 25u) return h;                         // |x| ≥ 1024 et ±infini : déjà entier
+  if (e < 14u) return s;                          // |x| < 0.5
+  if (e == 14u) return a == 0x3800u ? s : s | 0x3C00u;    // 0.5 ≤ |x| < 1 : 0.5 va à 0
+  uint f = 25u - e, mask = (1u << f) - 1u, half = 1u << (f - 1u);    // bits sous l'unité
+  uint t = a & ~mask, r = a & mask;
+  bool up = r > half || (r == half && ((t >> f) & 1u) != 0u);
+  return s | (t + (up ? 1u << f : 0u));           // la retenue passe dans l'exposant
+}
 """
 
 # Expression de chaque opération : {a} {b} {c} sources, {d} moitié basse de vdst avant l'instruction, {k} littéral.
@@ -77,6 +88,13 @@ TEMPLATES = {
     "v_fmaak_f16": "F16Fma({a}, {b}, {k})", "v_fma_f16": "F16Fma({a}, {b}, {c})", "v_max_f16": "F16Max({a}, {b})",
     "v_min_f16": "F16Min({a}, {b})", "v_ldexp_f16": "F16Ldexp({a}, {b})", "v_cvt_f16_f32": "F32ToF16({a})",
     "v_cvt_f32_f16": "F16ToF32({a})",
+    # Entier d'un f16, exact en f32 et de retour en f16 ; signe gardé (IEEE), NaN → 0x7E00 par F32ToF16. Mêmes
+    # fonctions HLSL que v_floor/ceil/trunc_f32 (rdna2_hlsl_ops). v_rndne_f16 est calculé en entiers : le pilote
+    # NVIDIA 621.xx replie Round_ne(2.5) en 3.0 (#227).
+    "v_floor_f16": "F32ToF16(asuint(floor(asfloat(F16ToF32({a})))))",
+    "v_ceil_f16": "F32ToF16(asuint(ceil(asfloat(F16ToF32({a})))))",
+    "v_trunc_f16": "F32ToF16(asuint(trunc(asfloat(F16ToF32({a})))))",
+    "v_rndne_f16": "F16Rndne({a})",
 }
 
 

@@ -6,7 +6,7 @@ written by hand below, not from the interpreter.
 """
 import pytest
 
-from emu import rdna2_exec, rdna2_hlsl
+from emu import rdna2_exec
 from test_rdna2_exec import V, const, program, sop1, vop3, vopc
 
 LITERAL, ONE, VCC_LO, EXEC_LO = 255, 242, 106, 126
@@ -135,10 +135,3 @@ def test_class_mask_constants():
 def test_unmeasured_forms_are_refused_by_name(words, reason):
     with pytest.raises(rdna2_exec.Untranslated, match=reason):
         run(*words)
-
-
-@pytest.mark.parametrize("words", [(vopc("v_cmp_lt_f16", V + 1, 2),), vop3("v_cmp_class_f16", 40, V + 1, V + 2)])
-def test_hlsl_still_refuses_f16_compares(words):
-    """The HLSL recompiler does not translate them yet: it must refuse, not reuse the f32 compare."""
-    with pytest.raises(rdna2_hlsl.Untranslatable):
-        rdna2_hlsl.translate(program(*words))

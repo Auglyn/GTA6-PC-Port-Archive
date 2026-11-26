@@ -10,6 +10,10 @@
 > 在 i7-13700KF + RTX 4070 SUPER、Windows 11 上实测，使用 VIctory 的分支仓库 `LooperSalty/victory` 的提交 `80d58f8` (branch `anyxboxx/fork-7b0-lot9-murs`)（`third_party/victory`），通过 `tools/lancer_victory.ps1 -GameDir <游戏文件夹>` 启动：
 >
 > - 🆕 **世界中约 14 fps（Series X，RTX 4070 SUPER，2026-11-25 测得）**：`third_party/victory` 以 Neptune (VIctory Edit.) 2026-11-25c 为基础，并采用当天测得的一组设置（中位数 13.8 fps，最后一分钟 15.6–17 fps，每帧 72.5 ms；此前在 `main` 的启动器设置下中位数为 10.9 fps，均为 Series X 上的自动 13 分钟运行，无崩溃）。下面的数字是用旧基础 `80d58f8` 测得的。
+> - 🆕 **画质优先模式（维护者于 2026-11-25 实测）**：`tools\lancer_victory.ps1 -Quality`（每帧重新读取窗口副本，使用更小的池）光照和纹理明显更好，约 7-9 fps，纹理拒绝次数大幅减少（51-93，对比约 300）。默认仍是快速配置（约 14-17 fps，使用 PR #272 在世界中 7 分钟的中位数为 13.7）。通过 `-Override @{ VICTORY_X = '...' }`，任何人都可以在不修改启动器的情况下尝试某项设置。
+> - ✅ **船可以浮起来了**（Exorion1er 的 PR #263：海洋高度图会被拷回，供游戏的 CPU 使用）。
+> - 🦀 **Rust 移植，分支 `rust/full`（尚未并入 `main`）**：原生启动器（PR #249）和 GPU 运行器 `anyxboxx_gpu_run.exe`（PR #266）现已改用 Rust；RDNA 2 参考解释器已移植到 Rust（crate `anyxboxx-rdna2-ref`），能逐字节一致地执行 Python 模型执行的所有指令（LLVM 的 1,490 种编码中的 1,060 种），并带有 28 个一致性测试；xgameruntime 的存档、本地存储、商店以及 HDR/DXGI 对象已移植。待移植：HLSL 重编译器、xgameruntime 的其余部分，然后移除 C++ 和 Python。状态：[docs/rust-full-status.md](https://github.com/LooperSalty/AnyXboxX/blob/rust/full/docs/rust-full-status.md)。
+> - ⛔ **已知限制（进行中）**：在 32 GB 内存的 PC 上，系统内存是瓶颈（进程占用约 22-25 GB：游戏自身的内存，加上 CPU 镜像，再加上溢出到共享内存的显存）；12 GB 显卡的纹理空间不足（每次会话数百次拒绝），导致世界流式加载时帧率跌到 1-6 fps。
 > - ✅ GTA VI 的 Xbox Series 1.0.2.1 版本**可以在 PC 上启动**：启动、档案界面、首次运行设置、法律声明界面、加载、暂停菜单。菜单为 30 fps。
 > - ✅ 已**到达游戏世界并显示**：角色可在玩家控制下移动，3D 画面可显示，约 4 分 20 秒的测试中为 4.8 到 5.4 帧/秒，每帧约 6,550 次绘制（维护者实测，Windows 11，RTX 4070 Super，VIctory 日志）。启动动画不再闪烁（观察）。此前从未被点亮的辐照度缓存（过场动画某一帧的 PIX 捕获中调度为 0 次），现在其两个着色 shader 已能翻译，对应的管线在游戏中创建并绑定（观察）。
 > - ✅ **所有过场动画都能完整播放**（维护者于 11 月 25 日使用启动脚本设置和固定提交 `80d58f8` 观察），部分地方仍缺少一些画面（光线追踪结构构建器已关闭）。维护者在过场动画中观察到峰值 9 fps、稳定 7 至 8 fps（窗口标题，11 月 25 日）；在一次脚本化运行中，日志测得的中位数较低，视场景为 2 至 3 fps。
@@ -44,7 +48,7 @@ AnyXboxX 专注于一个版本：**Xbox Series 版《Grand Theft Auto VI》，�
 ![Xbox Series X 翻译进展](../images/traduction.svg)
 
 - **处理器指令：100%。** Series X 使用 x86-64 的 AMD Zen 2，与 PC 的指令集相同：在原生模式下，游戏代码无需翻译，直接原样运行。
-- **GPU 指令：81%。** 主机游戏的着色器是针对 Series X 的 RDNA 2 GPU 编译的。1,490 种 RDNA 2 编码中已有 1,208 种可在参考解释器中运行，RDNA 2 → DXIL 重编译器已能用 D3D12 绘制首个顶点着色器和像素着色器。
+- **GPU 指令：86%。** 主机游戏的着色器是针对 Series X 的 RDNA 2 GPU 编译的。1,490 种 RDNA 2 编码中已有 1,285 种可在参考解释器中运行，RDNA 2 → DXIL 重编译器已能用 D3D12 绘制首个顶点着色器和像素着色器。
 - **系统函数：66%。** 测试包中各 DLL 导入的 1 337 个函数里，有这个比例在隔离模式下已被解析。
 - **主机专用 DLL**：`xmem.dll`（4/4）和 `d3d12_xs.dll`（2/2）已针对该包用到的函数完成翻译。D3D12.X（设备和 `ID3D12*` 接口）由 TomBox 的 `d3d12_xs.dll` 提供，尚未用游戏测试。
 - **GDK 运行时：396 个函数中的 210 个**是在 AnyXboxX 中用 C++ 编写的：任务队列（`XTaskQueue`、`XAsync`、`XThread`）、用户（`XUser`，一个离线的本地档案）、Xbox Series X 的身份（`XSystem`、Title ID、分析数据、运行时功能）、存档（`XGameSave`、`XGameSaveFiles`、`XPersistentLocalStorage`）游戏包（`XPackage`），离线商店（`XStore`），以及离线的邀请、激活和错误报告（`XGameInvite`、`XGameActivation`、`XGameProtocol`、`XError`），以及 PC 的真实 HDR 状态和网络连接（`XDisplayTryEnableHdrMode`、`XNetworkingGetConnectivityHint`）。当 AnyXboxX 单独管理运行时（没有 Gaming Services，或使用 `ANYXBOXX_SYSTEM_RUNTIME=0`）时，它们才会生效。如果存在 Windows 的 GDK 运行时，则由它提供所有接口（包括任务队列），因为其 API 只接受它自己的队列。跟踪（`ANYXBOXX_TRACE=1`）会列出每个被请求接口的名称。
@@ -91,7 +95,7 @@ C++ 运行时会为游戏 DXGI 交换链的每次 `Present` 计时，即使 DXGI
 | 396 个 GDK 函数的表：接口和方法编号，提取自 `xgameruntime.lib`（`tools/gdk_interfaces.py`） | ✅ 已完成 |
 | `XTaskQueue`、`XAsync`、`XThread` 由 AnyXboxX 提供：testgdk 无需 Windows 的运行时即可运行 | ✅ 已完成 |
 | 其他 GDK 接口：委托给 Windows 的 GDK 运行时，由跟踪列出名称 | 🟡 进行中 |
-| 1400+ 个自动化测试 | ✅ 已完成 |
+| 1600+ 个自动化测试 | ✅ 已完成 |
 | D3D12.X：`D3D12XboxCreateDevice`、主机的 `ID3D12*` 接口和 `DXGIXPresentArray`，由 TomBox 的 Rust 版 `d3d12_xs.dll` 提供（MIT，48 个已实现导出，用 `tools/build_tombox.py d3d12_xs` 构建，通过 `ANYXBOXX_D3D12_XS=<路径>` 加载）；没有主机可执行文件，此处无法测试 | 🟡 进行中 |
 | 用 TomBox（Rust，GPL-3.0）的主机库补足 AnyXboxX 缺少的部分：`xg_xs`（纹理布局，23 个导出）和完整的 `xmem`（38 个导出），通过 `ANYXBOXX_TOMBOX_DIR=<文件夹>` 使用；由 `tools/build_tombox.py xg_xs xmem` 构建 | 🟡 进行中 |
 | 离线 `XUser`：始终已登录的本地档案、可设置的游戏玩家标签（`ANYXBOXX_GAMERTAG`）、testgdk 登录成功 | ✅ 已完成 |
@@ -116,7 +120,7 @@ C++ 运行时会为游戏 DXGI 交换链的每次 `Present` 计时，即使 DXGI
 | 拉取请求检查：每个拉取请求都运行 lint 并核对 9 个 README 的同步（行、图片、测试数量） | ✅ 已完成 |
 | Rust 实现的主机纹理：从 Xbox2Windows（MIT）移植的 BC7 解码和 GFX10 `SW_4K_S` 去平铺，复现了参考摘要；`anyxboxx_texture bc7 <blocks.bin> <宽> <高> <out.png> [--4k-s]` | 🟡 进行中 |
 | 由 AnyXboxX 自行编写的其他 GDK 接口（`XGameUi`、`XNetworking`…） | ⏳ 待完成 |
-| RDNA 2 → DXIL 着色器重编译器：首批程序已翻译为 HLSL、编译为 DXIL 并通过 D3D12 在 PC 的 GPU 上运行（`--hlsl`、`anyxboxx_gpu_run.exe`，无 GPU 时用 WARP），内存与 wave32 参考解释器的结果完全一致，该解释器可执行 1,490 种编码中的 1,208 种（标量、VOP1/VOP2/VOPC/VOP3/VOP3P、内存：SMEM、LDS、GLOBAL、带 V# 边界和类型化格式的 MUBUF/MTBUF、原子操作、分支、`exec` 分歧）；首个顶点着色器和像素着色器（EXP 导出、VINTRP 插值）已用 D3D12 绘制，逐顶点、逐像素一致：`scarlett.py --rdna2 <shader.bin> --executer` | 🟡 进行中 |
+| RDNA 2 → DXIL 着色器重编译器：首批程序已翻译为 HLSL、编译为 DXIL 并通过 D3D12 在 PC 的 GPU 上运行（`--hlsl`、`anyxboxx_gpu_run.exe`，无 GPU 时用 WARP），内存与 wave32 参考解释器的结果完全一致，该解释器可执行 1,490 种编码中的 1,285 种（标量、VOP1/VOP2/VOPC/VOP3/VOP3P、内存：SMEM、LDS、GLOBAL、带 V# 边界和类型化格式的 MUBUF/MTBUF、原子操作、分支、`exec` 分歧）；首个顶点着色器和像素着色器（EXP 导出、VINTRP 插值）已用 D3D12 绘制，逐顶点、逐像素一致：`scarlett.py --rdna2 <shader.bin> --executer` | 🟡 进行中 |
 | 在 wave 为 32 通道的 GPU 上运行 wave64 计算程序（#70）：每个 64 通道 wave 作为一个 64 线程的线程组运行（通道掩码和通道读取通过 groupshared 内存，不用 `WaveSize`），在 RTX（32 通道 wave）和 WARP 上内存与 wave64 参考解释器完全一致；DPP 和 SDWA 比较仍按名称拒绝 | 🟡 进行中 |
 | 着色器缓存：翻译后的着色器只编译一次为 DXIL，之后从磁盘（1.4 ms）或内存（0.8 ms）复用，而不再调用 dxc（22 ms）；`%LOCALAPPDATA%\AnyXboxX\shader-cache` 或 `ANYXBOXX_SHADER_CACHE`，大小有上限 | 🟡 进行中 |
 | 通过 VIctory 运行该作品的 Xbox Series 1.0.2.1 版本（`third_party/victory`，我们自己的代码，基于 Neptune (VIctory Edit.) 2026-11-25c，采用 11 月 25 日的一组设置）：世界中约 14 fps（Series X，RTX 4070 SUPER，2026-11-25 测得，中位数 13.8 fps，最后一分钟 15.6–17 fps，每帧 72.5 ms）；没有光线追踪光照（室内以均匀环境光代替），没有面部动画，替换纹理时物体会短暂变黑 | 🟡 进行中 |
