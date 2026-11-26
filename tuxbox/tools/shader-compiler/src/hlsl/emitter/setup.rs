@@ -118,6 +118,7 @@ impl<'a> Emitter<'a> {
             indexed_lane: false,
             single_wave32: false,
             resolve_wave32: false,
+            paired: false,
             wave32_compare_masks,
             light_grid: false,
             page_waves: false,

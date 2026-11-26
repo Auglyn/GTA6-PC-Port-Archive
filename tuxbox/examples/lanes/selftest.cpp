@@ -409,6 +409,84 @@ void xbox_shader_scenario(ID3D12Device* device) {
     expect_value(memory, 0, 3, "write after the dispatch");
 }
 
+// A console program that sums across its 64-lane waves. A host without such
+// waves needs the translation made for 32 lanes; without either translation the
+// provider substitutes an empty pipeline and nothing is written.
+void wave64_shader_scenario(ID3D12Device* device) {
+    constexpr UINT words = static_cast<UINT>(std::size(wave_shader_expected));
+    constexpr UINT64 bytes = words * sizeof(UINT);
+    D3D12_DESCRIPTOR_RANGE range{D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0, 0, 0};
+    D3D12_ROOT_PARAMETER table{};
+    table.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    table.DescriptorTable = {1, &range};
+    D3D12_ROOT_SIGNATURE_DESC signature{1, &table, 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_NONE};
+    ComPtr<ID3DBlob> serialized;
+    check(D3D12SerializeRootSignature(&signature, D3D_ROOT_SIGNATURE_VERSION_1, &serialized, nullptr),
+          "serialize wave root signature");
+    ComPtr<ID3D12RootSignature> root;
+    check(device->CreateRootSignature(0, serialized->GetBufferPointer(), serialized->GetBufferSize(),
+                                      IID_PPV_ARGS(&root)), "create wave root signature");
+    D3D12_COMPUTE_PIPELINE_STATE_DESC shader{};
+    shader.pRootSignature = root.Get();
+    shader.CS = {wave_shader, sizeof(wave_shader)};
+    ComPtr<ID3D12PipelineState> pipeline;
+    check(method<CreateComputePipeline>(device, device_create_compute)(device, &shader, 0, nullptr,
+                                                                       IID_PPV_ARGS(&pipeline)),
+          "create pipeline from a wave64 console shader");
+
+    D3D12_DESCRIPTOR_HEAP_DESC heap_desc{
+        D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 1, D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE, 0};
+    ComPtr<ID3D12DescriptorHeap> heap;
+    check(device->CreateDescriptorHeap(&heap_desc, IID_PPV_ARGS(&heap)), "create wave view heap");
+    const D3D12_CPU_DESCRIPTOR_HANDLE cpu{method<frame_abi::CpuHandle>(heap.Get(), 9)(heap.Get())};
+    const D3D12_GPU_DESCRIPTOR_HANDLE gpu{method<GpuHandle>(heap.Get(), 10)(heap.Get())};
+
+    auto seed = buffer(device, D3D12_HEAP_TYPE_UPLOAD, bytes, D3D12_RESOURCE_STATE_GENERIC_READ);
+    auto output = buffer(device, D3D12_HEAP_TYPE_DEFAULT, bytes, D3D12_RESOURCE_STATE_COPY_DEST,
+                         D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+    auto readback = buffer(device, D3D12_HEAP_TYPE_READBACK, bytes, D3D12_RESOURCE_STATE_COPY_DEST);
+    const std::vector<UINT> unwritten(words, 0xdeadbeefu);
+    compute_fixture::upload(seed.Get(), unwritten.data(), size_t(bytes));
+    D3D12_UNORDERED_ACCESS_VIEW_DESC view{};
+    view.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+    view.Format = DXGI_FORMAT_R32_TYPELESS;
+    view.Buffer.NumElements = words;
+    view.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
+    device->CreateUnorderedAccessView(output.Get(), nullptr, &view, cpu);
+
+    Queue direct(device, D3D12_COMMAND_LIST_TYPE_DIRECT);
+    ID3D12GraphicsCommandList* list = direct.list.Get();
+    list->CopyBufferRegion(output.Get(), 0, seed.Get(), 0, bytes);
+    compute_fixture::transition(list, output.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
+                                D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    ID3D12DescriptorHeap* heaps[]{heap.Get()};
+    method<BindHeaps>(list, slot_bind_heaps)(list, 1, heaps);
+    method<SetRoot>(list, slot_compute_root)(list, root.Get());
+    list->SetPipelineState(pipeline.Get());
+    method<SetTable>(list, slot_compute_table)(list, 0, gpu);
+    list->Dispatch(1, 1, 1);
+    compute_fixture::transition(list, output.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                D3D12_RESOURCE_STATE_COPY_SOURCE);
+    list->CopyBufferRegion(readback.Get(), 0, output.Get(), 0, bytes);
+    direct.submit();
+    direct.finish("dispatch of the wave64 console shader");
+
+    D3D12_RANGE read{0, SIZE_T(bytes)}, empty{};
+    void* mapped = nullptr;
+    check(readback->Map(0, &read, &mapped), "map wave readback");
+    std::vector<UINT> got(words);
+    std::memcpy(got.data(), mapped, size_t(bytes));
+    readback->Unmap(0, &empty);
+    for (UINT i = 0; i < words; ++i) {
+        if (got[i] != wave_shader_expected[i]) {
+            char message[128];
+            std::snprintf(message, sizeof(message), "wave sum mismatch at thread %u: expected %u, found %u",
+                          i, wave_shader_expected[i], got[i]);
+            throw std::runtime_error(message);
+        }
+    }
+}
+
 ComPtr<ID3D12PipelineState> compute_pipeline(ID3D12Device* device, ComPtr<ID3D12RootSignature>& root,
                                           D3D12_SHADER_BYTECODE bytecode) {
     D3D12_ROOT_PARAMETER params[2]{};
@@ -1437,6 +1515,7 @@ constexpr Scenario scenarios[] = {
     {L"thread-dimensions", thread_dimensions},
     {L"descriptor-reclaim", descriptor_reclaim},
     {L"xbox-shader", xbox_shader_scenario},
+    {L"wave64-shader", wave64_shader_scenario},
 };
 
 // A fresh Scarlett device on the requested adapter. The factory is reached
@@ -1488,7 +1567,7 @@ const wchar_t* const selftest_scenarios[] = {L"labels",            L"cross-queue
                                              L"indirect-dispatch", L"gpu-indirect-dispatch",
                                              L"dispatch-wait", L"texture-readback", L"ray-tracing-builder",
                                              L"thread-dimensions", L"descriptor-reclaim",
-                                             L"xbox-shader"};
+                                             L"xbox-shader", L"wave64-shader"};
 const unsigned selftest_scenario_count = static_cast<unsigned>(std::size(selftest_scenarios));
 static_assert(std::size(selftest_scenarios) == std::size(scenarios));
 
@@ -1498,6 +1577,8 @@ std::string run_selftest(const wchar_t* requested, const wchar_t* adapter) {
     char pci[16]{};
     for (const auto& scenario : scenarios) {
         if (!all && std::wcscmp(requested, scenario.name)) continue;
+        // This one writes nothing until the launcher's compiler has translated it.
+        if (all && !std::wcscmp(scenario.name, L"wave64-shader")) continue;
         const auto name = narrow(scenario.name);
         try {
             auto device = create_scarlett_device(adapter, pci);

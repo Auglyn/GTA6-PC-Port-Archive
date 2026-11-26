@@ -235,6 +235,9 @@ unsafe fn create_pipeline_x_inner(
     };
     let compute_threads = guest_threads
         .or_else(|| translation.as_deref().and_then(tuxbox_dxbc::shader_compute_threads));
+    // The group size above is the console's. A narrow-wave translation runs the
+    // same group on half as many host threads, so it is chosen only now.
+    let translation = translation.map(|code| fitting_translation(this, code));
     let code = translation.as_deref().unwrap_or(bytes);
     if let Some(refusal) = unsupported_wave_size(this, code) {
         crate::diagnostics::compute_wave_failure(bytes, &refusal.detail);
@@ -475,11 +478,26 @@ pub(super) fn check_wave_range(required: (u32, u32), host: (u32, u32)) -> Option
     Some(WaveRefusal { detail, tag })
 }
 
+/// `translation`, or the narrow-wave translation of the same program when this
+/// host cannot run it and the compiler can produce one.
+pub(super) fn fitting_translation(device: &Device, translation: Vec<u8>) -> Vec<u8> {
+    let Some(host) = super::host_profile::wave_range(device) else { return translation };
+    if !needs_narrow_waves(super::shader_cache::portable_wave_range(&translation), host) {
+        return translation;
+    }
+    super::shader_cache::narrow_wave_variant(&translation).unwrap_or(translation)
+}
+
+/// Whether a program that needs exactly 64 lanes meets a host that has fewer.
+pub(super) fn needs_narrow_waves(required: Option<(u32, u32)>, (_, host_max): (u32, u32)) -> bool {
+    required == Some((64, 64)) && host_max == 32
+}
+
 /// Returns a refusal if `shader` is portable DXIL whose required wave size is
 /// unsupported by `device`'s `D3D12_FEATURE_D3D12_OPTIONS1` wave lane range.
 pub(super) fn unsupported_wave_size(device: &Device, shader: &[u8]) -> Option<WaveRefusal> {
     let required = super::shader_cache::portable_wave_range(shader)?;
-    let host = super::dxgi::wave_range(device)?;
+    let host = super::host_profile::wave_range(device)?;
     check_wave_range(required, host)
 }
 

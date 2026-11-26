@@ -521,6 +521,34 @@ class RuntimeShaderLinks(unittest.TestCase):
             self.assertTrue(compile_request(source, key, self.tools, self.cache, self.session))
         self.assertEqual([call.args[0][0] for call in compiler.call_args_list], ["xshader", "dxc", "dxv"])
 
+    def test_wave32_request_has_its_own_translation_and_cache_entry(self):
+        """The narrow-wave variant never replaces the ordinary translation."""
+        program = b"Xbox wave64 compute shader"
+        source_hash = hashlib.sha256(program).hexdigest()
+        flags = []
+
+        def run(args, *, timeout):
+            if args[0] == "xshader":
+                flags.append("--wave32-host" in args)
+                self.assertEqual(args[1].read_bytes(), program)
+                args[args.index("--hlsl-out") + 1].write_text("narrow" if flags[-1] else "ordinary")
+                args[args.index("--profile-out") + 1].write_text("cs_6_6")
+            elif args[0] == "dxc":
+                args[args.index("-Fo") + 1].write_bytes(portable_program(5, args[-1].read_bytes()))
+
+        for key, suffix in ((source_hash, ".dxbc"), (source_hash + "_w32", ".wave32")):
+            source = self.requests / (key + suffix)
+            source.write_bytes(program)
+            with patch("project_tuxbox.runtime_shaders.run_tool", side_effect=run):
+                self.assertTrue(compile_request(source, key, self.tools, self.cache, self.session))
+        self.assertEqual(flags, [False, True])
+        self.assertEqual((self.cache / (source_hash + ".cso")).read_bytes(), portable_program(5, b"ordinary"))
+        self.assertEqual((self.session / (source_hash + "_w32.cso")).read_bytes(), portable_program(5, b"narrow"))
+        changed = self.requests / (source_hash + "_w32.wave32")
+        changed.write_bytes(program + b"changed")
+        with self.assertRaisesRegex(ValueError, "digest"):
+            compile_request(changed, source_hash + "_w32", self.tools, self.cache, self.session)
+
     def test_cs_6_6_falls_back_to_no_optimisation(self):
         hlsl, output = self.cache / "shader.hlsl", self.cache / "out.cso"
         hlsl.write_bytes(b"compute shader")

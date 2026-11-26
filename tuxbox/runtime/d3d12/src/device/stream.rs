@@ -370,6 +370,13 @@ unsafe fn create(
         pipeline.compute_threads = tuxbox_dxbc::shader_compute_threads(code)
             .or_else(|| compiled_idx.and_then(|index| tuxbox_dxbc::shader_compute_threads(&stages[index])));
     }
+    // Chosen after the console's group size is known, as on the direct compute path.
+    if let (Some((_, Some(index))), Some(field)) = (original[5], fields[5]) {
+        let fitting = compute::fitting_translation(device, core::mem::take(&mut stages[index]));
+        stages[index] = fitting;
+        // SAFETY: the field points into the stream storage, and `stages` outlives it.
+        unsafe { field.write(rectangle::bytecode(&stages[index])) };
+    }
     if let Some(cs_ptr) = fields[5] {
         // SAFETY: `fields[5]` points into `storage`, which stays live for this call.
         let cs = unsafe { &*cs_ptr };

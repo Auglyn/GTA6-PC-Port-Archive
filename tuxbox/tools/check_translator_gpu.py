@@ -54,6 +54,7 @@ CHECKS = {
                                               extra=("--width", str(width), "--variant", variant))
        for width in (32, 64) for variant in ("original", "chain", "chain-zero")},
     "lockstep": Check("check_lockstep_gpu", emitter="lockstep", llvm=True, dxc=True),
+    "paired-wave64": Check("check_paired_wave64", emitter="paired_wave64", llvm=True, dxc=True),
     "dpp8-exchange": Check("check_dpp8_exchange", emitter="lone_lane_probe", dxc=True),
     "pixel-heap-offsets": Check("check_pixel_heap_offsets", emitter="pixel_heap_offsets", dxc=True),
     "pixel-link": Check("check_portable_pixel_link", emitter="xshader", dxc=True),

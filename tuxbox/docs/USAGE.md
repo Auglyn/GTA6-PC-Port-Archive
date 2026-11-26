@@ -14,6 +14,34 @@ On Linux, put `--graphics-menu` before the game path to choose the packaged sett
 
 The Series S trial requested a 1920×1080 render resource and stopped on a texture allocation before presenting. Use the packaged settings for the current playable startup path.
 
+## Host profile
+
+TuxBox chooses shader translations and fallbacks by what the graphics driver can do, not by who made the card. The provider logs the profile it found when it first imports game memory:
+
+```text
+host profile: adapter=10de:2705 wave=32-32 section-import=aliased descriptor-bytes=32/32
+```
+
+| Field | Meaning |
+| --- | --- |
+| `wave` | The fewest and most lanes a shader wave can have |
+| `section-import` | Whether the GPU reads the game's own memory after importing it: `aliased`, `substituted` (the driver reported success but the GPU read something else), `refused` or `unknown` |
+| `descriptor-bytes` | Descriptor sizes for views and samplers |
+
+`TUXBOX_HOST_PROFILE` replaces what the driver reports, so one machine can try a path meant for another. For example, `wave=32` makes a 64-lane card take the 32-lane translations. Settings are separated by `;`, and one unusable setting rejects them all. Overridden values are marked `(set)` in the log. Forcing `section-import=substituted` takes the [memory copy](#memory-copy) on a card that doesn't need it. An override cannot reproduce another driver's own behaviour.
+
+### Memory copy
+
+Mesa's RADV driver on Linux does not import the memory a game's pages live in. vkd3d-proton still reports success, and the GPU reads other memory. When the profile shows `substituted` or `refused`, TuxBox imports a private copy of those pages instead and copies the CPU's changes into it before each submission. Hosts that report `aliased` never take this path.
+
+The copy has known limits:
+
+- **GPU writes stay in the copy.** The CPU, and other GPU addresses of the same pages, don't see them.
+- **It costs time.** Changed memory is found and copied before every submission.
+- **Retail titles aren't proven.** In a contributor's tests of the change this comes from ([#200](https://github.com/brcly/TuxBox/pull/200), RX 6700 XT), ProjectScarlett reached the account picker far more slowly than with direct imports, and crashed in two of three runs.
+
+A way for RADV to read the game's pages directly would replace it ([#191](https://github.com/brcly/TuxBox/issues/191)).
+
 ## Game logs
 
 `tuxbox.py run` shows game output in the terminal as it arrives. The first line gives the path to a saved copy. On Linux, logs go in `~/.local/state/project-tuxbox/logs/` (or under `XDG_STATE_HOME`). On Windows, they go in `%LOCALAPPDATA%\TuxBox\logs\`.

@@ -132,6 +132,16 @@ pub(super) fn on_demand(shader: &[u8], source: &str, stage: Stage) -> Option<Vec
     })
 }
 
+/// The translation of compute program `source` for hosts with 32-lane waves,
+/// which the compiler keeps beside the ordinary one.
+pub(super) fn narrow_wave(shader: &[u8], source: &str) -> Option<Vec<u8>> {
+    let key = format!("{source}_w32");
+    request(&key, Stage::Compute, "wave32", |pending, requests| {
+        fs::write(pending, shader)?;
+        fs::rename(pending, requests.join(format!("{key}.wave32")))
+    })
+}
+
 pub(crate) fn stencil(shader: &[u8], source: &str, slot: u32) -> Option<Vec<u8>> {
     let key = format!("{source}_rt{slot}");
     request(&key, Stage::Pixel, "stencil", |pending, requests| {

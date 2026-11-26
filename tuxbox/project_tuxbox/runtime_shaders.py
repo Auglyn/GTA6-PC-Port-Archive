@@ -28,7 +28,10 @@ REASON_BYTES = 512
 SOURCE_KEY = r"[a-f0-9]{64}"
 STENCIL_KEY = SOURCE_KEY + r"_rt[0-7]"
 LINK_KEY = "_".join([SOURCE_KEY] * 3)
-REQUEST_PATTERNS = {".link": LINK_KEY, ".stencil": STENCIL_KEY, ".dxbc": SOURCE_KEY}
+# A compute shader again, for a host whose waves are too narrow for its ordinary
+# translation. It has its own cache entry, so other hosts keep theirs.
+WAVE32_KEY = SOURCE_KEY + r"_w32"
+REQUEST_PATTERNS = {".link": LINK_KEY, ".stencil": STENCIL_KEY, ".wave32": WAVE32_KEY, ".dxbc": SOURCE_KEY}
 
 
 class ShaderRefused(ValueError):
@@ -305,6 +308,9 @@ def compile_request(source, key, tools, cache, session, *, remember=None, persis
             if source.suffix == ".stencil":
                 source_hash, slot = key.split("_rt")
                 flags = ["--stencil-target", slot]
+            elif source.suffix == ".wave32":
+                source_hash = key.removesuffix("_w32")
+                flags = ["--wave32-host"]
             else:
                 source_hash = key
             source_data = verified_input(source, source_hash)
@@ -318,7 +324,8 @@ def compile_request(source, key, tools, cache, session, *, remember=None, persis
         checksum = dest.with_suffix(".sha256")
         refusal = dest.with_suffix(".unsupported")
         reply = work / "reply"
-        stages = {1, 2, 13} if linked else {0} if source.suffix == ".stencil" else set(STAGE_IDS.values())
+        stages = ({1, 2, 13} if linked else {0} if source.suffix == ".stencil"
+                  else {STAGE_IDS["cs"]} if source.suffix == ".wave32" else set(STAGE_IDS.values()))
         expected_stage = container_stage(source_data, portable=False)
         if expected_stage is not None:
             stages &= {expected_stage}

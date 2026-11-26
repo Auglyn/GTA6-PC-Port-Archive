@@ -3,6 +3,8 @@
 //! in the original guest shader. Portable input never opens the cache.
 use std::collections::HashSet;
 mod compile;
+mod narrow_waves;
+pub(super) use narrow_waves::narrow_wave_variant;
 
 use std::fmt::Write as _;
 use std::fs::File;
@@ -509,5 +511,8 @@ fn translate(shader: &[u8], stage: Stage) -> Option<Vec<u8>> {
         .or_else(|| compile::on_demand(shader, &source, stage));
     stage.report(&source, translation.is_some());
     crate::failures::lookup(stage.short(), &source, translation.is_some());
+    if stage == Stage::Compute && let Some(code) = translation.as_deref() {
+        narrow_waves::remember(code, shader);
+    }
     translation
 }

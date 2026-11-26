@@ -118,7 +118,11 @@ the registers the routine loaded. The routine's code is not in the shader contai
 
 The stand-in reads the `INPUT_LAYOUT` subobject and publishes it next to the request as `req_<key>.ia`, before
 `.a`. The file holds `ia1 <count>` and then one line per element: semantic, index, format, slot, offset, class
-and step rate. A stream with a non-empty layout includes that text in its cache key; other keys are unchanged.
+and step rate. A stream with a non-empty layout includes that text in its cache key; other keys are unchanged. A layout declared
+with zero elements publishes nothing by default, so the fetch is refused and not drawn, like an absent or unreadable
+layout. With the experimental opt-in `X2W_STREAM_ZERO_FILL=1` it is published as the single line `ia1 0`, and the
+translation reads every fetched register as zero. That zero value is an assumption, not a measurement: no independent
+reference shows what a fetched input holds for a zero-element layout, so no startup claim rests on it.
 One log line per stream gives the element count and, for each element, format, slot, offset and class:
 `x2w-draw stream input layout: 2 elements (format/slot/offset/class) 6/0/0/0 6/0/4294967295/0`.
 
@@ -1577,6 +1581,26 @@ cmake --build --preset dev --target startup_view_census
 ctest --preset dev --no-tests=error -R "^startup_view_census" -V
 ```
 
+## Wrapper allocation failure
+
+Every object the D3D12 stand-in returns is a wrapper allocated in `wrap()`. When that allocation (or its
+registration) fails, the creating call releases the desktop object it made and returns `E_OUTOFMEMORY` with
+a null output ([#2653](https://github.com/R0Y00/Xbox2Windows/issues/2653)). Before, the failure was a write
+through a null pointer inside the stand-in. This was seen at the job commit limit in a startup run, at the
+slot 55 derived-pipeline placeholder. Whether the title handles the error is not established.
+
+`startup_wrap_allocation_warp` makes the next wrapper allocation fail through the fixture-only export
+`x2w_d3d12_fail_wraps`. Device creation and slots 8, 9, 14, 16, 55, 73 and 127 must return
+`E_OUTOFMEMORY` with a null output, then succeed. After a failed attempt to create a second device,
+`GetDevice` on a live queue must still return the original device. The
+`startup_wrap_allocation_control_warp` test leaves the failure injection disabled and checks that
+the fixture detects the unexpected success.
+
+```powershell
+cmake --build --preset dev --target startup_wrap_allocation
+ctest --preset dev --no-tests=error -R "^startup_wrap_allocation" -V
+```
+
 ## Input script
 
 `X2W_INPUT_SCRIPT` (`run.ps1 -InputScript`) drives the virtual gamepad of the `GameInput.dll`
@@ -2865,6 +2889,20 @@ freed slots are reused in address order so that pages reused together share a vi
 `VirtualQuery` on a page of a shared view reports the view's base as the allocation base and the
 bytes from the queried page to the end of the view, not one page. A placed buffer on such memory
 is not affected: section-backed pages already took the committed, not-aliased path.
+
+## Committed resources (device slot 76)
+
+Device slot 76 (Xbox order, +0x260) takes the seven arguments of desktop `CreateCommittedResource`:
+heap properties, heap flags, desc, initial state, clear value, riid and ppv. Measured: a console
+package module (an upscaler) creates its resources through it. The stand-in shares the
+committed-resource path of slot 127 (the `CreateCommittedResource3` order, with protected session and
+castable formats, which slot 76 does not pass): the same initial-state choice per heap, the same
+clear-value retry and title memory, and a log line naming the slot. Run
+`ctest --preset dev --no-tests=error -R '^startup_committed_slot76_(warp|control)$'`
+(`tests/startup_committed_slot76_check.cpp`): a render target with a clear value and buffers on the
+default, upload and readback heaps, passed with initial state 0xffffffff as a title passes them, must
+be created and leave the device alive. The control asks for a 2D texture on an upload heap and must
+return `E_INVALIDARG` with no resource and leave the device alive. The control also requires all four valid creations to pass. `startup_committed_slot76_hardware` runs the creation checks on a physical GPU.
 
 - `ctest --preset release --no-tests=error -R '^xmem_shim_(mapped_pages|page_runs)$' -V` runs the
   earlier contract check and `tests/xmem_page_runs_check.py`: a batch across two sections with

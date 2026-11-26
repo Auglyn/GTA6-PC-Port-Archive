@@ -250,6 +250,12 @@ python tuxbox.py run --prepare-only --backend proton --prefix PREFIX /path/to/sc
 
 ## What to expect
 
+The two shader and memory paths added on November 26, 2026 have passed TuxBox's
+checks but haven't been tried in this game: the [32-lane
+translation](SHADERS.md#64-lane-programs-on-32-lane-hosts) on NVIDIA, and the
+[memory copy](USAGE.md#memory-copy) on AMD's Linux driver. Please report how far
+either gets.
+
 On November 25, 2026, an offline run on a GeForce RTX 4070 Ti SUPER got into the
 story intro. The game's own crash report records the state `Game Running`, frame
 32,534 and the story intro script after 18 minutes 11 seconds. GPU queues stalled

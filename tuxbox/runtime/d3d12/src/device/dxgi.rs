@@ -5,10 +5,7 @@ use core::{ffi::c_void, mem::offset_of, ptr};
 use std::sync::OnceLock;
 use windows::Win32::Foundation::{E_INVALIDARG, E_NOTIMPL, E_POINTER, S_OK};
 use windows::Win32::Graphics::{
-    Direct3D12::{
-        D3D12_FEATURE_D3D12_OPTIONS1, D3D12_FEATURE_DATA_D3D12_OPTIONS1, ID3D12Device2,
-        ID3D12Object,
-    },
+    Direct3D12::{ID3D12Device2, ID3D12Object},
     Dxgi::*,
 };
 use windows::core::{GUID, HRESULT, IUnknown, IUnknown_Vtbl, Interface, Result};
@@ -35,7 +32,7 @@ pub(super) struct DxgiDevice {
     pub(super) emulate_stencil: OnceLock<bool>,
     packed_uav_native: OnceLock<(bool, bool)>,
     pub(super) init_transition: std::sync::Mutex<Option<super::allocation::InitTransition>>,
-    wave_range: OnceLock<Option<(u32, u32)>>,
+    pub(super) host: super::host_profile::Probes,
     pub(super) depth_views: std::sync::Arc<super::placement::Views<super::stencil::Surface>>,
     pub(super) disposal: std::sync::Mutex<Option<(super::DisposeCallback, usize)>>,
     pub(super) frames: super::frame_events::FrameEvents,
@@ -70,7 +67,7 @@ impl DxgiDevice {
             emulate_stencil: Default::default(),
             packed_uav_native: Default::default(),
             init_transition: std::sync::Mutex::new(None),
-            wave_range: Default::default(),
+            host: Default::default(),
             depth_views: Default::default(),
             frames: Default::default(),
             disposal: Default::default(),
@@ -155,24 +152,11 @@ pub(super) fn supports_native_packed_uav(
     }
 }
 
-/// Supported hardware wave lane range `[WaveLaneCountMin, WaveLaneCountMax]`,
-/// queried once per host device via `D3D12_FEATURE_D3D12_OPTIONS1`.
-pub(super) fn wave_range(device: &Device) -> Option<(u32, u32)> {
-    *device.state.wave_range.get_or_init(|| {
-        let mut options = D3D12_FEATURE_DATA_D3D12_OPTIONS1::default();
-        let ok = unsafe {
-            device.native.CheckFeatureSupport(
-                D3D12_FEATURE_D3D12_OPTIONS1,
-                (&raw mut options).cast(),
-                size_of_val(&options) as u32,
-            )
-        }
-        .is_ok();
-        (ok && options.WaveOps.as_bool()
-            && options.WaveLaneCountMin != 0
-            && options.WaveLaneCountMax >= options.WaveLaneCountMin)
-            .then_some((options.WaveLaneCountMin, options.WaveLaneCountMax))
-    })
+/// The PCI vendor and device of the adapter behind this device.
+pub(super) fn adapter_ids(device: &Device) -> Option<(u32, u32)> {
+    // SAFETY: the adapter is a live interface held by the device.
+    let description = unsafe { adapter(device).ok()?.GetDesc() }.ok()?;
+    Some((description.VendorId, description.DeviceId))
 }
 
 unsafe extern "system" fn get_parent(this: *mut c_void, iid: *const GUID, out: Out) -> HRESULT {

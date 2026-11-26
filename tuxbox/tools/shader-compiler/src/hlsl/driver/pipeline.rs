@@ -11,6 +11,16 @@ pub fn translate(ex: &ShaderExtract) -> Result<Translated, String> {
     translate_linked(ex, None)
 }
 
+/// [`translate`] for a host whose waves are at most 32 lanes. Only a program
+/// whose ordinary translation needs 64-lane waves differs.
+pub fn translate_for_wave32_host(ex: &ShaderExtract) -> Result<Translated, String> {
+    let ordinary = translate(ex)?;
+    if ex.stage != Stage::Compute || ordinary.required_wave_size != Some(64) {
+        return Ok(ordinary);
+    }
+    translate_paired_wave64(ex)
+}
+
 /// [`translate`] for the last stage before the rasteriser (VS or GS), given the
 /// [`Translated::ps_input_interp`] of the pixel shader it feeds: the outputs that pixel
 /// shader reads get the same interpolation modifiers, so both stages pack their signatures

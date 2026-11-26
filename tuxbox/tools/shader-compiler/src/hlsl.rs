@@ -102,6 +102,8 @@ mod singleton_wave;
 mod wave_sum;
 mod lockstep;
 mod wave_loops;
+mod paired_wave64;
+pub use paired_wave64::translate_paired_wave64;
 mod raw_index;
 mod reflection_compact;
 pub(crate) mod radiance_probe;
@@ -335,6 +337,8 @@ struct Emitter<'a> {
     /// Complete 32-thread wave using independent one-word vector comparison masks.
     single_wave32: bool,
     resolve_wave32: bool,
+    /// Each host thread runs two lanes of a console wave64 (see `paired_wave64`).
+    paired: bool,
     wave32_compare_masks: bool,
     light_grid: bool,
     page_waves: bool,
@@ -463,3 +467,7 @@ mod election_order_regression;
 #[cfg(test)]
 #[path = "tests/hlsl/reduction_execz_regression.rs"]
 mod reduction_execz_regression;
+
+#[cfg(test)]
+#[path = "tests/hlsl/host_profiles.rs"]
+mod host_profile_tests;
