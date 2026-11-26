@@ -282,12 +282,13 @@ class ConsoleConstantBuffers(unittest.TestCase):
         sample.write_bytes(b"older sample")
         self.provider.write_bytes(sample.read_bytes())
         (self.root / "tuxbox-features").write_text("cbv_16_byte_alignment\n")
-        env = {"PROTONPATH": str(self.root), "VKD3D_DISABLE_EXTENSIONS": "first;VK_EXT_descriptor_buffer",
+        env = {"PROTONPATH": str(self.root),
+               "VKD3D_DISABLE_EXTENSIONS": "first;VK_EXT_descriptor_buffer;VK_EXT_descriptor_heap",
                "VKD3D_CONFIG": "other"}
         with patch("project_tuxbox.console_cbv.console_cbv_layer", return_value=self.layer) as layer:
             configure_console_cbv("proton", env, self.exe, self.log.status)
             self.assertEqual(env["VKD3D_CONFIG"], "cbv_16_byte_alignment,other")
-            self.assertEqual(env["VKD3D_DISABLE_EXTENSIONS"], "first;VK_EXT_descriptor_buffer")
+            self.assertEqual(env["VKD3D_DISABLE_EXTENSIONS"], "first;VK_EXT_descriptor_buffer;VK_EXT_descriptor_heap")
             layer.assert_not_called()
             wine = {"PROTONPATH": str(self.root)}
             configure_console_cbv("wine", wine, self.exe, self.log.status)
@@ -296,7 +297,7 @@ class ConsoleConstantBuffers(unittest.TestCase):
             self.assertNotIn("VKD3D_DISABLE_EXTENSIONS", wine)
             fork = {"PROTONPATH": str(self.root)}
             configure_console_cbv("proton", fork, self.exe, self.log.status)
-            self.assertEqual(fork["VKD3D_DISABLE_EXTENSIONS"], "VK_EXT_descriptor_buffer")
+            self.assertEqual(fork["VKD3D_DISABLE_EXTENSIONS"], "VK_EXT_descriptor_buffer,VK_EXT_descriptor_heap")
             self.assertNotIn("PRESSURE_VESSEL_FILESYSTEMS_RO", wine)
 
     def test_native_foreign_missing_and_explicit_comparison(self):

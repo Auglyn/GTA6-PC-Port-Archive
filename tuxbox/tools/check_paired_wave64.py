@@ -61,6 +61,9 @@ PROGRAMS = {
                   'v_or_b32_dpp v11, v0, v1 quad_perm:[3,2,1,0] row_mask:0xf bank_mask:0x5'],
     'permlane': ['v_mov_b32_e32 v10, 11', 'v_mov_b32_e32 v11, 22', 's_mov_b32 s30, 0x76543210', 's_mov_b32 s31, 0xfedcba98',
                  'v_permlanex16_b32 v10, v0, s30, s31', 's_mov_b32 s30, 0', 'v_permlanex16_b32 v11, v0, s30, s30'],
+    'swizzle': ['v_mov_b32_e32 v10, 11', 'v_mov_b32_e32 v11, 22', 'v_cmp_lt_u32_e32 vcc, 0x3e8, v0',
+                's_and_saveexec_b64 s[10:11], vcc', 'ds_swizzle_b32 v10, v0 offset:0x801b',
+                'ds_swizzle_b32 v11, v0 offset:0x041f', 's_mov_b64 exec, s[10:11]'],
     'empty': ['v_cmpx_lt_u32_e32 0x100000, v0', ('branch', 's_cbranch_execz', 'skip'), 's_mov_b32 s20, 9',
               ('label', 'skip'), 'v_cmp_lt_u32_e32 vcc, 0, v1', ('branch', 's_cbranch_vccz', 'done'),
               's_mov_b32 s21, 4', ('label', 'done'), 'v_readfirstlane_b32 s14, v1', 'v_mov_b32_e32 v10, 1'],
@@ -185,6 +188,18 @@ def step(w, text):
             source, old = w.scalar(ops[1], True), w.exec
             w.store(ops[0], old); w.exec = source & old if 'and' in base else source | old; w.scc = int(w.exec != 0)
         else: raise ValueError('model lacks ' + name)
+        return
+    if base == 'ds_swizzle_b32':
+        off = int(re.search(r'offset:(\S+)', ops[1])[1], 0)
+        src = ops[1].split()[0]
+        old = [w.value(src, l) if w.active(l) else 0 for l in range(64)]
+        for l in range(64):
+            if not w.active(l): continue
+            if off & 0x8000:
+                partner = (l & ~3) | (((off & 0xff) >> (2 * (l & 3))) & 3)
+            else:
+                partner = (l & ~31) | (((l & (off & 31)) | ((off >> 5) & 31)) ^ ((off >> 10) & 31))
+            w.v[int(ops[0][1:])][l] = old[partner]
         return
     if base.startswith('ds_'):
         # One wave per group: its lanes are all of the group.

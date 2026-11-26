@@ -282,6 +282,38 @@ fn permlane(em: &mut Emitter<'_>, ins: &Insn) -> Result<(), String> {
     Ok(())
 }
 
+/// Permute lanes within each quad (QDMode) or within each 32-lane half-wave.
+fn ds_swizzle(em: &mut Emitter<'_>, ins: &Insn) -> Result<(), String> {
+    let mode = ins.aux.imm as u32;
+    let quad = mode & 0x8000 != 0;
+    if ins.raw[0] & 0x3_0000 != 0 || (quad && mode & 0xff00 != 0x8000) {
+        return Err("unsupported compute DS swizzle encoding".into());
+    }
+    let (Some(Opnd::Vgpr(to)), Some(Opnd::Vgpr(from))) = (ins.dst.first(), ins.src.first()) else {
+        return Err("paired wave64: ds_swizzle operands".into());
+    };
+    em.line("{");
+    for lane in 0..2u32 {
+        let me = format!("(tb_pair + {}u)", 32 * lane);
+        let partner = if quad {
+            format!("({me} & ~3u) | (({:#x}u >> (2u * ({me} & 3u))) & 3u)", mode & 255)
+        } else {
+            format!("({me} & ~31u) | ((({me} & {}u) | {}u) ^ {}u)", mode & 31, (mode >> 5) & 31, (mode >> 10) & 31)
+        };
+        for line in from_lane(u32::from(*from), "tbs_", lane, &partner) {
+            em.line(&line);
+        }
+        em.line(&format!("if (!({})) tbs_{lane} = 0u;", source_active(lane)));
+    }
+    // Both lanes are read before either is written.
+    for lane in 0..2u32 {
+        let active = lane_bit("exec_lo", "exec_hi", lane);
+        em.line(&format!("if ({active} != 0u) v{to}__{lane} = tbs_{lane};"));
+    }
+    em.line("}");
+    Ok(())
+}
+
 pub(super) fn emit(em: &mut Emitter<'_>, idx: usize, ins: &Insn, is_ps: bool, br: Option<usize>) -> Result<(), String> {
     let m = ins.mnemonic.as_str();
     if !per_lane(ins.enc) {
@@ -339,6 +371,9 @@ pub(super) fn emit(em: &mut Emitter<'_>, idx: usize, ins: &Insn, is_ps: bool, br
     }
     if matches!(m, "v_permlane16_b32" | "v_permlanex16_b32") {
         return permlane(em, ins);
+    }
+    if m == "ds_swizzle_b32" {
+        return ds_swizzle(em, ins);
     }
     // A DPP8 first source reads a neighbour within the lane's group of eight.
     let (mut moved, mut gated) = (None, false);
