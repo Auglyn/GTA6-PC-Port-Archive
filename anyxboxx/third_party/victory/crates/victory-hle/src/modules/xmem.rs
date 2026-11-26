@@ -1755,8 +1755,8 @@ mod tests {
     #[test]
     fn a_read_in_place_never_meets_the_gap_of_a_remapping() {
         use std::sync::atomic::{AtomicBool, Ordering};
-        let mut pages = [0usize; 3];
-        let mut n = 3;
+        let mut pages = [0usize; 4];
+        let mut n = 4;
         assert_eq!(XMemAllocatePhysicalPages(0, &mut n, pages.as_mut_ptr()), 1);
         let a = XMemVirtualAlloc(
             std::ptr::null_mut(),
@@ -1766,16 +1766,24 @@ mod tests {
             PAGE_READWRITE,
         );
         assert!(!a.is_null());
-        assert_eq!(XMemMapPhysicalPages(a, 3, pages.as_ptr()), a);
+        // Non-consecutive orders so each page keeps a single-page placeholder
+        // and `remap_same`'s fast path cannot skip the unmap/remap, while
+        // `pages[0]` (byte `1`) stays mapped at `a`.
+        let first_order = [pages[0], pages[2], pages[1]];
+        let second_order = [pages[0], pages[3], pages[1]];
+        assert_eq!(XMemMapPhysicalPages(a, 3, first_order.as_ptr()), a);
         // SAFETY: mapped read-write.
         unsafe { a.cast::<u8>().write(1) };
         let first = a as usize;
         let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let started = std::sync::Arc::new(std::sync::Barrier::new(2));
         let reader = {
             let stop = stop.clone();
+            let started = started.clone();
             std::thread::spawn(move || {
                 let mut reads = 0u64;
-                while !stop.load(Ordering::Relaxed) {
+                started.wait();
+                while !stop.load(Ordering::Acquire) || reads == 0 {
                     let _reading = victory_gpu::title_memory_reading();
                     // SAFETY: the page is mapped whenever no change of
                     // mapping is under way, and none is while `_reading`
@@ -1786,15 +1794,19 @@ mod tests {
                 reads
             })
         };
-        for _ in 0..2000 {
-            // The same pages at the same address: the view goes and comes
-            // back, with the same bytes.
-            assert_eq!(XMemMapPhysicalPages(a, 3, pages.as_ptr()), a);
+        started.wait();
+        for i in 0..2000usize {
+            let order = if i.is_multiple_of(2) {
+                &second_order
+            } else {
+                &first_order
+            };
+            assert_eq!(XMemMapPhysicalPages(a, 3, order.as_ptr()), a);
         }
-        stop.store(true, Ordering::Relaxed);
+        stop.store(true, Ordering::Release);
         assert!(reader.join().expect("the reader never faulted") > 0);
         assert_eq!(XMemMapPhysicalPages(a, 3, std::ptr::null()), a);
-        assert_eq!(XMemFreePhysicalPages(3, pages.as_ptr()), 1);
+        assert_eq!(XMemFreePhysicalPages(4, pages.as_ptr()), 1);
     }
 
     #[test]

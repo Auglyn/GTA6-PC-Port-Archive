@@ -9455,13 +9455,18 @@ impl Meter {
             }
         }
         let text = format!("{TITLE}  \u{b7}  {fps:.0} FPS  \u{b7}  {ms:.0} ms");
+        let stdout_line = stdout_fps_on()
+            .then(|| format_stdout_fps(fps, ms, draws))
+            .flatten();
         // Setting the text waits for the window's thread (a title thread,
-        // which may not pump for a while), so a thread of ours does it and
-        // presenting never waits; it takes the newest figures when free, and
-        // stays quiet while frames are slow or absent.
-        static PENDING: Mutex<Option<(usize, String)>> = Mutex::new(None);
+        // which may not pump for a while), and writing stdout may wait on a
+        // full pipe, so a thread of ours does both and presenting never waits;
+        // it takes the newest figures when free, and stays quiet while frames
+        // are slow or absent.
+        static PENDING: Mutex<Option<(usize, String, Option<String>)>> = Mutex::new(None);
         static SETTER: std::sync::Once = std::sync::Once::new();
-        *PENDING.lock().unwrap_or_else(|e| e.into_inner()) = Some((hwnd.0 as usize, text));
+        *PENDING.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some((hwnd.0 as usize, text, stdout_line));
         SETTER.call_once(|| {
             let _ = std::thread::Builder::new()
                 .name("victory-caption".into())
@@ -9469,7 +9474,13 @@ impl Meter {
                     let (mut newest, mut shown) = (None, String::new());
                     loop {
                         let next = PENDING.lock().unwrap_or_else(|e| e.into_inner()).take();
-                        newest = next.or(newest);
+                        if let Some((hwnd, text, line)) = next {
+                            if let Some(line) = line {
+                                let mut out = std::io::stdout().lock();
+                                let _ = write_stdout_fps_line(&mut out, &line);
+                            }
+                            newest = Some((hwnd, text));
+                        }
                         if let Some((hwnd, text)) = &newest {
                             if *text != shown {
                                 let wide: Vec<u16> = text.encode_utf16().chain([0]).collect();
@@ -9488,6 +9499,39 @@ impl Meter {
                 });
         });
     }
+}
+
+/// Whether `VICTORY_FPS_STDOUT` allows writing one-second FPS lines to stdout
+/// (on by default; `VICTORY_FPS_STDOUT=0` turns it off).
+fn stdout_fps_enabled(value: Option<&std::ffi::OsStr>) -> bool {
+    value.is_none_or(|v| v.to_str().map(str::trim) != Some("0"))
+}
+
+fn stdout_fps_on() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| stdout_fps_enabled(std::env::var_os("VICTORY_FPS_STDOUT").as_deref()))
+}
+
+/// Formats one stdout FPS line for launchers and scripts, or `None` for
+/// non-finite or negative inputs.
+fn format_stdout_fps(fps: f64, ms: f64, draws: f64) -> Option<String> {
+    if !fps.is_finite()
+        || !ms.is_finite()
+        || !draws.is_finite()
+        || fps < 0.0
+        || ms < 0.0
+        || draws < 0.0
+    {
+        return None;
+    }
+    Some(format!(
+        "victory fps: {fps:.1} fps, {ms:.1} ms/frame, {draws:.0} draws/frame"
+    ))
+}
+
+fn write_stdout_fps_line(writer: &mut impl std::io::Write, line: &str) -> std::io::Result<()> {
+    writeln!(writer, "{line}")?;
+    writer.flush()
 }
 
 impl Host {
@@ -10455,6 +10499,53 @@ mod window_mode_tests {
         assert!(super::is_borderless(" Borderless "));
         assert!(!super::is_borderless("windowed"));
         assert!(!super::is_borderless(""));
+    }
+}
+
+#[cfg(test)]
+mod stdout_fps_tests {
+    use std::ffi::OsStr;
+
+    #[test]
+    fn stdout_fps_defaults_on_and_disables_on_zero() {
+        assert!(super::stdout_fps_enabled(None));
+        assert!(super::stdout_fps_enabled(Some(OsStr::new(""))));
+        assert!(super::stdout_fps_enabled(Some(OsStr::new("1"))));
+        assert!(!super::stdout_fps_enabled(Some(OsStr::new("0"))));
+        assert!(!super::stdout_fps_enabled(Some(OsStr::new(" 0 "))));
+    }
+
+    #[test]
+    fn format_stdout_fps_formats_valid_samples() {
+        assert_eq!(
+            super::format_stdout_fps(60.0, 16.666, 1234.4).as_deref(),
+            Some("victory fps: 60.0 fps, 16.7 ms/frame, 1234 draws/frame")
+        );
+        assert_eq!(
+            super::format_stdout_fps(0.0, 0.0, 0.0).as_deref(),
+            Some("victory fps: 0.0 fps, 0.0 ms/frame, 0 draws/frame")
+        );
+    }
+
+    #[test]
+    fn format_stdout_fps_rejects_non_finite_or_negative() {
+        assert!(super::format_stdout_fps(f64::NAN, 16.7, 10.0).is_none());
+        assert!(super::format_stdout_fps(60.0, f64::INFINITY, 10.0).is_none());
+        assert!(super::format_stdout_fps(60.0, 16.7, f64::NEG_INFINITY).is_none());
+        assert!(super::format_stdout_fps(-1.0, 16.7, 10.0).is_none());
+        assert!(super::format_stdout_fps(60.0, -0.1, 10.0).is_none());
+        assert!(super::format_stdout_fps(60.0, 16.7, -5.0).is_none());
+    }
+
+    #[test]
+    fn write_stdout_fps_writes_terminated_line() {
+        let mut buf = Vec::new();
+        super::write_stdout_fps_line(&mut buf, "victory fps: 30.0 fps, 33.3 ms/frame, 500 draws/frame")
+            .unwrap();
+        assert_eq!(
+            String::from_utf8(buf).unwrap(),
+            "victory fps: 30.0 fps, 33.3 ms/frame, 500 draws/frame\n"
+        );
     }
 }
 

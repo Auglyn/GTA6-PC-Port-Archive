@@ -47,6 +47,7 @@ CHECKS = {
     "sad-mad64": assembled("check_sad_mad64_gpu"),
     "f64": assembled("check_f64_exact_gpu"),
     "swizzle": Check("check_compute_swizzle", emitter="compute_swizzle"),
+    "readlane": Check("check_readlane_gpu", emitter="readlane_probe", dxc=True),
     **{f"wave-extrema-{width}": Check("check_wave_extrema", emitter="wave_extrema", dxc=True,
                                       extra=("--width", str(width)))
        for width in (32, 64)},
@@ -60,6 +61,7 @@ CHECKS = {
     "lockstep": Check("check_lockstep_gpu", emitter="lockstep", llvm=True, dxc=True),
     "lds-bounds": Check("check_lds_bounds_gpu", emitter="lds_bounds", dxc=True),
     "paired-wave64": Check("check_paired_wave64", emitter="paired_wave64", llvm=True, dxc=True),
+    "mask-ballots": Check("check_mask_ballots_gpu", emitter="mask_ballots", llvm=True, dxc=True),
     "dpp8-exchange": Check("check_dpp8_exchange", emitter="lone_lane_probe", dxc=True),
     **{f"dpp8-exchange-{layout}": Check("check_dpp8_exchange", emitter="lone_lane_probe", dxc=True,
                                        extra=("--layout", layout))

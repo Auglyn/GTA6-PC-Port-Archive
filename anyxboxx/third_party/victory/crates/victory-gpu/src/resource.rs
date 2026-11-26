@@ -1447,9 +1447,12 @@ fn hosted(this: This, make: bool) -> Option<Made> {
             // What the upload can read: a console layout, no XOR mode
             // (`crate::texture` `staging`).
             let readable = texture_layout(&r.desc).is_some_and(|t| !t.planes[0].layout.desc.swizzle.xor());
+            // (Or one whose level 0 is over the size cap, `VICTORY_TEXTURE_MAX_SIZE`: its
+            // levels over the cap are never held, so it never holds them all.)
             let partly = readable
                 && bytes >= crate::tiles::floor()
-                && (!crate::texture::committed(r.data().cast_const(), bytes as usize)
+                && (crate::tiles::over_cap(r.desc.width, u64::from(r.desc.height))
+                    || !crate::texture::committed(r.data().cast_const(), bytes as usize)
                     || crate::descriptor::host::next_start(start, start.saturating_add(bytes)).is_some()
                     || crate::descriptor::host::first_viewed(start).is_some_and(|first| first > 0));
             let reserved = if partly { host_texture_as(&r.desc, r.host.state, clear, true) } else { None };
@@ -2063,13 +2066,18 @@ fn duplicate_bytes(mut copies: Vec<(usize, u64)>) -> u64 {
 /// `VICTORY_TEXTURE_SWEEP=0` lets nothing go.
 #[cfg(windows)]
 pub(crate) fn let_go_idle() {
-    use std::sync::atomic::Ordering::Relaxed;
-    const IDLE_FRAMES: u64 = 4;
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     if !*ON.get_or_init(|| std::env::var_os("VICTORY_TEXTURE_SWEEP").is_none_or(|v| v != "0")) {
         return;
     }
     let video = crate::host::host().and_then(|h| h.video_memory());
+    let_go_idle_with(video, slot_evict_settings());
+}
+
+#[cfg(windows)]
+fn let_go_idle_with(video: Option<[u64; 4]>, slot_settings: Option<(u64, u64)>) {
+    use std::sync::atomic::Ordering::Relaxed;
+    const IDLE_FRAMES: u64 = 4;
     let idle_ms = crate::host::vram_idle_ms_by_room(video, room_lately());
     account(idle_ms);
     // Under pressure (`VICTORY_VRAM_EVICT`): the least recently used copies
@@ -2078,52 +2086,54 @@ pub(crate) fn let_go_idle() {
     // For the trail (`crate::host::trail`): how many went, their bytes,
     // and the first one.
     let (mut went, mut bytes, mut first) = (0u64, 0u64, None);
-    let all = textures();
-    for &at in all.iter() {
-        // SAFETY: a texture leaves the table before it is freed, under the
-        // lock held here (`Drop for Resource`).
-        let r = unsafe { &*(at as *const Resource) };
-        if !fills(&r.desc) || crate::texture::host_wrote(at) {
-            continue;
-        }
-        let gone = {
-            let mut made = r.host.made.lock().unwrap_or_else(|e| e.into_inner());
-            let idle = made.as_ref().is_some_and(|(host, _)| {
-                let (ms, frames) = if pressed.binary_search(&at).is_ok() {
-                    (PRESSED_MS, PRESSED_FRAMES)
+    {
+        let all = textures();
+        for &at in all.iter() {
+            // SAFETY: a texture leaves the table before it is freed, under the
+            // lock held here (`Drop for Resource`).
+            let r = unsafe { &*(at as *const Resource) };
+            if !fills(&r.desc) || crate::texture::host_wrote(at) {
+                continue;
+            }
+            let gone = {
+                let mut made = r.host.made.lock().unwrap_or_else(|e| e.into_inner());
+                let idle = made.as_ref().is_some_and(|(host, _)| {
+                    let (ms, frames) = if pressed.binary_search(&at).is_ok() {
+                        (PRESSED_MS, PRESSED_FRAMES)
+                    } else {
+                        (idle_ms, IDLE_FRAMES)
+                    };
+                    crate::host::long_ago(r.host.used.load(Relaxed), ms, frames)
+                        && std::sync::Arc::strong_count(host) == 1
+                        && crate::host::references(&host.texture) == 1
+                });
+                if idle {
+                    // Under the lock: the next use must not find the staging
+                    // state of the texture let go (it says "uploaded").
+                    crate::texture::unstage(at as This);
+                    made.take()
                 } else {
-                    (idle_ms, IDLE_FRAMES)
-                };
-                crate::host::long_ago(r.host.used.load(Relaxed), ms, frames)
-                    && std::sync::Arc::strong_count(host) == 1
-                    && crate::host::references(&host.texture) == 1
-            });
-            if idle {
-                // Under the lock: the next use must not find the staging
-                // state of the texture let go (it says "uploaded").
-                crate::texture::unstage(at as This);
-                made.take()
-            } else {
-                None
+                    None
+                }
+            };
+            if let Some((host, _)) = gone {
+                r.host.gone.store(true, Relaxed);
+                KINDS[2].fetch_add(1, Relaxed);
+                KINDS[3].fetch_add(host.bytes, Relaxed);
+                if pressed.binary_search(&at).is_ok() {
+                    EVICTED[0].fetch_add(1, Relaxed);
+                    EVICTED[1].fetch_add(host.bytes, Relaxed);
+                }
+                went += 1;
+                bytes += host.bytes;
+                if first.is_none() {
+                    first = Some(at);
+                }
+                crate::host::retire(host);
             }
-        };
-        if let Some((host, _)) = gone {
-            r.host.gone.store(true, Relaxed);
-            KINDS[2].fetch_add(1, Relaxed);
-            KINDS[3].fetch_add(host.bytes, Relaxed);
-            if pressed.binary_search(&at).is_ok() {
-                EVICTED[0].fetch_add(1, Relaxed);
-                EVICTED[1].fetch_add(host.bytes, Relaxed);
-            }
-            went += 1;
-            bytes += host.bytes;
-            if first.is_none() {
-                first = Some(at);
-            }
-            crate::host::retire(host);
         }
     }
-    slot_evict(video, idle_ms, IDLE_FRAMES);
+    slot_evict_with(video, idle_ms, IDLE_FRAMES, slot_settings);
     if went > 0 {
         crate::host::trail(|| {
             format!(
@@ -2185,9 +2195,14 @@ fn slot_need(budget: u64, used: u64, percent: u64, cap: u64) -> u64 {
 /// (`crate::host::retire`). A draw that reads a slot makes the copy again
 /// from title memory ([`hosted`]).
 #[cfg(windows)]
-fn slot_evict(video: Option<[u64; 4]>, idle_ms: u64, frames: u64) {
+fn slot_evict_with(
+    video: Option<[u64; 4]>,
+    idle_ms: u64,
+    frames: u64,
+    settings: Option<(u64, u64)>,
+) {
     use std::sync::atomic::Ordering::Relaxed;
-    let (Some((percent, cap)), Some([budget, used, ..])) = (slot_evict_settings(), video) else {
+    let (Some((percent, cap)), Some([budget, used, ..])) = (settings, video) else {
         return;
     };
     let need = slot_need(budget, used, percent, cap);
@@ -2196,22 +2211,25 @@ fn slot_evict(video: Option<[u64; 4]>, idle_ms: u64, frames: u64) {
     }
     let mut copies = Vec::new();
     let mut raws = std::collections::HashMap::new();
-    for &at in textures().iter() {
-        // SAFETY: as in `pressure_victims`.
-        let r = unsafe { &*(at as *const Resource) };
-        if !fills(&r.desc) || crate::texture::host_wrote(at) {
-            continue;
-        }
-        let back = r.host.slot_returned.load(Relaxed);
-        if back != 0 && !crate::host::long_ago(back, PROTECT_MS, 0) {
-            continue;
-        }
-        let made = r.host.made.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some((host, _)) = made.as_ref() {
-            let stamp = r.host.used.load(Relaxed);
-            if crate::host::long_ago(stamp, idle_ms, frames) && std::sync::Arc::strong_count(host) == 1 {
-                copies.push((at, stamp, host.bytes));
-                raws.insert(windows::core::Interface::as_raw(&host.texture) as usize, at);
+    {
+        let all = textures();
+        for &at in all.iter() {
+            // SAFETY: as in `pressure_victims`.
+            let r = unsafe { &*(at as *const Resource) };
+            if !fills(&r.desc) || crate::texture::host_wrote(at) {
+                continue;
+            }
+            let back = r.host.slot_returned.load(Relaxed);
+            if back != 0 && !crate::host::long_ago(back, PROTECT_MS, 0) {
+                continue;
+            }
+            let made = r.host.made.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some((host, _)) = made.as_ref() {
+                let stamp = r.host.used.load(Relaxed);
+                if crate::host::long_ago(stamp, idle_ms, frames) && std::sync::Arc::strong_count(host) == 1 {
+                    copies.push((at, stamp, host.bytes));
+                    raws.insert(windows::core::Interface::as_raw(&host.texture) as usize, at);
+                }
             }
         }
     }
@@ -2222,26 +2240,51 @@ fn slot_evict(video: Option<[u64; 4]>, idle_ms: u64, frames: u64) {
     copies.retain(|&(at, ..)| slots.contains_key(&at));
     let (mut n, mut bytes) = (0u64, 0u64);
     for at in oldest_covering(copies, need) {
-        // SAFETY: as above.
-        let r = unsafe { &*(at as *const Resource) };
+        if !is_texture(at as This) {
+            continue;
+        }
         let reset = crate::descriptor::evict_slots(at, &slots[&at]);
         SLOT_EVICT[2].fetch_add(reset, Relaxed);
-        let gone = {
-            let mut made = r.host.made.lock().unwrap_or_else(|e| e.into_inner());
-            let idle = made.as_ref().is_some_and(|(host, _)| {
-                crate::host::long_ago(r.host.used.load(Relaxed), idle_ms, frames) && std::sync::Arc::strong_count(host) == 1
-            });
-            if idle {
-                crate::texture::unstage(at as This);
-                r.host.slot_evicted.store(crate::host::moment().max(1), Relaxed);
-                made.take()
+        enum EvictOutcome {
+            Gone(std::sync::Arc<HostTexture>),
+            Busy,
+            Released,
+        }
+        // Re-check liveness under `TEXTURES`: a texture leaves the table before
+        // it is freed (`Drop for Resource`), so holding the lock here prevents
+        // dereferencing a concurrently released resource.
+        let outcome = {
+            let all = textures();
+            if !all.contains(&at) {
+                EvictOutcome::Released
             } else {
-                None
+                // SAFETY: `at` is present in `TEXTURES` under the lock held here.
+                let r = unsafe { &*(at as *const Resource) };
+                let gone = {
+                    let mut made = r.host.made.lock().unwrap_or_else(|e| e.into_inner());
+                    let idle = made.as_ref().is_some_and(|(host, _)| {
+                        crate::host::long_ago(r.host.used.load(Relaxed), idle_ms, frames)
+                            && std::sync::Arc::strong_count(host) == 1
+                    });
+                    if idle {
+                        crate::texture::unstage(at as This);
+                        r.host.slot_evicted.store(crate::host::moment().max(1), Relaxed);
+                        made.take()
+                    } else {
+                        None
+                    }
+                };
+                match gone {
+                    Some((host, _)) => {
+                        r.host.gone.store(true, Relaxed);
+                        EvictOutcome::Gone(host)
+                    }
+                    None => EvictOutcome::Busy,
+                }
             }
         };
-        match gone {
-            Some((host, _)) => {
-                r.host.gone.store(true, Relaxed);
+        match outcome {
+            EvictOutcome::Gone(host) => {
                 KINDS[2].fetch_add(1, Relaxed);
                 KINDS[3].fetch_add(host.bytes, Relaxed);
                 SLOT_EVICT[0].fetch_add(1, Relaxed);
@@ -2250,11 +2293,12 @@ fn slot_evict(video: Option<[u64; 4]>, idle_ms: u64, frames: u64) {
                 bytes += host.bytes;
                 crate::host::retire(host);
             }
-            None => {
+            EvictOutcome::Busy => {
                 // Used meanwhile: its slots are made again before the next submission.
                 SLOT_EVICT[6].fetch_add(1, Relaxed);
                 crate::descriptor::texture_made(at);
             }
+            EvictOutcome::Released => {}
         }
     }
     if n > 0 {
@@ -3383,6 +3427,23 @@ mod tests {
         assert_eq!(super::slot_need(1000, 900, 80, 50), 50);
         assert_eq!(super::slot_need(1000, 820, 80, 50), 20);
         assert_eq!(super::slot_need(1000, 800, 80, 50), 0);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn let_go_idle_with_slot_evict_above_threshold_does_not_deadlock() {
+        // Regression test: `let_go_idle` used to hold the `TEXTURES` mutex across
+        // the `slot_evict` call, which immediately re-locked `TEXTURES` whenever
+        // card usage exceeded `VICTORY_SLOT_EVICT_PERCENT`.
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            super::let_go_idle_with(Some([1000, 900, 0, 0]), Some((80, 50)));
+            let _ = done_tx.send(());
+        });
+        assert!(
+            done_rx.recv_timeout(std::time::Duration::from_secs(5)).is_ok(),
+            "let_go_idle_with deadlocked while calling slot_evict above threshold"
+        );
     }
 
     #[test]

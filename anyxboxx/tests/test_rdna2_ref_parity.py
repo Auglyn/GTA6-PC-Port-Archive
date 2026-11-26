@@ -276,7 +276,7 @@ def random_program(rng):
         if family == "VOP3" and (
             (name in VECTOR3 and opcode >= 0x200)
             or name in SAD_NAMES
-            or (name in VECTOR and name not in LITERAL_OPERATION_NAMES and (0x100 <= opcode < 0x140 or 0x180 <= opcode < 0x200))
+            or (name in VECTOR and (0x100 <= opcode < 0x140 or 0x180 <= opcode < 0x200))
             or (name in VECTOR_COMPARE and opcode < 0x100)
             or name in VOP3_CARRY + VOP3_MAD64 + VOP3_LANE + DIV_NAMES
             or name in COMPARE64
@@ -368,8 +368,8 @@ def instruction(rng, names):
 # for the Python model (which indexes SGPRs and register pairs directly).
 # Operations whose constant is a literal: the VOP3 form has no literal word unless a source is the literal code.
 LITERAL_OPERATION_NAMES = ("v_madmk_f32", "v_madak_f32", "v_fmamk_f32", "v_fmaak_f32")
-# The 64-bit operations; v_fma_f64 is left to its own test, where its operands cannot overflow the Python.
-WIDE_GENERIC = tuple(name for name in WIDE_OPERATIONS if name != "v_fma_f64")
+# The 64-bit operations (including v_fma_f64 now that overflow returns ±infinity in both models).
+WIDE_GENERIC = tuple(WIDE_OPERATIONS)
 DIV_NAMES = (
     "v_div_scale_f32", "v_div_scale_f64", "v_div_fmas_f32", "v_div_fmas_f64", "v_div_fixup_f32", "v_div_fixup_f64",
 )
@@ -443,6 +443,20 @@ def test_random_scalar_programs_match_the_python_model():
         assert_same(exe, lanes, scc, scalars, words)
 
 
+def test_vop3_literal_operations_match_the_python_model():
+    """VOP3 v_madmk/madak/fmamk/fmaak_f32: refused without a literal, matching with a literal operand."""
+    exe = binary()
+    for name in LITERAL_OPERATION_NAMES:
+        opcode = OPCODES["VOP3", name]
+        low = 0x35 << 26 | opcode << 16 | 3
+        without_literal = program(low, 256 | (257 << 9))
+        assert run_python(32, False, [], without_literal) == "error untranslated\n"
+        assert_same(exe, 32, False, [], without_literal)
+        with_literal = program(low, LITERAL | (257 << 9), 0x4000_0000)
+        assert run_python(32, False, [], with_literal).startswith("steps")
+        assert_same(exe, 32, False, [], with_literal)
+
+
 # Operand bit patterns the division helpers treat specially: zeros, infinities, NaNs, subnormals, the
 # largest and smallest normal values, and values near the scale thresholds.
 DIVISION_SPECIAL_WORDS = (
@@ -495,6 +509,29 @@ def test_wide_operations_match_the_python_model():
         for index in range(8):
             value = rng.choice(CURATED_DOUBLE_BITS) if rng.random() < 0.7 else rng.getrandbits(64)
             scalars += [(index, value & 0xFFFF_FFFF), (index + 8, value >> 32)]
+        assert_same(exe, 32, False, scalars, program(low, high))
+
+
+def test_fma_f64_overflow_and_signed_zero_match_the_python_model():
+    """v_fma_f64 overflow (±infinity), product-overflow cancellation, and ±0.0 signs match Rust f64::mul_add."""
+    exe = binary()
+    opcode = OPCODES["VOP3", "v_fma_f64"]
+    low = 0x35 << 26 | opcode << 16
+    high = 0 | 2 << 9 | 4 << 18
+    cases = [
+        (0x7FEF_FFFF_FFFF_FFFF, 0x4000_0000_0000_0000, 0x0000_0000_0000_0000),  # +MAX * 2 + 0 -> +inf
+        (0xFFEF_FFFF_FFFF_FFFF, 0x4000_0000_0000_0000, 0x0000_0000_0000_0000),  # -MAX * 2 + 0 -> -inf
+        (0x7FEF_FFFF_FFFF_FFFF, 0x4000_0000_0000_0000, 0xFFEF_FFFF_FFFF_FFFF),  # +MAX * 2 - MAX -> +MAX
+        (0x8000_0000_0000_0000, 0x3FF0_0000_0000_0000, 0x8000_0000_0000_0000),  # -0 * 1 + -0 -> -0
+        (0x8000_0000_0000_0000, 0x3FF0_0000_0000_0000, 0x0000_0000_0000_0000),  # -0 * 1 + +0 -> +0
+        (0xBFF0_0000_0000_0000, 0x3FF0_0000_0000_0000, 0x3FF0_0000_0000_0000),  # -1 * 1 + 1 -> +0
+    ]
+    for a, b, c in cases:
+        scalars = [
+            (0, a & 0xFFFF_FFFF), (1, a >> 32),
+            (2, b & 0xFFFF_FFFF), (3, b >> 32),
+            (4, c & 0xFFFF_FFFF), (5, c >> 32),
+        ]
         assert_same(exe, 32, False, scalars, program(low, high))
 
 
