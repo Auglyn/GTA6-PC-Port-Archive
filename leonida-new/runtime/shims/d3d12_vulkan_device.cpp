@@ -11528,10 +11528,13 @@ public:
         // D24_UNORM_S8_UINT stored as D32_SFLOAT_S8_UINT (no D24 on the GPU): the pixel stage writes the depth D24
         // would hold, biased in D24 units and quantised (src/depth24_fragment.h, D3D-309), and the rasterizer's own
         // bias is turned off. Multisampled targets keep the old path: a FragDepth write is per pixel.
-        const bool d24_as_float = desc.DSVFormat != DXGI_FORMAT_UNKNOWN &&
-                                  vulkan_format(desc.DSVFormat, true).format == VK_FORMAT_D24_UNORM_S8_UINT &&
+        const VkFormat dsv_vk = desc.DSVFormat != DXGI_FORMAT_UNKNOWN
+                                    ? vulkan_format(desc.DSVFormat, true).format
+                                    : VK_FORMAT_UNDEFINED;
+        const bool d24_as_float = dsv_vk == VK_FORMAT_D24_UNORM_S8_UINT &&
                                   !device_.depth_usable(VK_FORMAT_D24_UNORM_S8_UINT);
-        const bool packed16_fallback=desc.DSVFormat==xbox_d16s8 && device_.depth_backing(VK_FORMAT_D16_UNORM_S8_UINT)!=VK_FORMAT_D16_UNORM_S8_UINT;
+        const bool packed16_fallback = dsv_vk == VK_FORMAT_D16_UNORM_S8_UINT &&
+                                       device_.depth_backing(VK_FORMAT_D16_UNORM_S8_UINT) != VK_FORMAT_D16_UNORM_S8_UINT;
         if(packed16_fallback && samples>1 && desc.DepthStencilState.DepthEnable) return E_NOTIMPL;
         bool depth24_fragment = (d24_as_float || packed16_fallback) && desc.DepthStencilState.DepthEnable;
         if (depth24_fragment && samples > 1) {

@@ -56,6 +56,9 @@ use windows::Win32::Graphics::Direct3D12::*;
 
 use crate::host::host;
 
+#[cfg(test)]
+mod pool_tests;
+
 /// The card's tile: 64 KiB.
 const TILE: u64 = 64 << 10;
 
@@ -120,55 +123,6 @@ pub(crate) fn floor() -> u64 {
     *BYTES.get_or_init(|| parse_floor(std::env::var("VICTORY_LEVELS_MIN_KB").ok().as_deref()))
 }
 
-/// The texture size cap, `VICTORY_TEXTURE_MAX_SIZE=<texels>` (256 at the
-/// least; unset: none). With it, a texture the title fills whose level 0 is
-/// wider or taller than the cap is made level by level like the textures
-/// above (`resource.rs` `hosted`), and its levels above the cap are never
-/// held (`texture.rs` `held_levels`): they get no tiles, and its views start
-/// at the first level within the cap ([`show_from`]). The picture is that
-/// level's, sharp to the cap; the card's memory of the levels above it, three
-/// quarters of such a texture for each level cut, is not taken. For cards
-/// whose memory cannot hold the title's textures at full size.
-pub(crate) fn max_size() -> Option<u32> {
-    static CAP: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
-    *CAP.get_or_init(|| {
-        let cap = parse_max_size(std::env::var("VICTORY_TEXTURE_MAX_SIZE").ok().as_deref());
-        if let Some(cap) = cap {
-            tracing::info!(
-                cap,
-                levels_on_demand = wanted(),
-                "texture levels above the size cap are not held (VICTORY_TEXTURE_MAX_SIZE)"
-            );
-        }
-        cap
-    })
-}
-
-fn parse_max_size(value: Option<&str>) -> Option<u32> {
-    value
-        .and_then(|v| v.trim().parse::<u32>().ok())
-        .filter(|&cap| cap > 0)
-        .map(|cap| cap.max(256))
-}
-
-/// The first level of a `width` x `height` texture of `levels` levels that
-/// fits within `cap` on both sides (0 when level 0 does; the last level at
-/// most).
-pub(crate) fn first_within(width: u64, height: u64, levels: u32, cap: u32) -> u32 {
-    let cap = u64::from(cap);
-    let mut level = 0;
-    while level + 1 < levels && ((width >> level).max(1) > cap || (height >> level).max(1) > cap) {
-        level += 1;
-    }
-    level
-}
-
-/// Whether a texture of `width` x `height` texels has a level 0 over the
-/// size cap.
-pub(crate) fn over_cap(width: u64, height: u64) -> bool {
-    max_size().is_some_and(|cap| width > u64::from(cap) || height > u64::from(cap))
-}
-
 /// The bytes of the tiles given to textures now: the card's memory they
 /// hold (`resource.rs` `room` counts it with the other host copies).
 pub(crate) fn given_total() -> u64 {
@@ -180,17 +134,13 @@ pub(crate) fn given_total() -> u64 {
 struct Heap {
     heap: ID3D12Heap,
     free: Vec<(u32, u32)>,
+    /// Sum of the free runs, maintained under the pool's lock.
+    free_tiles: u32,
 }
 
 // SAFETY: a heap of the device, named only in queue and device calls, which
 // any thread may make; its free runs are plain numbers behind `POOL`'s lock.
 unsafe impl Send for Heap {}
-
-impl Heap {
-    fn free_tiles(&self) -> u32 {
-        self.free.iter().map(|run| run.1).sum()
-    }
-}
 
 /// The pool's heaps by place; a place is empty after its heap went back to
 /// the card (a texture names its heaps by place).
@@ -198,14 +148,28 @@ static POOL: Mutex<Vec<Option<Heap>>> = Mutex::new(Vec::new());
 
 /// `count` tiles of one heap, in as many runs as it takes, the lowest free
 /// tiles first (single free tiles are used up before a long run is cut):
-/// the heap, its place in the pool and the runs (first tile, tiles). A new
-/// heap is made when no heap has that many free.
+/// the heap, its place in the pool and the runs (first tile, tiles).
+/// Prefer the tightest fit so small levels leave room for larger ones.
+/// A new heap is made when no heap has that many free.
 fn take(device: &ID3D12Device, count: u32) -> Option<(ID3D12Heap, usize, Vec<(u32, u32)>)> {
     if count == 0 || count > HEAP_TILES {
         return None;
     }
     let mut pool = POOL.lock().unwrap_or_else(|e| e.into_inner());
-    let found = pool.iter().position(|h| h.as_ref().is_some_and(|h| h.free_tiles() >= count));
+    let mut found = None;
+    let mut best_free = HEAP_TILES + 1;
+    for (index, heap) in pool.iter().enumerate() {
+        let Some(heap) = heap else { continue };
+        let free = heap.free_tiles;
+        if free < count || free >= best_free {
+            continue;
+        }
+        found = Some(index);
+        best_free = free;
+        if free == count {
+            break;
+        }
+    }
     let index = match found {
         Some(index) => index,
         None => {
@@ -227,6 +191,7 @@ fn take(device: &ID3D12Device, count: u32) -> Option<(ID3D12Heap, usize, Vec<(u3
             let fresh = Heap {
                 heap: made?,
                 free: vec![(0, HEAP_TILES)],
+                free_tiles: HEAP_TILES,
             };
             STATS[3].fetch_add(u64::from(HEAP_TILES) * TILE, Ordering::Relaxed);
             match pool.iter().position(Option::is_none) {
@@ -255,6 +220,7 @@ fn take(device: &ID3D12Device, count: u32) -> Option<(ID3D12Heap, usize, Vec<(u3
         }
         left -= part;
     }
+    h.free_tiles -= count;
     Some((h.heap.clone(), index, runs))
 }
 
@@ -278,8 +244,8 @@ fn give_back(index: usize, runs: &[(u32, u32)]) {
         }
     }
     h.free = joined;
-    let all_free = h.free_tiles() == HEAP_TILES;
-    if all_free && pool.iter().flatten().count() > 1 {
+    h.free_tiles = h.free.iter().map(|run| run.1).sum();
+    if h.free_tiles == HEAP_TILES && pool.iter().flatten().count() > 1 {
         pool[index] = None;
         STATS[3].fetch_sub(u64::from(HEAP_TILES) * TILE, Ordering::Relaxed);
         STATS[8].fetch_add(1, Ordering::Relaxed);
@@ -1150,7 +1116,7 @@ void look() {
         }
     }
 
-    fn sub(texture: &ID3D12Resource, index: u32) -> D3D12_TEXTURE_COPY_LOCATION {
+    pub(super) fn sub(texture: &ID3D12Resource, index: u32) -> D3D12_TEXTURE_COPY_LOCATION {
         D3D12_TEXTURE_COPY_LOCATION {
             // SAFETY: a borrowed pointer the location never releases.
             pResource: unsafe { std::mem::transmute_copy(texture) },
@@ -1159,7 +1125,7 @@ void look() {
         }
     }
 
-    fn placed(buffer: &ID3D12Resource, footprint: D3D12_PLACED_SUBRESOURCE_FOOTPRINT) -> D3D12_TEXTURE_COPY_LOCATION {
+    pub(super) fn placed(buffer: &ID3D12Resource, footprint: D3D12_PLACED_SUBRESOURCE_FOOTPRINT) -> D3D12_TEXTURE_COPY_LOCATION {
         D3D12_TEXTURE_COPY_LOCATION {
             // SAFETY: as above.
             pResource: unsafe { std::mem::transmute_copy(buffer) },
@@ -1527,28 +1493,6 @@ void look() {
         assert_eq!(parse_floor(Some("2048")), 2048 << 10);
         assert_eq!(parse_floor(Some(&(1u64 << 54).to_string())), u64::MAX);
         assert_eq!(parse_floor(Some(&u64::MAX.to_string())), u64::MAX);
-    }
-
-    #[test]
-    fn the_size_cap_finds_the_first_level_within_it() {
-        // 4096x4096 with 13 levels, cap 1024: levels 0 (4096) and 1 (2048) are cut.
-        assert_eq!(first_within(4096, 4096, 13, 1024), 2);
-        // Within the cap already: nothing is cut.
-        assert_eq!(first_within(1024, 1024, 11, 1024), 0);
-        assert_eq!(first_within(512, 256, 10, 1024), 0);
-        // One side over is enough: 4096x512 needs two halvings.
-        assert_eq!(first_within(4096, 512, 13, 1024), 2);
-        // Never past the last level.
-        assert_eq!(first_within(8192, 8192, 2, 256), 1);
-    }
-
-    #[test]
-    fn the_size_cap_is_read_with_a_floor_of_256() {
-        assert_eq!(parse_max_size(None), None);
-        assert_eq!(parse_max_size(Some("0")), None);
-        assert_eq!(parse_max_size(Some("nope")), None);
-        assert_eq!(parse_max_size(Some(" 1024 ")), Some(1024));
-        assert_eq!(parse_max_size(Some("64")), Some(256));
     }
 
     #[test]
