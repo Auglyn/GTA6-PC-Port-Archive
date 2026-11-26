@@ -53,9 +53,11 @@ The game also imports Windows core API sets for services such as files, timing a
 | `thread-dimensions` | Slot 80 `USE_THREAD_DIMENSIONS` (`0x20`) converts thread counts using the bound PSO's `[numthreads]` and fails closed without one |
 | `descriptor-reclaim` | Shader-visible descriptor heap reclamation across completed batches, overlapping in-flight `Reset()`, `ClearState`, evicted-slot rebinding, and unsubmitted pin exhaustion |
 | `xbox-shader` | A console shader's pipeline and dispatch ([shader cache](#shader-cache)) |
+| `bindless-compute`, `bindless-sampler` | Direct-indexed console compute programs through the paged resource index map ([compute roots](#compute-roots)); not part of `all` |
 | `wave64-shader` | A console shader that sums across 64-lane waves, translated while the game runs; not part of `all` |
 | `raster-tables` | A console vertex and pixel pair drawn under a root with two descriptor tables, reading through the second ([raster tables](#raster-tables)) |
 | `raster-samplers` | A console pixel program's literal linear sampler, under a root whose static sampler at that register is point-filtered ([raster tables](#raster-tables)) |
+| `lane-spill-interp` | A console pixel program whose f16 interpolator's attribute selector matches the number of its lane-spill register ([raster tables](#raster-tables)) |
 | `compute-root` | Two root-less console compute programs under a root with three descriptor tables that the provider cannot reflect ([compute roots](#compute-roots)) |
 | `mesh-samplers` | The same literal sampler in a mesh pipeline, whose mesh root the provider builds ([raster tables](#raster-tables)); not part of `all` |
 
@@ -120,6 +122,8 @@ The `raster-tables` scenario draws a fullscreen triangle with two hand-written c
 
 The `raster-samplers` scenario draws with the same vertex program and a third hand-written pixel program. It samples a 2x1 texture of 1.0 and 3.0, at table 1 slot 0, with a linear clamped sampler it builds from literal words, as the console compiles a static sampler into a program. It declares that sampler as `s0`, where the title's root has a point-filtered static sampler. The provider has to give the literal state a static sampler of its own in the reflected root, so every texel reads 1.5. Bound to the root's `s0`, the texels read the point-filtered 1.0.
 
+The `lane-spill-interp` scenario draws the same fullscreen triangle with a third hand-written pixel program under an empty root. It writes a lane-spill area in v128, then runs an f16 interpolator whose attribute selector is encoded like v128. The selector is not a register read, so every texel must hold the program's constant. Under a refused translation the pipeline becomes a stand-in and every texel keeps its clear value.
+
 The `mesh-samplers` scenario samples the same way through a mesh pipeline. Its pixel program declares `s0` and `s1`, which the title's root has as point-filtered static samplers, so neither register can stand in for the literal state and the program does not translate against that root. Its mesh program is a console container with FSSM records only: they name the root constant `b501` where the root declares `b500`, so the provider builds the mesh stage a root of its own. The provider has to add the literal state to that root as a private static sampler and translate the pixel program against it, so every texel reads 1.5. Without that it falls back to the pixel program's translation without a root, whose private sampler the pipeline's root lacks, and the pipeline becomes a stand-in. The mesh program's desktop translation (`mesh_samplers.hlsl`, a fullscreen triangle) is compiled into the prepared cache under its digest before launch.
 
 These roots are made while the game runs, so the pixel programs cannot be prepared before launch. `verify` runs the three scenarios with the host worker, requires the provider to report the reflected root (for the vertex pipelines) or the mesh pipeline and its descriptor slots, and fails if a pixel or vertex program was translated without a root.
@@ -171,3 +175,5 @@ all other guard words must match; stand-ins are disabled.
 ```sh
 python tuxbox.py verify --only lanes-compute-root-recovery --output build/lanes-compute-root-recovery.json
 ```
+
+The `lanes-bindless-compute` verification suite runs two native console programs under a direct-indexed root with no parameters, each with a roomy and a constrained paged resource heap (resident limit 64 in the constrained run). `bindless-compute` stores through the heap UAV at logical slot 80. `bindless-sampler` samples the heap texture at slot 90 with a linear sampler built from literal words, which the root does not declare, and stores the value through the UAV at slot 85. Each run requires a translation made against the pipeline's root, the paged map bind and disabled stand-ins.
