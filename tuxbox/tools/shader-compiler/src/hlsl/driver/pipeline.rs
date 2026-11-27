@@ -123,8 +123,33 @@ pub(in crate::hlsl) fn translate_outputs(ex: &ShaderExtract, feeds_ps: Option<&I
 
 fn translate_outputs_per_lane(ex: &ShaderExtract, feeds_ps: Option<&InputInterp>, output_order: &[String],
     stencil_target: Option<u32>) -> Result<Translated, String> {
+    let first = translate_outputs_before_key_counts(ex, feeds_ps, output_order, stencil_target);
+    if first.is_ok() || ex.stage != Stage::Compute || stencil_target.is_some() {
+        return first;
+    }
+    // Only a program refused every other way takes the per-key count rewrite.
+    let mut insns = disassemble(&ex.isa);
+    if lower_local_pc_transfers(&mut insns).is_err() {
+        return first;
+    }
+    match with_key_counts(&insns, || translate_outputs_before_key_counts(ex, feeds_ps, output_order, stencil_target)) {
+        Some(Ok(retried)) => Ok(retried),
+        _ => first,
+    }
+}
+
+fn translate_outputs_before_key_counts(ex: &ShaderExtract, feeds_ps: Option<&InputInterp>, output_order: &[String],
+    stencil_target: Option<u32>) -> Result<Translated, String> {
     let mut lane_read_failed = false;
     let first = translate_outputs_once_impl(ex, feeds_ps, output_order, stencil_target, &mut lane_read_failed);
+    // Interleaved loops go through the block dispatcher, where only a program whose
+    // every branch is the whole wave's keeps its lanes together at a reduction.
+    let first = match first {
+        Err(reason) if reason == lockstep::DISPATCHED_VOTE => lockstep::without_guards(|| {
+            translate_outputs_once_impl(ex, feeds_ps, output_order, stencil_target, &mut false)
+        }).or(Err(reason)),
+        other => other,
+    };
     if lane_read_failed && ex.stage == Stage::Compute && stencil_target.is_none()
         && first.as_ref().is_err_and(|reason| reason.contains("inside non-uniform loop"))
     {
@@ -217,6 +242,8 @@ fn translate_outputs_once_impl(ex: &ShaderExtract, feeds_ps: Option<&InputInterp
                 | Opnd::ConstInt(_) | Opnd::ConstF32(_) | Opnd::Literal(_)))
     })).then(|| compute_group(ex));
     lower_local_pc_transfers(&mut insns)?;
+    // A lane kept to itself cannot stand in for these whole-wave loops.
+    let key_counts = if ex.stage == Stage::Compute && !lone_lane::on() && rewriting() { lower_key_counts(&mut insns) } else { Vec::new() };
     let entry_fallback = ex.stage == Stage::Compute && indexed_lane::skip_empty_wave_fallback(&mut insns);
     let single_wave32 = (entry_fallback || probe_trace) && compute_group(ex).into_iter().fold(1u32, u32::saturating_mul) == 32
         && insns.iter().any(|op| op.mnemonic == "s_and_saveexec_b32")
@@ -402,6 +429,7 @@ fn translate_outputs_once_impl(ex: &ShaderExtract, feeds_ps: Option<&InputInterp
         if scan_width.is_some() { return Err("wave scan needs a verified packed root layout".into()); }
         em.resolve_resources()?;
     }
+    counters_are_private(&em, &key_counts)?;
     if allocation_wave64 {
         // Both following stores write list data to the same typed view: the light
         // index and the previous uint head returned by the indexed atomic exchange.
@@ -531,7 +559,11 @@ fn translate_outputs_once_impl(ex: &ShaderExtract, feeds_ps: Option<&InputInterp
         em.lockstep = Some(lockstep::prove(&em.insns, 32).ok_or("whole-wave lane reads: masks and numbers mix")?);
     }
     if let Some(width) = required_wave_size.filter(|_| !lockstep::for_lane_reads()) {
-        match wave_sum::check_control_flow(&em.insns, width) {
+        // A guard's vote does not survive the block dispatcher (see `translate_outputs`).
+        let checked = wave_sum::check_control_flow(&em.insns, width).and_then(|guards| {
+            if lockstep::instead_of_guards() && !guards.is_empty() { Err(lockstep::DISPATCHED_VOTE.into()) } else { Ok(guards) }
+        });
+        match checked {
             Ok(guards) => em.reduction_execz_guards = guards,
             Err(reason) if em.resolve_wave32 && !requires_ballot && scan_width.is_none() => {
                 // A termination proof lets bounded loops drop the watchdog. Without
@@ -549,7 +581,7 @@ fn translate_outputs_once_impl(ex: &ShaderExtract, feeds_ps: Option<&InputInterp
                     return Err(reason);
                 }
                 match lockstep::prove(&em.insns, width) {
-                    Some(votes) => em.lockstep = Some(votes),
+                    Some(proof) => em.lockstep = Some(proof),
                     None => {
                         // Lockstep cannot prove this program; lower the totals that
                         // wave_sum rejects on control flow to WaveActiveSum, a
