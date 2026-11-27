@@ -186,6 +186,35 @@ A **gamepad is recommended**: console games are made for one, and their menus an
   the game's `xcl.toml` turn it off or change the mouse speed. A gamepad and the keyboard / mouse can be
   used together.
 
+To override keyboard and mouse controls for one title, add an optional table to its `xcl.toml`.
+For example, use arrow keys for the left stick, clear the arrow-key D-pad bindings, and swap the
+mouse buttons:
+
+```toml
+[input_profile]
+move_up = ["up"]
+move_left = ["left"]
+move_down = ["down"]
+move_right = ["right"]
+dpad_up = []
+dpad_left = []
+dpad_down = []
+dpad_right = []
+left_trigger = ["mouse_left"]
+right_trigger = ["mouse_right"]
+```
+
+Omitted entries use the built-in bindings. An empty list clears a binding. The output names are
+`move_up`, `move_left`, `move_down`, `move_right`, `a`, `b`, `x`, `y`, the four `dpad_*`
+directions, `view`, `menu`, `left_bumper`, `right_bumper`, `left_stick`, `right_stick`,
+`left_trigger`, and `right_trigger`. Each accepts a list of alternative inputs. Input names
+include `a` through `z`, `digit0` through `digit9`, `num0` through `num9`, `f1` through `f12`,
+`left_shift`, `right_ctrl`, `right_alt`, `mouse_middle`, `mouse_x1`, and `mouse_x2`.
+The `physical_q`, `physical_w`, `physical_e`, `physical_a`, `physical_s`, and `physical_d`
+inputs follow the positions used by the default layout. Set `wheel_up` and `wheel_down` to a
+single gamepad button name such as `right_bumper` or `y`, or to `unbound`.
+Restart the title to apply changes.
+
 ## Building and usage
 
 Windows 10/11 x64, Rust (`stable-x86_64-pc-windows-msvc`), the Windows SDK (DXC: `dxcompiler.dll`
