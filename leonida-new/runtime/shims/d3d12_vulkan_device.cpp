@@ -12500,8 +12500,9 @@ public:
             // A cache-only create that the driver would have to compile stays null: the first draw builds it.
             if (!graphics_.pipeline && !(cache_only && compile_status == VK_PIPELINE_COMPILE_REQUIRED)) return E_FAIL;
         }  // lazy: graphics_.pipeline stays null and the first draw builds it as variant 0
-        // LEONIDA_ASYNC_MIN_BYTES: a pipeline smaller than that (all its stages) is built where a draw needs it.
-        graphics_.async_build = async_replay_compile(spirv_bytes);
+        // LEONIDA_ASYNC_MIN_BYTES_GRAPHICS (unset: LEONIDA_ASYNC_MIN_BYTES): a pipeline smaller than that (all its
+        // stages) is built where a draw needs it.
+        graphics_.async_build = async_replay_compile(true, spirv_bytes);
         graphics_.variant = [this](std::uint32_t unbound) {
             return replay_pipeline("draw", [&] {
                 return graphics_.async_build ? queue_build(false, unbound) : variant(unbound, "draw");
@@ -12670,7 +12671,7 @@ public:
             pipeline_.build_context = this;
         } else if (lazy_compute) {
             // LEONIDA_ASYNC_MIN_BYTES: a module smaller than that is built where a dispatch needs it.
-            pipeline_.async_build = async_replay_compile(spirv_bytes);
+            pipeline_.async_build = async_replay_compile(false, spirv_bytes);
             pipeline_.build = [](void* self) {
                 auto* pso = static_cast<PipelineState*>(self);
                 return replay_pipeline("dispatch", [&] {

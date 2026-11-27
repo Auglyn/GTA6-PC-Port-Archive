@@ -2950,6 +2950,17 @@ submitting thread; at the maintainers' decision it was replaced by this one when
   still goes through the compile gate and `LargeModuleGate` as before, so a smaller one a submission waits for can
   queue behind it there; `async_pipeline_size_test` covers the decision and `d3d12_m4_compute_async_small_waits` a
   submission whose two pipelines are under the threshold with the worker held (both dispatches run).
+  `LEONIDA_ASYNC_MIN_BYTES_GRAPHICS=<n>` gives graphics and mesh pipelines (all their stages) a threshold of their
+  own; unset, they take `LEONIDA_ASYNC_MIN_BYTES`, as before the variable, and compute always does. `0` makes every
+  graphics pipeline asynchronous, as `LEONIDA_ASYNC_PIPELINES=1` did on its own. The reason: @MoonEyes's thread dumps
+  (RTX 4060, `LEONIDA_ASYNC_MIN_BYTES=1048576`) showed the draw thread building lazy graphics variants under 1 MiB in
+  place (`PipelineState::variant` -> `build` -> `vkCreateGraphicsPipelines`, 2.5-11 s each, back to back), so no
+  present came for about 100 s. A graphics pipeline that is not built yet costs one skipped draw, while the image
+  needs the small lighting and post compute programs, so graphics can stay asynchronous while those are built where
+  they are needed. One startup line states both thresholds. `d3d12_pipeline_workers_async_graphics_zero` holds the
+  compile worker with compute over its threshold and graphics at `0`: every dispatch runs, every draw is skipped, and
+  the draws come once the worker is let go; `d3d12_pipeline_workers_async_graphics_unset` checks that graphics follow
+  `LEONIDA_ASYNC_MIN_BYTES` without the variable.
 - **Warm-ups while the title submits.** A compute warm-up holds the compile gate for its whole create, and every
   submission waits behind it: a native boot's submissions waited 140 s in all at the gate behind compute warm-ups, and
   past the story load the worker went through 694 warm-ups of modules over 128 KiB (those over 640 KiB take 4-25 s
