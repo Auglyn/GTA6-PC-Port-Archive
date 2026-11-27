@@ -49,6 +49,7 @@ The game also imports Windows core API sets for services such as files, timing a
 | `gpu-indirect-dispatch` | A compute shader writes indirect dispatch arguments for 0, 1 and 2 groups. Check all 24 output words, including untouched guards. |
 | `dispatch-wait` | Copies a producer's word after a label wait, first at list start and then immediately after a course dispatch. Reports whether compute finished before producer submission and the word read by the CPU. |
 | `texture-readback` | `CopyMemoryToMemoryX` reads a guest texture into title memory |
+| `texture-publication` | The GPU writes a tiled guest texture several times while a compute queue waits for the last write's label. Title memory then holds each texel in its console position. The padding between texels, a page the title closed and write-watched memory past the texture are untouched. |
 | `ray-tracing-builder` | `XboxBvhBuilder` builds a structure with a size report, copies it and builds it again in a batch (needs ray tracing) |
 | `thread-dimensions` | Slot 80 `USE_THREAD_DIMENSIONS` (`0x20`) converts thread counts using the bound PSO's `[numthreads]` and fails closed without one |
 | `descriptor-reclaim` | Shader-visible descriptor heap reclamation across completed batches, overlapping in-flight `Reset()`, `ClearState`, evicted-slot rebinding, and unsubmitted pin exhaustion |
@@ -60,6 +61,7 @@ The game also imports Windows core API sets for services such as files, timing a
 | `lane-spill-interp` | A console pixel program whose f16 interpolator's attribute selector matches the number of its lane-spill register ([raster tables](#raster-tables)) |
 | `compute-root` | Two root-less console compute programs under a root with three descriptor tables that the provider cannot reflect ([compute roots](#compute-roots)) |
 | `mesh-samplers` | The same literal sampler in a mesh pipeline, whose mesh root the provider builds ([raster tables](#raster-tables)); not part of `all` |
+| `mesh-sampler-rootless` | The literal sampler programs in mesh pipelines whose root has no static samplers ([raster tables](#raster-tables)); not part of `all` |
 
 ```sh
 python tuxbox.py verify --only lanes-selftest --output build/lanes-selftest.json
@@ -125,6 +127,8 @@ The `raster-samplers` scenario draws with the same vertex program and a third ha
 The `lane-spill-interp` scenario draws the same fullscreen triangle with a third hand-written pixel program under an empty root. It writes a lane-spill area in v128, then runs an f16 interpolator whose attribute selector is encoded like v128. The selector is not a register read, so every texel must hold the program's constant. Under a refused translation the pipeline becomes a stand-in and every texel keeps its clear value.
 
 The `mesh-samplers` scenario samples the same way through a mesh pipeline. Its pixel program declares `s0` and `s1`, which the title's root has as point-filtered static samplers, so neither register can stand in for the literal state and the program does not translate against that root. Its mesh program is a console container with FSSM records only: they name the root constant `b501` where the root declares `b500`, so the provider builds the mesh stage a root of its own. The provider has to add the literal state to that root as a private static sampler and translate the pixel program against it, so every texel reads 1.5. Without that it falls back to the pixel program's translation without a root, whose private sampler the pipeline's root lacks, and the pipeline becomes a stand-in. The mesh program's desktop translation (`mesh_samplers.hlsl`, a fullscreen triangle) is compiled into the prepared cache under its digest before launch.
+
+The `mesh-sampler-rootless` scenario draws through that mesh program under the same root without its static samplers, with the `raster-samplers` pixel program and with the two-sampler one carrying an empty feature part. The translation against a root with no static samplers reads a literal state from a private sampler, so the provider has to add each program's samplers to the mesh root: the declared `s0` for the program with one sampler, a private register for the program with two. Without them the host rejects both pipelines, which become stand-ins.
 
 These roots are made while the game runs, so the pixel programs cannot be prepared before launch. `verify` runs the three scenarios with the host worker, requires the provider to report the reflected root (for the vertex pipelines) or the mesh pipeline and its descriptor slots, and fails if a pixel or vertex program was translated without a root.
 
