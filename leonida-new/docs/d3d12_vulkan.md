@@ -2816,6 +2816,24 @@ Pipeline creation:
   A root signature the runtime does not know is hashed by its address, so the key of a pipeline made with one can
   change from one run to the next. The file is local, like the cache files, and is not meant to be attached to a
   report: quote the counts. It changes no build, order or cache.
+  `LEONIDA_PIPELINE_PREWARM_ORDER=<file>` reads such a log at boot and builds, ahead of their first draw, the graphics
+  and mesh pipelines an earlier run asked for first (RT-PIPELINE-PREWARM-ORDER, phase 2; `runtime/src/pipeline_prewarm.h`).
+  `1` names `pipeline_order.log` beside the session cache; it is read before this run's own record is appended, so
+  both variables can be on together. Of the runs recorded on this GPU (vendor and device id), the one with the most
+  records is read, the newest on a tie. When the title creates a PSO whose key is in it, each recorded variant is
+  queued on the compile workers as a warm-up at its recorded rank: after every demanded build, one warm-up at a time
+  and none while a demanded build runs (`PipelineCompiler`; the compile-gate finding in "Compile workers" below is
+  why), ahead of the compute warm-up's size order and before the cache checkpoint. A variant 0 built at create is
+  skipped. A console stream kept for its first bind (`LEONIDA_PIPELINE_COMPILE=on-demand`) is otherwise parsed only
+  there, which would leave the prewarm no lead: when its pipeline is in the plan, the parse is queued as its first
+  prewarm job instead (at the rank of its first recorded variant, on a compile worker), and its variants follow with
+  their ranks. A bind that comes first waits for that parse, which it would otherwise have done itself. Records are taken in order until their recorded build times add up to
+  `LEONIDA_PIPELINE_PREWARM_BUDGET_MS` (default 300000; a record with no build time counts 1000 ms), and at most
+  `LEONIDA_PIPELINE_PREWARM_MAX_ENTRIES` (default 4096). Compute records are left to the compute warm-up and to
+  `gta6rt --precompile-pipelines`. A missing or unreadable file, a file with no readable record and a file from
+  another GPU are ignored with one `[rt] pipeline-prewarm:` line; a damaged line is skipped, as are line types a v1
+  reader does not know (`E`). A queued prewarm holds no reference: a PSO released first drops it. One that is already
+  running when the title submits still holds the compile gate (`LEONIDA_COMPILE_GATE`), as any warm-up does.
   A queued build holds no reference to its PSO or device (`PipelineCompiler`, `runtime/shims/d3d12_pipeline_compile.h`).
   A PSO's last release drops its queued builds and returns at once; one already running is left to finish, and the
   worker deletes the PSO after it (`PipelineState::last_release`). The PSO's device reference goes at the release, so
@@ -2940,10 +2958,12 @@ submitting thread; at the maintainers' decision it was replaced by this one when
   title submits (a submission in the last second, `src/pipeline_wait.h`); the pipeline is built at its first use
   instead. Opt-in: unset or 0, every warm-up runs, as on `main`, and `LargeModuleGate` (#1889) orders them behind a
   submission's compiles. Smaller warm-ups, and every warm-up before the first submission, run as before.
-- **A bounded, adaptive compile gate, opt-in** (`SubmitMutex::enter_submit`, `src/vulkan_device_fault.h`,
-  `LEONIDA_COMPILE_GATE=adaptive`). Unset, the gate stays the classic one: compute creates only, each waited for
-  however long it takes, no probes, as before. The adaptive gate is opt-in because of what it costs on a driver that
-  does hold submissions behind a create (630.20, below): no run of it there has been reported yet. The gate keeps a
+- **A bounded, adaptive compile gate, where the driver was measured for it** (`SubmitMutex::enter_submit`,
+  `src/vulkan_device_fault.h`; `LEONIDA_COMPILE_GATE=adaptive` forces it, `classic` forces the classic one). The
+  classic gate: compute creates only, each waited for however long it takes, no probes, as before. Unset or `auto`,
+  the device measures which one this driver gets before the title runs (the next item). The adaptive gate is not on
+  everywhere because of what it costs on a driver that does hold submissions behind a create (630.20, below): no run
+  of it there has been reported yet. The gate keeps a
   `vkQueueSubmit` out of the driver while a create is in it, since on NVIDIA 630.20 one that entered during a long
   `vkCreateComputePipelines` waited 10 s and lost the device. The waiting submission holds the submit lock, so all
   queues stop: on an RTX 4070 Laptop (NVIDIA 621.40) one compute create of a 2.3 MB module stayed in the driver for
@@ -3007,6 +3027,37 @@ submitting thread; at the maintainers' decision it was replaced by this one when
   create in the driver (kind, program, SPIR-V size, thread, how long it had been there, whether submissions waited
   for it) and each kind's gate. Long graphics creates would leave the title's process only through the compile
   helper, which builds compute pipelines alone today.
+- **`LEONIDA_COMPILE_GATE=auto`, the default: a calibration at device creation** (`src/compile_gate_policy.h`,
+  `src/compile_gate_calibration.h`, `decide_auto_compile_gate` in `shims/d3d12_vulkan_device.cpp`). Before the
+  `VulkanContext` (and its `SubmitMutex`) exists, so nothing is gated before the decision, a worker thread creates a
+  compute pipeline written in code (a chain of `fract(sin(...))` steps and branches over a storage buffer, its
+  constants from specialization constant 0 with a new seed each run, so neither a pipeline cache nor the driver's
+  shader cache answers it; no game data) while this thread submits an empty command buffer to the device's queue and
+  waits for its fence, over and over, until the create returns. At least 3 submissions back in 50 ms or less, before
+  the create left and some in its second half, with none slower: adaptive. One of 250 ms or more that came back
+  within 200 ms of the create leaving: the driver holds submissions, classic. A create under 300 ms is tried again
+  larger (up to 4 trials, none started after 6 s); a slow submission the create does not explain, too few samples
+  or any failed call: classic. The verdict is kept per vendor, device, driver version and pipeline cache UUID in
+  `compile_gate_calibration.txt` beside the pipeline cache, so it runs once per driver; a failed call or an unclear
+  verdict (a slow submission the create does not explain) is not kept, and the next launch measures again, so one
+  busy moment on the GPU does not hold every later launch on the classic gate. After a wait that times out, the fence
+  and command pool are destroyed only once the submission's fence signals (left alive on a lost device).
+  `LEONIDA_COMPILE_GATE_RECALIBRATE=1` measures again. It is logged once, `[rt] compile-gate: auto: adaptive
+  (calibrated on NVIDIA 621.40 in 0.7 s: 115 submissions came back in <= 0.5 ms beside a 722 ms create; cached in
+  ...)` (`classic` and the reason otherwise). Only gta6rt's title process calibrates; `--precompile-pipelines`,
+  `--compile-server` and the tests keep the classic gate, and a forced value never waits for it.
+  Why a calibration can ask what an in-game probe cannot: the adaptive gate learns by letting a submission into the
+  driver beside a create of the title's, which can take 30-60 s, and on a driver that holds submissions such a probe
+  loses the device once it waits 10 s more. The calibration's create takes about a second and its submissions are
+  empty, so on such a driver one is held about a second and comes back with the create; that cannot reach the 10 s
+  the driver allows. What is known for the verdict to agree with, `MEASURED` but small (#2412,
+  [comment 7217585003](https://github.com/ubiquitarianism/leonida/pull/2412#issuecomment-7217585003)): on an RTX 4070
+  Laptop with NVIDIA 621.40 a synthetic probe never held a submission past 80 ms beside 8-10 s graphics creates and
+  retail adaptive runs had no gate hang after #2418, and this calibration gives adaptive there (in 6 runs of
+  `vk_compile_gate_calibration_test`, 53-125 submissions each, none over 0.9 ms, beside creates of 354-783 ms); an RTX 4060 with 610.88 turned the adaptive gate off with no
+  regression reported; other 621.x users report fewer crashes with it; one freeze at about 231 s on an RTX 5070
+  (621.x) was at a head without #2418 and is being rechecked. On 630.20 the calibration has not run yet: the
+  expected verdict there is classic, from the 10 s hold measured beside a long compute create.
 
 **Open:** whether the game uses `D3D12_PIPELINE_STATE_STREAM_DESC` for mesh/RT and which subobject types appear.
 The trace will enumerate them.

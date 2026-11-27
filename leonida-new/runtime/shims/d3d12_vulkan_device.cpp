@@ -45,6 +45,7 @@
 #include "../src/vulkan_mesh_limits.h"
 #include "../src/resource_tiling.h"
 #include "../src/cached_pso.h"
+#include "../src/compile_gate_calibration.h"
 #include "../src/pipeline_cache_file.h"
 #include "../src/pipeline_profile.h"
 #include "../src/submit_phases.h"
@@ -52,6 +53,7 @@
 #include "../src/pipeline_cache_store.h"
 #include "../src/pipeline_cache_journal.h"
 #include "../src/pipeline_order.h"
+#include "../src/pipeline_prewarm.h"
 #include "../src/large_module_gate.h"
 #include "../src/dev_status.h"
 #include "../src/conservative_raster.h"
@@ -1696,6 +1698,103 @@ std::filesystem::path pipeline_cache_heavy_path() {
     return path;
 }
 
+// LEONIDA_COMPILE_GATE unset or `auto` (src/compile_gate_policy.h): decides the compile gate for this GPU and driver
+// before the VulkanContext (and its SubmitMutex) exists. The verdict comes from compile_gate_calibration.txt beside
+// the pipeline cache, or from a calibration on `info.queue` (src/compile_gate_calibration.h), written there once.
+// Only in gta6rt's title process (compile_gate_policy::calibration_allowed): a build host, a test or anything else
+// that creates a device keeps the classic gate and never calibrates. A forced setting returns at once.
+void decide_auto_compile_gate(const VulkanDeviceInfo& info, PFN_vkGetDeviceProcAddr get_device,
+                              const leonida::cached_pso::Identity& identity) {
+    namespace policy = leonida::compile_gate_policy;
+    using leonida::CompileGateMode;
+    using leonida::SubmitMutex;
+    if (SubmitMutex::compile_gate_setting() != policy::Setting::automatic) return;
+    if (!policy::calibration_allowed.load() || compile_helper::build_host.load()) return;  // classic, as before `auto`
+    static std::once_flag once;
+    std::call_once(once, [&] {
+        const auto decide = [](CompileGateMode mode, const std::string& why) {
+            SubmitMutex::decide_auto_gate(mode);
+            std::fprintf(stderr, "[rt] compile-gate: auto: %s (%s; LEONIDA_COMPILE_GATE=classic|adaptive overrides)\n",
+                         mode == CompileGateMode::adaptive ? "adaptive" : "classic", why.c_str());
+        };
+        const auto utf8 = [](const std::filesystem::path& path) {
+            const std::wstring& wide = path.native();
+            const int n = WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), int(wide.size()), nullptr, 0, nullptr, nullptr);
+            std::string out(std::size_t(n > 0 ? n : 0), '\0');
+            if (n > 0) WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), int(wide.size()), out.data(), n, nullptr, nullptr);
+            return out;
+        };
+        if (!identity.vendor || !info.device || !info.queue || !get_device) {
+            decide(CompileGateMode::classic, "the GPU or its queue is not known, so no calibration");
+            return;
+        }
+        const std::string driver = policy::describe_driver(identity.vendor, identity.driver);
+        if (info.physical && info.get_instance_proc) {
+            if (const auto get_props = reinterpret_cast<PFN_vkGetPhysicalDeviceProperties>(
+                    info.get_instance_proc(info.instance, "vkGetPhysicalDeviceProperties"))) {
+                VkPhysicalDeviceProperties props{};
+                get_props(info.physical, &props);
+                if (props.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU) {
+                    decide(CompileGateMode::classic, driver + " is a CPU device, not calibrated");
+                    return;
+                }
+            }
+        }
+        policy::CacheKey key;
+        key.vendor = identity.vendor;
+        key.device = identity.device;
+        key.driver = identity.driver;
+        std::memcpy(key.uuid, identity.cache_uuid, sizeof key.uuid);
+        std::filesystem::path path = pipeline_cache_path();
+        if (!path.empty()) path.replace_filename(L"compile_gate_calibration.txt");
+        std::string text;
+        if (!path.empty()) {
+            std::ifstream in(path, std::ios::binary);
+            if (in) text.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+        }
+        char value[4] = {};
+        std::size_t length = 0;
+        const bool recalibrate =
+            getenv_s(&length, value, "LEONIDA_COMPILE_GATE_RECALIBRATE") == 0 && length > 1 && policy::recalibrate(value);
+        if (!recalibrate) {
+            if (const auto cached = policy::find_entry(text, key)) {
+                decide(policy::mode_for(cached->verdict.outcome),
+                       "cached calibration of " + driver + ": " + policy::describe_verdict(cached->verdict) + "; in " +
+                           utf8(path) + ", LEONIDA_COMPILE_GATE_RECALIBRATE=1 measures again");
+                return;
+            }
+        }
+        const auto seed = static_cast<std::uint32_t>(std::chrono::steady_clock::now().time_since_epoch().count()) | 1u;
+        const leonida::compile_gate_calibration::Result result =
+            leonida::compile_gate_calibration::calibrate(get_device, info.device, info.queue, info.queue_family, seed);
+        if (!result.ok) {
+            decide(CompileGateMode::classic, "calibration of " + driver + " failed: " + result.error + "; not cached");
+            return;
+        }
+        std::string where = "not cached (no pipeline cache folder)";
+        if (!policy::cache_verdict(result.verdict.outcome)) {
+            where = "not cached: the next launch measures again";
+        } else if (!path.empty()) {
+            const std::string updated = policy::replace_entry(text, {key, result.verdict});
+            std::filesystem::path temp = path;
+            temp += L".tmp";
+            bool written = false;
+            {
+                std::ofstream out(temp, std::ios::binary | std::ios::trunc);
+                out.write(updated.data(), std::streamsize(updated.size()));
+                written = bool(out);
+            }
+            std::error_code ec;
+            if (written) std::filesystem::rename(temp, path, ec);
+            where = written && !ec ? "cached in " + utf8(path) : "not cached (" + utf8(path) + " could not be written)";
+        }
+        char took[64];
+        std::snprintf(took, sizeof took, " in %.1f s", result.total_ms / 1000.0);
+        decide(policy::mode_for(result.verdict.outcome), "calibrated on " + driver + took + ": " +
+                                                             policy::describe_verdict(result.verdict) + "; " + where);
+    });
+}
+
 // LEONIDA_HEAVY_PIPELINE_CACHE_MS: a compile at least this long schedules a write of the heavy cache; 0 turns the
 // heavy cache off. One line for a value that is not a number.
 std::uint32_t heavy_pipeline_cache_ms() {
@@ -2628,6 +2727,41 @@ struct DeviceState {
     // LEONIDA_PIPELINE_ORDER_LOG=1: which pipelines the title asks for first, appended to pipeline_order.log beside the
     // session cache (pipeline_order.h). Null when off: the pipelines then carry no hook at all.
     std::unique_ptr<leonida::pipeline_order::Recorder> order_log;
+    // LEONIDA_PIPELINE_PREWARM_ORDER=<file> ("1": pipeline_order.log beside the session cache): the graphics pipelines an
+    // earlier run asked for first, queued as warm-ups in that order when the title creates them (pipeline_prewarm.h).
+    // Null when off. Read before start_order_log, which appends this run to the same file when both are on.
+    std::unique_ptr<const leonida::pipeline_prewarm::Plan> prewarm_plan;
+    void load_prewarm_plan() {
+        namespace prewarm = leonida::pipeline_prewarm;
+        wchar_t value[1024]{};
+        const DWORD n = GetEnvironmentVariableW(L"LEONIDA_PIPELINE_PREWARM_ORDER", value, DWORD(std::size(value)));
+        if (n == 0 || n >= std::size(value) || (n == 1 && value[0] == L'0')) return;
+        try {
+            std::filesystem::path path = value;
+            if (n == 1 && value[0] == L'1') {
+                path = pipeline_cache_session_path();
+                if (path.empty()) {
+                    std::fprintf(stderr, "[rt] pipeline-prewarm: no session cache folder; nothing is prewarmed\n");
+                    return;
+                }
+                path.replace_filename(L"pipeline_order.log");
+            }
+            const auto count = [](const char* name, std::uint64_t fallback) {
+                char text[32]{};
+                const DWORD m = GetEnvironmentVariableA(name, text, sizeof(text));
+                return prewarm::parse_count(m > 0 && m < sizeof(text) ? text : nullptr, fallback);
+            };
+            prewarm::Options options;
+            options.budget_ms = count("LEONIDA_PIPELINE_PREWARM_BUDGET_MS", prewarm::default_budget_ms);
+            options.max_entries = std::size_t(count("LEONIDA_PIPELINE_PREWARM_MAX_ENTRIES", prewarm::default_max_entries));
+            auto plan = prewarm::load_plan(path, pso_identity.vendor, pso_identity.device, options);
+            std::fprintf(stderr, "%s\n", plan.message.c_str());
+            if (plan) prewarm_plan = std::make_unique<const prewarm::Plan>(std::move(plan));
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "[rt] pipeline-prewarm: the order log could not be read (%s); nothing is prewarmed\n",
+                         e.what());
+        }
+    }
     void start_order_log() {
         char text[8]{};
         const DWORD n = GetEnvironmentVariableA("LEONIDA_PIPELINE_ORDER_LOG", text, sizeof(text));
@@ -12415,6 +12549,7 @@ public:
         }
         registered_ = true;
         is_graphics_ = true;
+        prewarm_queue(std::size_t((std::max)(spirv_bytes, std::uint64_t{1})));
         return S_OK;
     }
 
@@ -12680,7 +12815,9 @@ private:
     // handle once built; otherwise a compile-worker job is queued (once) and null answered, so the draw or dispatch is
     // skipped and a later submission uses the pipeline. `warm_bytes`: a warm-up, queued by module size. `count_skip`:
     // false for a request made at record time (request_early), which skips nothing.
-    VkPipeline queue_build(bool compute, std::uint32_t unbound, std::size_t warm_bytes = 0, bool count_skip = true) {
+    // `priority`: where a warm-up goes among the others (PipelineCompiler); 0: by `warm_bytes`, the module size.
+    VkPipeline queue_build(bool compute, std::uint32_t unbound, std::size_t warm_bytes = 0, bool count_skip = true,
+                           std::size_t priority = 0) {
         static std::mutex publication;  // ready handles only; no compiler call holds this lock
         const bool warm = warm_bytes != 0;
         // After an exit stop (stop_pipeline_compiles) nothing is queued: a warm-up or an early request is skipped,
@@ -12699,7 +12836,7 @@ private:
         }
         bool queued = false;
         try {
-            queued = PipelineCompiler::instance().submit(compile_owner(), &device_, warm_bytes,
+            queued = PipelineCompiler::instance().submit(compile_owner(), &device_, warm && priority ? priority : warm_bytes,
                                                          [this, compute, warm, unbound, warm_bytes] {
                 // A big warm-up while the title submits is left to the pipeline's first use (warmup_waits_for_quiet).
                 if (warm && warmup_waits_for_quiet(warm_bytes)) return;
@@ -12741,7 +12878,42 @@ private:
         return VK_NULL_HANDLE;
     }
 
+    // LEONIDA_PIPELINE_PREWARM_ORDER: the variants an earlier run asked this graphics pipeline for, queued as warm-ups at
+    // their recorded rank (pipeline_prewarm.h): after every demanded build, one warm-up at a time and none while a
+    // demanded build runs (PipelineCompiler). A queued one holds no reference: a release first drops it (last_release).
+    void prewarm_queue(std::size_t bytes) {
+        const auto* plan = device_.prewarm_plan.get();
+        if (!plan) return;
+        const auto& key = order_key_.empty() ? cache_key_ : order_key_;
+        const auto* entries = key.empty() ? nullptr : plan->find(key);
+        if (!entries) return;
+        for (const auto& entry : *entries) {
+            if (entry.variant == 0 && graphics_.pipeline) continue;  // built at create
+            queue_build(false, entry.variant, bytes, true, leonida::pipeline_prewarm::priority(entry.rank));
+        }
+    }
+
 public:
+    // A console stream kept for its first bind (LEONIDA_PIPELINE_COMPILE=on-demand, set_pending_stream) is parsed only
+    // when it is first resolved, and create_graphics queues the prewarm from there: no lead at all. When the plan has
+    // the stream's pipeline, the parse is queued here as its first prewarm job instead, at the rank of its first
+    // recorded variant, on a compile worker rather than the title's thread; create_graphics then queues the variants
+    // with their ranks as for any other PSO. A bind meanwhile waits for that parse (resolve_type's call_once), which it
+    // would otherwise have done itself. Like any queued build it holds no reference (last_release drops it).
+    void prewarm_pending_stream() {
+        const auto* plan = device_.prewarm_plan.get();
+        if (!plan || pending_stream_kind_ != 1) return;
+        const auto& key = order_key_.empty() ? cache_key_ : order_key_;
+        const auto* entries = key.empty() ? nullptr : plan->find(key);
+        if (!entries || entries->empty()) return;
+        try {
+            PipelineCompiler::instance().submit(compile_owner(), &device_,
+                                                leonida::pipeline_prewarm::priority(entries->front().rank),
+                                                [this] { resolve_type(true); }, true);
+        } catch (...) {
+        }
+    }
+
     // Record time (SetPipelineState for compute, a draw for graphics, with the render-target slots it binds and
     // whether it binds a depth buffer): asynchronous builds start on the compile worker before the list is submitted.
     // Never waits; nothing to do when the variant is the last one asked for here.
@@ -14513,6 +14685,7 @@ public:
                 state_.pso_identity.device = props.deviceID;
                 state_.pso_identity.driver = props.driverVersion;
                 std::memcpy(state_.pso_identity.cache_uuid, props.pipelineCacheUUID, VK_UUID_SIZE);
+                state_.load_prewarm_plan();  // first: the order log may append this run to the same file
                 state_.start_order_log();
                 if (state_.info.max_push_constants_size == 0) {
                     state_.info.max_push_constants_size = props.limits.maxPushConstantsSize;
@@ -14559,6 +14732,8 @@ public:
             .first_instance = info.draw_indirect_first_instance, .multiple = info.multi_draw_indirect,
             .count_buffer = info.draw_indirect_count_enabled, .max_count = info.max_draw_indirect_count,
             .robust_index_view = info.robust_index_view, .require_clamp = leonida::indirect_clamp_enabled()};
+        // Before the context: its SubmitMutex takes the gate's mode and limits when it is made.
+        decide_auto_compile_gate(info, get_device, state_.pso_identity);
         state_.context = std::make_unique<leonida::VulkanContext>(get_device, info.device,
                                                                   info.separate_depth_stencil_layouts,
                                                                   info.conditional_rendering, info.ray_tracing,
@@ -15515,9 +15690,10 @@ public:
         auto* pipeline=new PipelineState(state_);
         pipeline->attach_device(identity());
         pipeline->set_cache_key(stream.has_cs?pipeline_key(stream.compute):pipeline_key(stream.graphics));
-        if(state_.order_log) pipeline->set_order_key(order_key(stream));
+        if(state_.order_log||state_.prewarm_plan) pipeline->set_order_key(order_key(stream));
         if(!rt::d3d12_xs::attach_pso_record(pipeline,std::move(record))){pipeline->Release();return E_OUTOFMEMORY;}
         pipeline->set_pending_stream(stream.has_cs);
+        pipeline->prewarm_pending_stream();
         return hand_out(pipeline,iid,out);
     }
     HRESULT shared_native_graphics(const D3D12_GRAPHICS_PIPELINE_STATE_DESC& pc, D3D12_SHADER_BYTECODE mesh,
@@ -17753,7 +17929,7 @@ public:
         if (FAILED(parsed)) return finish(parsed);
         auto* pipeline = new PipelineState(state_);
         pipeline->attach_device(identity());
-        if (state_.order_log) pipeline->set_order_key(order_key(stream));
+        if (state_.order_log || state_.prewarm_plan) pipeline->set_order_key(order_key(stream));
         const HRESULT hr = stream.has_cs ? pipeline->create_compute(stream.compute)
                                          : pipeline->create_graphics(stream.graphics, &stream.ms, &stream.as,
                                                                      stream.back_masks ? &stream.back_stencil : nullptr, stream.depth_bounds);

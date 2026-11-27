@@ -1427,8 +1427,29 @@ struct DirectCompute {
         }
         return scc_live[program.at.at(definition.next)];
     }
+    string saturated_add(const string &a, const string &b, bool sign) {
+        auto sum = ir.binary("add", a, b);
+        if (!sign)
+            return select(cmp("ult", sum, a), "4294967295", sum);
+        auto overflow = ir.binary("and", ir.binary("xor", a, sum), ir.binary("xor", b, sum));
+        return select(cmp("slt", overflow, "0"), select(cmp("slt", a, "0"), "2147483648", "2147483647"), sum);
+    }
     void arithmetic(const Inst &i, const State &state, const string *permuted = nullptr, bool compute = false) {
         auto n = i.name;
+        if (compute && (n == "v_dot4_i32_i8" || n == "v_dot4_u32_u8")) {
+            // Integer dot products use both packed words as-is. Require the
+            // canonical VOP3P OP_SEL/OP_SEL_HI and zero NEG_LO/NEG_HI.
+            if (i.enc != Encoding::Mix || (i.a & 0x7f00) != 0x4000 || (i.b >> 27) != 3)
+                refuse(i.pc, "unsupported packed byte dot operand modifiers");
+            const bool sign = n == "v_dot4_i32_i8";
+            auto a = operand32(i, i.src[0]), b = operand32(i, i.src[1]), acc = operand32(i, i.src[2]);
+            // The dot alone fits into i32 even for four unsigned 255*255
+            // products. Saturate only the final addition to the accumulator.
+            auto dot = ir.invoke("i32", "dot4AddPacked.i32", sign ? 163 : 164,
+                                 {{"i32", i.clamp ? "0" : acc}, {"i32", a}, {"i32", b}}, "nounwind readnone");
+            vector_write(i.dst, i.clamp ? saturated_add(dot, acc, sign) : dot);
+            return;
+        }
         if (n == "v_mad_u32_u16" || n == "v_mad_i32_i16") {
             // AMD RDNA 2 ISA, VOP3A opcodes 883/885. Only the two
             // multiplicands are halfwords. The addend and result are dwords.
@@ -1443,14 +1464,7 @@ struct DirectCompute {
             };
             auto product = ir.binary("mul", half(0), half(1));
             auto addend = operand32(i, i.src[2]);
-            auto sum = ir.binary("add", product, addend);
-            if (i.clamp) {
-                if (sign) {
-                    auto overflow = ir.binary("and", ir.binary("xor", product, sum), ir.binary("xor", addend, sum));
-                    sum = select(cmp("slt", overflow, "0"),
-                                 select(cmp("slt", product, "0"), "2147483648", "2147483647"), sum);
-                } else sum = select(cmp("ult", sum, product), "4294967295", sum);
-            }
+            auto sum = i.clamp ? saturated_add(product, addend, sign) : ir.binary("add", product, addend);
             vector_write(i.dst, sum);
             return;
         }
@@ -1512,6 +1526,41 @@ struct DirectCompute {
             (n.find("class") == n.npos || n.find("_f16") != n.npos || n.find("_f32") != n.npos)) {
             auto condition = comparison(i);
             write_ballot(i.dst, condition);
+            return;
+        }
+        if (compute && (n == "v_dot2_i32_i16" || n == "v_dot2_u32_u16")) {
+            // These VOP3P dot forms consume both halfwords as-is.
+            if (i.enc != Encoding::Mix || (i.a & 0x7f00) != 0x4000 || (i.b >> 27) != 3)
+                refuse(i.pc, "unsupported packed halfword dot operand modifiers");
+            const bool sign = n == "v_dot2_i32_i16";
+            auto a = operand32(i, i.src[0]), b = operand32(i, i.src[1]), acc = operand32(i, i.src[2]);
+            auto low_half = [&](const string &word) {
+                return sign ? ir.binary("ashr", ir.binary("shl", word, "16"), "16")
+                            : ir.binary("and", word, "65535");
+            };
+            auto low_product = ir.binary("mul", low_half(a), low_half(b));
+            auto high_half = sign ? "ashr" : "lshr";
+            auto high_product = ir.binary("mul", ir.binary(high_half, a, "16"), ir.binary(high_half, b, "16"));
+            auto pair = ir.binary("add", low_product, high_product);
+            auto sum = ir.binary("add", pair, acc);
+            if (i.clamp) {
+                // Accumulate both carries and the three sign extensions in
+                // the upper word. Clamp only after the accumulator is added.
+                auto carry = [&](const string &result, const string &left) {
+                    return ir.value("zext i1 " + cmp("ult", result, left) + " to i32");
+                };
+                auto upper = ir.binary("add", carry(pair, low_product), carry(sum, pair));
+                if (sign) {
+                    for (const auto &word : {low_product, high_product, acc})
+                        upper = ir.binary("add", upper, ir.binary("ashr", word, "31"));
+                    auto fits = cmp("eq", upper, ir.binary("ashr", sum, "31"));
+                    auto bound = select(cmp("slt", upper, "0"), "2147483648", "2147483647");
+                    sum = select(fits, sum, bound);
+                } else {
+                    sum = select(cmp("eq", upper, "0"), sum, "4294967295");
+                }
+            }
+            vector_write(i.dst, sum);
             return;
         }
         const bool select_mods = n == "v_cndmask_b32" && i.wide && !((i.abs | i.neg) & 4);
@@ -2078,16 +2127,24 @@ struct DirectCompute {
             auto field = shift("ashr", a, b);
             z = select(cmp("eq", width, "0"), "0", shift("ashr", shift("shl", field, pad), pad));
         } else if (n == "v_cvt_pk_u8_f32") {
-            // (S2 & ~(0xff << 8 * S1[1:0])) | (flt32_to_uint8(S0) << 8 * S1[1:0]) (#2997), with the conversion
-            // gfx2hlsl.py measured on RDNA 2: round to nearest even, saturate to [0, 255], zero for NaN, both zeros
-            // and negatives. (bits - 1) < 0x7f800000 holds exactly from the smallest subnormal to +inf, as an integer
-            // test that fast-math cannot fold.
+            // Round and saturate the binary32 bits directly. Literal 0.5 through DXIL Round_ne
+            // and fptoui read back as 1 on some NVIDIA drivers (#3052).
+            constexpr auto half_bits = "1056964608";      // 0x3f000000
+            constexpr auto max_byte_bits = "1132396544";  // 0x437f0000 (255.0)
+            auto positive = cmp("ult", ir.binary("sub", a, "1"), "2139095040");  // subnormal through +inf
+            auto bounded = select(cmp("ugt", a, max_byte_bits), max_byte_bits, a);
+            // Values at or below 0.5 yield zero, so clamp them and invalid inputs to
+            // exactly 0.5 to keep the significand shift in the range 16..24.
+            auto in_range = ir.value("and i1 " + positive + ", " + cmp("uge", bounded, half_bits));
+            bounded = select(in_range, bounded, half_bits);
+            auto discard = ir.binary("sub", "150", ir.binary("lshr", bounded, "23"));  // 23 + exponent bias
+            auto significand = ir.binary("or", ir.binary("and", bounded, "8388607"), "8388608");
+            auto truncated = ir.binary("lshr", significand, discard);
+            auto halfway = ir.binary("shl", "1", ir.binary("sub", discard, "1"));
+            // Bias by halfway - 1, then add the low retained bit so only odd ties round up.
+            auto bias = ir.binary("add", ir.binary("sub", halfway, "1"), ir.binary("and", truncated, "1"));
+            auto byte = ir.binary("lshr", ir.binary("add", significand, bias), discard);
             auto amount = ir.binary("shl", ir.binary("and", b, "3"), "3");
-            auto positive = cmp("ult", ir.binary("sub", a, "1"), "2139095040");
-            auto bounded = ir.invoke("float", "binary.f32", 36, {{"float", ir.value("bitcast i32 " + a + " to float")},
-                                     {"float", "2.550000e+02"}}, "nounwind readnone");
-            auto rounded = ir.invoke("float", "unary.f32", 26, {{"float", bounded}}, "nounwind readnone");
-            auto byte = select(positive, ir.binary("and", ir.value("fptoui float " + rounded + " to i32"), "255"), "0");
             auto keep = ir.binary("xor", ir.binary("shl", "255", amount), "4294967295");
             z = ir.binary("or", ir.binary("and", val(2), keep), ir.binary("shl", byte, amount));
         } else if (n == "s_orn2_b32")
