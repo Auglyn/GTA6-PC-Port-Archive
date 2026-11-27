@@ -131,7 +131,9 @@ struct DirectCompute {
     string operand32(const Inst &i, unsigned n, unsigned sgpr_limit = 106) {
         if (graphics_input && n == 106)
             refuse(i.pc, "graphics instruction consumes a full wave mask");
-        if (n <= 106 || n == 126 || n == 127 || (!graphics_input && n == 107) || (n >= 256 && n < 512)) {
+        // M0 holds ordinary numeric ALU bits here, not an implicit memory/indexing operand.
+        const bool numeric_m0 = !graphics_input && n == 124 && i.enc != Encoding::Mubuf && i.enc != Encoding::Smem;
+        if (n <= 106 || n == 126 || n == 127 || (!graphics_input && n == 107) || numeric_m0 || (n >= 256 && n < 512)) {
             analysis.require_numeric(i, n, sgpr_limit);
             return read(n);
         }
@@ -376,7 +378,7 @@ struct DirectCompute {
         return ir.invoke("%dx.types.ResRet.i32", raw ? "rawBufferLoad.i32" : "bufferLoad.i32", raw ? 139 : 68, args,
                          "nounwind readonly");
     }
-    void buffer_atomic(const Inst &i, const State &s) {
+    void buffer_atomic(const Inst &i, const State &s, const string &pixel_predicate = {}) {
         // The operation set and VGPR ordering follow gfx2hlsl.MUBUF_ATOMIC_OPS.
         static const std::map<Name, unsigned> operations{
             {"buffer_atomic_add", 0},  {"buffer_atomic_sub", 0},  {"buffer_atomic_and", 1},  {"buffer_atomic_or", 2},
@@ -422,6 +424,30 @@ struct DirectCompute {
             args.emplace_back("i32", read(data + 1));
         args.emplace_back("i32", value);
         auto tag = to_string(label_number++), pred = active();
+        if (!pixel_predicate.empty()) {
+            // Graphics uses SSA rather than the compute VGPR allocas. The caller
+            // proves a single guest block and supplies exact coverage and EXEC.
+            // Keep the original VGPR for inactive lanes, including helpers.
+            const auto size = ir.invoke("%dx.types.Dimensions", "getDimensions", 72,
+                {{"%dx.types.Handle", h}, {"i32", "undef"}}, "nounwind readonly");
+            const auto bytes = ir.value("extractvalue %dx.types.Dimensions " + size + ", 0");
+            const auto in_view = cmp("ult", address, bytes); // aligned DWORD, raw view length is a multiple of 4
+            const auto fallback = (i.a & 0x4000) ? select(pixel_predicate, "0", value) : "";
+            const auto execute = ir.value("and i1 " + pixel_predicate + ", " + in_view);
+            ir.body << "  br i1 " << execute << ", label %atomic" << tag << ", label %atomicSkip" << tag
+                    << "\natomic" << tag << ":\n";
+            const auto previous = ir.invoke("i32", "atomicBinOp.i32", 78, args, "nounwind");
+            ir.body << "  br label %atomicEnd" << tag << "\natomicSkip" << tag
+                    << ":\n  br label %atomicEnd" << tag << "\natomicEnd" << tag << ":\n";
+            if (i.a & 0x4000) {
+                auto returned = ir.value("phi i32 [ " + previous + ", %atomic" + tag + " ], [ " +
+                                         fallback + ", %atomicSkip" + tag + " ]");
+                // Contention makes the old value varying even with uniform operands.
+                ir.dependencies[returned].set(128);
+                write(data, returned);
+            }
+            return;
+        }
         if (indexed) {
             if (i.a & 0x4000) {
                 auto out_of_range = ir.value("and i1 " + pred + ", " + ir.value("xor i1 " + in_range + ", true"));
@@ -2438,7 +2464,8 @@ struct DirectCompute {
         };
         if (n == "s_mov_b32" || n == "s_mov_b64") {
             const bool exec_hi = i.dst == 127 && (wave64 || (compute && n == "s_mov_b32"));
-            if (i.dst > 106 && i.dst != 126 && !(compute && i.dst == 107) && !exec_hi)
+            if (i.dst > 106 && i.dst != 126 && !(compute && i.dst == 107) && !exec_hi &&
+                !(compute && i.dst == 124 && n == "s_mov_b32"))
                 refuse(i.pc, "direct scalar move destination");
             if (i.src[0] <= 105 && !state[i.src[0]].numeric()) {
                 if (i.dst > 105)

@@ -1528,7 +1528,15 @@ the two recovery checks are its sole failures),
 `probe_readable` (invalid-pointer and zero-length refusals, multi-page reads, `PAGE_NOACCESS` /
 `MEM_RESERVE` prefix truncation, and `PAGE_GUARD` re-arming verified by `VirtualQuery` and a
 second probe), and `readable`/`writable` boundaries across `PAGE_READONLY`, `PAGE_READWRITE`,
-`PAGE_WRITECOPY`, `PAGE_NOACCESS`, `PAGE_GUARD`, and `MEM_RESERVE`. No GPU is required:
+`PAGE_WRITECOPY`, `PAGE_NOACCESS`, `PAGE_GUARD`, and `MEM_RESERVE`.
+A first-chance exception stops the whole process while a debugger is attached, so `probe_readable` and the fault-safe
+copies (`guarded_memcpy`: `copy_title_bytes`, the linear-buffer `guarded_copy`) first, when a debugger is attached or `X2W_PROBE_PRECHECK` is set to anything but `0` (read once; otherwise the plain touch / `__try` path runs at no extra cost), ask `VirtualQuery` (one entry per
+region, cached per thread) whether the source is in free address space (`MEM_FREE`) and refuse it with no exception.
+Reserved, committed, guard and no-access pages still go through the touch / `__try` path, because a reserved page may be
+a lazily committed xmem page that the fault handler commits on first touch; `__try` stays the last guard. The render
+totals line prints `reads refused before a fault <n>` after the textures count. The check adds an unmapped range
+that must return false and 0 with no exception seen by a vectored handler, for the probe and the copy, and counts the
+avoided faults. No GPU is required:
 
 ```powershell
 cmake --build --preset dev --target startup_local_log_check startup_local_log_cache_failure_check
@@ -1641,7 +1649,16 @@ handle returns `0x80004005`.
 The startup shader cache key includes the translator revision. After updating from
 an earlier translation revision, run the recording build once to emit
 requests, run `python tools/startup/gfx2hlsl.py --pending <cache-directory>`,
-then start the build again. The new key keeps the former bytecode and manifest
+then start the build again.
+The first request of a process also writes the runtime's revisions to `<cache-directory>/revision.txt`
+(`graphics`, `compute` and `mesh57` lines). With `-Render -Translate` (`--render --translate`),
+`run.ps1` and `run.sh` compare that file with the `gfx2hlsl.py` they start
+(`tools/startup/shader_cache_revision.py`) and print one warning naming both revisions when they differ,
+or when the cache holds requests but no `revision.txt`: every cached request would be refused as a key
+mismatch. The warning comes before the watcher starts, or after the run when the run's own stand-ins
+wrote the first `revision.txt`. Rebuild the stand-ins from the same checkout, or start with an empty cache:
+`-FreshShaderCache` (`--fresh-shader-cache`) moves a cache that is not empty to `<cache>.old-<date>-<time>` first
+([#2815](https://github.com/R0Y00/Xbox2Windows/issues/2815)). The new key keeps the former bytecode and manifest
 together under their original name. A 16-dword table load can contain two
 independent image descriptors at offsets 0 and 32 from the load address.
 For a read-only census of cached shader refusals, use `python -B tools/startup/gfx2hlsl.py --refusals <cache-directory> [--json]` with a translator that supports the flag. Earlier versions treat it as `--pending` and write into the directory. See [Startup translator refusal census](experiments.md#startup-translator-refusal-census).
