@@ -1,7 +1,7 @@
 //! `gameinput.dll`: input devices from the host. Gamepads come from XInput
 //! (host slots 0-3), with PS5 HID input when XInput reports no pads or both
 //! sources are explicitly requested. With no pad the keyboard drives one
-//! stand-in gamepad (`FALLBACK_BUTTONS`). The keyboard is a device of its own
+//! stand-in gamepad (`FALLBACK_BUTTONS`), and the mouse aims it (`mouse.rs`). The keyboard is a device of its own
 //! too. A poll thread turns host state into readings (a new one per change)
 //! and runs device callbacks on connect and disconnect.
 #![allow(non_snake_case)]
@@ -18,6 +18,7 @@ use std::sync::{Condvar, LazyLock, Mutex, MutexGuard, PoisonError};
 use std::thread::ThreadId;
 use std::time::{Duration, Instant};
 
+use super::mouse::Mouse;
 use super::xasync::{E_INVALIDARG, E_NOTIMPL};
 use super::xgameruntime::{HRESULT, S_OK};
 use crate::{HleExport, HleModule};
@@ -116,11 +117,17 @@ trait Source: Send {
     /// Keys held down: the keyboard's only while the title's window has
     /// focus, scripted ones (`VICTORY_KEYS_FILE`, `VICTORY_KEYS`) always.
     fn keys(&mut self) -> Vec<KeyState>;
+    /// The mouse for the stand-in pad (see `mouse.rs`); nothing unless the window has focus.
+    fn mouse(&mut self) -> Mouse {
+        Mouse::default()
+    }
     /// Motor speeds: low frequency (left), high frequency (right).
     fn rumble(&mut self, slot: usize, low: u16, high: u16);
 }
 
-fn fallback(keys: &[KeyState]) -> PadState {
+/// The stand-in pad from the keys and the mouse: the mouse's right button pulls the left trigger,
+/// its left button the right trigger, and its movement adds to the right stick (I/J/K/L).
+fn fallback(keys: &[KeyState], mouse: Mouse) -> PadState {
     // The controls are written for QWERTY; `keymap` says which key each one is on this keyboard.
     let on = |logical: u8| {
         let vk = super::keymap::resolve(logical);
@@ -135,12 +142,12 @@ fn fallback(keys: &[KeyState]) -> PadState {
             .iter()
             .filter(|(vk, _)| on(*vk) != 0.0)
             .fold(0, |all, (_, bit)| all | bit),
-        left_trigger: on(b'Z'),
-        right_trigger: on(b'C'),
+        left_trigger: f32::max(on(b'Z'), f32::from(u8::from(mouse.right))),
+        right_trigger: f32::max(on(b'C'), f32::from(u8::from(mouse.left))),
         left_x: on(b'D') - on(b'A'),
         left_y: on(b'W') - on(b'S'),
-        right_x: on(b'L') - on(b'J'),
-        right_y: on(b'I') - on(b'K'),
+        right_x: (on(b'L') - on(b'J') + mouse.x).clamp(-1.0, 1.0),
+        right_y: (on(b'I') - on(b'K') + mouse.y).clamp(-1.0, 1.0),
     }
 }
 
@@ -458,12 +465,12 @@ impl Hub {
 
     /// Reads the host once; device callbacks run on the calling thread.
     fn poll(&self) {
-        let (pads, keys) = {
+        let (pads, keys, mouse) = {
             let mut source = lock(&self.source);
             let pads: [_; PADS] = std::array::from_fn(|slot| source.pad(slot));
-            (pads, source.keys())
+            (pads, source.keys(), source.mouse())
         };
-        let events = self.state().poll(&self.devices, self.one_pad, pads, keys);
+        let events = self.state().poll(&self.devices, self.one_pad, pads, keys, mouse);
         self.deliver(events);
     }
 
@@ -509,11 +516,12 @@ impl State {
         one_pad: bool,
         pads: [Option<PadState>; PADS],
         keys: Vec<KeyState>,
+        mouse: Mouse,
     ) -> Vec<Event> {
         let now = now();
         let mut events = std::mem::take(&mut self.pending);
         if one_pad {
-            let pad = pads.into_iter().flatten().fold(fallback(&keys), merged);
+            let pad = pads.into_iter().flatten().fold(fallback(&keys, mouse), merged);
             self.update(devices, FALLBACK, Some(Value::Pad(pad)), now, &mut events);
             self.update(devices, KEYBOARD, Some(Value::Keys(keys)), now, &mut events);
             return events;
@@ -522,7 +530,7 @@ impl State {
         for (slot, pad) in pads.into_iter().enumerate() {
             self.update(devices, slot, pad.map(Value::Pad), now, &mut events);
         }
-        let fallback = (!any_pad).then(|| Value::Pad(fallback(&keys)));
+        let fallback = (!any_pad).then(|| Value::Pad(fallback(&keys, mouse)));
         self.update(devices, FALLBACK, fallback, now, &mut events);
         self.update(devices, KEYBOARD, Some(Value::Keys(keys)), now, &mut events);
         events
@@ -1296,6 +1304,10 @@ mod host {
                 .collect()
         }
 
+        fn mouse(&mut self) -> Mouse {
+            super::super::mouse::read(focused())
+        }
+
         fn rumble(&mut self, slot: usize, low: u16, high: u16) {
             let speeds = XINPUT_VIBRATION {
                 wLeftMotorSpeed: low,
@@ -1533,6 +1545,7 @@ mod tests {
     struct FakeHost {
         pads: [Option<PadState>; PADS],
         keys: Vec<KeyState>,
+        mouse: Mouse,
         rumble: Vec<(usize, u16, u16)>,
     }
 
@@ -1544,6 +1557,9 @@ mod tests {
         }
         fn keys(&mut self) -> Vec<KeyState> {
             self.0.lock().unwrap().keys.clone()
+        }
+        fn mouse(&mut self) -> Mouse {
+            self.0.lock().unwrap().mouse
         }
         fn rumble(&mut self, slot: usize, low: u16, high: u16) {
             self.0.lock().unwrap().rumble.push((slot, low, high));
@@ -1774,6 +1790,37 @@ mod tests {
         release(r);
         // A keyboard reading is no gamepad reading.
         assert_eq!(current(hub, GAMEPAD_KIND, KEYBOARD), Err(READING_NOT_FOUND));
+    }
+
+    #[test]
+    fn the_mouse_buttons_pull_the_triggers_and_its_movement_is_the_right_stick() {
+        let mouse = Mouse { left: true, right: true, x: 0.5, y: -0.25 };
+        let pad = fallback(&[], mouse);
+        assert_eq!(
+            (pad.left_trigger, pad.right_trigger, pad.right_x, pad.right_y),
+            (1.0, 1.0, 0.5, -0.25)
+        );
+        assert_eq!(fallback(&[], Mouse::default()), PadState::default());
+        // Keys and mouse add up, never past the stick's end; a key trigger and a button agree.
+        let keys = [key(b'L'), key(b'I'), key(b'Z')];
+        let pad = fallback(&keys, Mouse { x: 0.75, y: -0.5, ..Default::default() });
+        assert_eq!((pad.right_x, pad.right_y, pad.left_trigger), (1.0, 0.5, 1.0));
+    }
+
+    #[test]
+    fn the_mouse_reaches_the_stand_in_pad_alone_and_beside_a_host_pad() {
+        let (hub, host) = fake_with(true);
+        host.lock().unwrap().mouse = Mouse { left: true, right: false, x: 0.5, y: 0.0 };
+        hub.poll();
+        let r = current(hub, GAMEPAD_KIND, FALLBACK).unwrap();
+        assert_eq!((pad(r).right_trigger, pad(r).right_x), (1.0, 0.5));
+        release(r);
+        // A host pad's stick pushed further wins on that axis; the mouse's trigger still counts.
+        host.lock().unwrap().pads[0] = Some(PadState { right_x: -0.75, ..Default::default() });
+        hub.poll();
+        let r = current(hub, GAMEPAD_KIND, FALLBACK).unwrap();
+        assert_eq!((pad(r).right_trigger, pad(r).right_x), (1.0, -0.75));
+        release(r);
     }
 
     #[test]

@@ -391,8 +391,7 @@ mod tests {
             "enabling warm_first after an archives-only warm must warm the binaries once"
         );
 
-        // 2. When warm is needed and warm_first is on: ONE victory warm step, shaders.rpf once,
-        //    plus the game exe and two DLLs.
+        // 2. When warm is needed and warm_first is on: ONE victory warm step.
         plan.warm = Some(with_binaries);
         let mut steps = play_steps(&plan, true).expect("play steps");
         let warm_idx: Vec<usize> = steps
@@ -406,23 +405,13 @@ mod tests {
             1,
             "warm_first must not run two separate victory warm processes"
         );
+        // Vice-Tay's `warm` takes no archives (it remakes the pipelines earlier runs noted): the
+        // archives and binaries only enter the fingerprint, never the command line.
         let args = args_of(&steps[warm_idx[0]].command);
-        assert_eq!(
-            args.iter().filter(|a| a.ends_with("shaders.rpf")).count(),
-            1,
-            "shaders.rpf must appear only once in victory warm args: {args:?}"
+        assert!(
+            !args.iter().any(|a| [".rpf", ".exe", ".dll"].iter().any(|ext| a.ends_with(ext))),
+            "Vice-Tay's victory warm refuses file arguments: {args:?}"
         );
-        for binary in [
-            "common.rpf",
-            "game_scarlett_master.exe",
-            "XboxBvhBuilder.dll",
-            "amd_fidelityfx_upscaler_xbox.dll",
-        ] {
-            assert!(
-                args.iter().any(|a| a.ends_with(binary)),
-                "{binary} missing from warm args: {args:?}"
-            );
-        }
 
         // 3. After the combined warm writes its marker, the next launch skips warm completely.
         (steps[warm_idx[0]].after.take().expect("marker writer"))().expect("write marker");
