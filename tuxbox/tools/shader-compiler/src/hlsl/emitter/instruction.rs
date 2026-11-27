@@ -35,6 +35,9 @@ impl<'a> Emitter<'a> {
             reflection_far::emit(self, ins);
             return Ok(());
         }
+        if m == scarlett_rays::MNEMONIC {
+            return scarlett_rays::emit(self, ins);
+        }
         if m == "tb_radiance_query" {
             radiance_probe::emit(self, ins);
             return Ok(());
@@ -64,6 +67,14 @@ impl<'a> Emitter<'a> {
             "tb_indexed_readlane" => {
                 if self.hoisted_swizzle != Some(idx) { self.emit_indexed_read(idx, ins, &[])?; }
                 self.ws(&d.ok_or("missing lane-read destination")?, &format!("readlane{idx}"))?;
+                return Ok(());
+            }
+            mixed_lane::WRITE_LANE => {
+                // The selected physical lane is written even when guest EXEC disables it.
+                let value = r(&s[0])?;
+                let lane = r(&s[1])?;
+                let dst = d.ok_or("missing mixed lane destination")?;
+                self.ws(&dst, &format!("(WaveGetLaneIndex() == (({lane}) & 31u)) ? {value} : {}", r(&dst)?))?;
                 return Ok(());
             }
             indexed_lane::WAVE32_READ_LANE => {
