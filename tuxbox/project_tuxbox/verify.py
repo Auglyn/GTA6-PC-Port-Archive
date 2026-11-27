@@ -29,10 +29,10 @@ OPTIONAL_PROVIDERS = {"dxc-utils": "dxc-utils/dxcompiler.dll", "xg": "xg/xg_xs.d
 SUITES = (*BASE_SUITES, "d3d12-mesh", *OPTIONAL_PROVIDERS)
 # The scenarios of `lanes.exe --selftest`, one gate each.
 LANES_SCENARIOS = ("labels", "cross-queue", "compute-frame", "skipped-command", "copy-memory", "shared-texture",
-                   "indirect-dispatch", "gpu-indirect-dispatch",
+                   "indirect-dispatch", "gpu-indirect-dispatch", "gpu-indirect-order",
                    "dispatch-wait", "direct-copy-wait", "texture-readback", "texture-publication",
                    "ray-tracing-builder", "thread-dimensions",
-                   "descriptor-reclaim")
+                   "descriptor-reclaim", "unwritten-descriptors")
 
 
 class LanesShader:
@@ -489,7 +489,8 @@ def lanes_bindless_compute(host, check, gpu_args, pci, memory_symbols):
     descriptor table. Each runs with a roomy and a constrained resident limit.
     """
     from functools import partial
-    from examples.lanes.shader_fixture import bindless_compute_shader, bindless_sampler_shader
+    from examples.lanes.shader_fixture import (bindless_compute_shader, bindless_sampler_shader,
+                                               bindless_table_store_shader, bindless_texture_store_shader)
     from .runtime_shaders import shader_session
     from .shader_prep import SOURCE_CACHE
 
@@ -501,6 +502,9 @@ def lanes_bindless_compute(host, check, gpu_args, pci, memory_symbols):
         trials = [(scenario, hashlib.sha256(build()).hexdigest(), kind, limit)
                   for scenario, build in (("bindless-compute", bindless_compute_shader),
                                           ("bindless-sampler", bindless_sampler_shader),
+                                          ("bindless-heap-read", bindless_compute_shader),
+                                          ("bindless-texture-store", bindless_texture_store_shader),
+                                          ("bindless-table-store", bindless_table_store_shader),
                                           ("bindless-table-compute", partial(bindless_compute_shader, table=True)))
                   for kind, limit in (("wide", "1000000"), ("constrained", "64"))]
         for scenario, original, kind, limit in trials:
@@ -1153,6 +1157,7 @@ GATE_LABELS = {
     "lanes-selftest-indirect-dispatch": "ExecuteIndirect matching a direct dispatch",
     "lanes-selftest-direct-copy-wait": "A direct queue waiting before and after a buffer copy",
     "lanes-selftest-gpu-indirect-dispatch": "GPU-written arguments controlling an indirect dispatch",
+    "lanes-selftest-gpu-indirect-order": "Indirect arguments and counts read after the dispatch that wrote them",
     "lanes-selftest-dispatch-wait": "A memory wait before and after a compute dispatch",
     "lanes-selftest-texture-readback": "A guest texture copied back to title memory",
     "lanes-selftest-texture-publication": "GPU texture writes published to title memory, leaving padding, closed pages and memory past the texture alone",
@@ -1160,6 +1165,7 @@ GATE_LABELS = {
     "lanes-selftest-ray-tracing-builder": "Single, copied and batched builds through XboxBvhBuilder",
     "lanes-selftest-thread-dimensions": "Slot 80 thread-dimension dispatch converted using the bound PSO group size",
     "lanes-selftest-descriptor-reclaim": "Shader-visible descriptor slot reclamation across completed, in-flight, ClearState, and OOM lists",
+    "lanes-selftest-unwritten-descriptors": "A descriptor table with slots the title never wrote, in a heap whose title memory held leftover bytes",
     "lanes-shader-cache-prepared": "A console shader translated before launch, loaded from the prepared cache",
     "lanes-shader-cache-compiled": "A console shader translated by the host worker while the game runs",
     "lanes-shader-cache-reused": "The worker's translation reused on the next launch without compiling",
@@ -1179,6 +1185,12 @@ GATE_LABELS = {
     "lanes-bindless-sampler-constrained": "The same with fewer resident descriptors than the indices it uses",
     "lanes-bindless-table-compute-wide": "A direct-indexed compute program's heap UAV when its root also has a table",
     "lanes-bindless-table-compute-constrained": "The same with fewer resident descriptors than the index it uses",
+    "lanes-bindless-heap-read-wide": "A direct-indexed program with no image write leaving a heap UAV texture's title memory alone",
+    "lanes-bindless-heap-read-constrained": "The same with fewer resident descriptors than the indices in use",
+    "lanes-bindless-texture-store-wide": "A direct-indexed store to a heap UAV texture, published to title memory",
+    "lanes-bindless-texture-store-constrained": "The same with fewer resident descriptors than the index it uses",
+    "lanes-bindless-table-store-wide": "A table store under a direct-indexed root published alone, leaving another heap UAV texture's title memory alone",
+    "lanes-bindless-table-store-constrained": "The same with fewer resident descriptors than the indices in use",
     "lanes-package-replay": "Lanes gameplay replay (earlier guest with desktop graphics)", "cpu-replay": "8,388,608-move CPU replay",
 }
 
