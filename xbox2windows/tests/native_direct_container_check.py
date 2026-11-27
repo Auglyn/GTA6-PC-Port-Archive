@@ -319,6 +319,16 @@ def main():
         check("descriptor-saveexec-bypass", cs,
               compute(words(*address_field, 0xbf880001, saveexec, read_scc, end), table=True),
               "numeric SCC from a symbolic descriptor field")
+        pair_zero = [0xbe960380, 0xbe970380]  # s_mov_b32 s22, 0 / s23, 0 (both preserve SCC)
+        ff1_pair = 0xbe8e1416  # s_ff1_i32_b64 s14, s[22:23]
+        brev = 0xbe8f0b0e  # s_brev_b32 s15, s14
+        use_scan = 0x7e00020f  # v_mov_b32 v0, s15
+        select_scc = 0x85198e80  # s_cselect_b32 s25, 0, s14
+        check("descriptor-sop1-preserves-scc", cs,
+              compute(words(*address_field, *pair_zero, ff1_pair, brev, use_scan, end), table=True))
+        check("descriptor-sop1-before-scc-read", cs,
+              compute(words(*address_field, *pair_zero, ff1_pair, select_scc, end), table=True),
+              "numeric SCC from a symbolic descriptor field")
         # The previous symbolic SCC is dead at WQM. Reading it before WQM
         # must still refuse. The nonzero high word supplies the new SCC.
         numeric_wqm = [0xbe9a0380, 0xbe9b0381, 0xbe980a1a]  # s[24:25] = WQM(s[26:27])
@@ -421,6 +431,22 @@ def main():
         root_vs = vertex(constants=(0,2,1), program=[*root_load, 0x7e00020f, 0xf80008cf, 0, end])
         check("address-vs", "gfx1013-container-vs", root_vs)
         check("address-cs", cs, compute(words(*root_load, end), root_descriptor=True))
+        for offset in (106, 107):
+            check(f"wave64-smem-offset-{offset}", cs,
+                  compute(words(0xf4000200, offset << 25, end), threads=64,
+                          root_descriptor=True, wave32=False), "unsupported scalar memory addressing")
+        check("wave64-smem-vcc-dst", cs,
+              compute(words(0xf4000000 | 107 << 6, 125 << 25, end), threads=64,
+                      root_descriptor=True, wave32=False), "unsupported scalar memory destination range")
+        check("wave32-smem-cross-vcc", cs,
+              compute(words(0xf40c0000 | 104 << 6, 125 << 25, end), root_descriptor=True),
+              "unsupported scalar memory destination range")
+        # A descriptor into s[104:107] must tag both VCC words as nonnumeric.
+        for offset in (106, 107):
+            check(f"wave32-smem-symbolic-offset-{offset}", cs,
+                  compute(words(0xbe810380, 0xf4080000 | 104 << 6, 125 << 25,
+                                0xf4080200, offset << 25, end), table=True),
+                  f"unbound numeric SGPR s{offset}")
         wrong_high = [root_load[0], 0xbe830380, *root_load[1:], end]
         check("bad-address-cs", cs, compute(words(*wrong_high), root_descriptor=True), "mismatched root address high half")
         # Build a zero-stride byte-address descriptor in s[4:7]. The x8

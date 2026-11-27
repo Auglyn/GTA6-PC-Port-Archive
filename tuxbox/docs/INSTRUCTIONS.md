@@ -11,25 +11,25 @@ Every instruction the decoder names, from [AMD's machine-readable instruction se
 ## Summary
 
 - 1,085 instructions in 1,398 encodings.
-- 372 are used by the recorded shaders; a GPU check runs 188 of those.
+- 372 are used by the recorded shaders; a GPU check runs 260 of those.
 - 210 encodings have no translation, and 186 are unproven: alone they need a bound resource or a stage, and no recorded shader uses them.
 
 | Family | Encodings | Translates | Seen translating | Nothing to emit | Unproven | Not translated | Used | Used without a GPU check |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| [Scalar, two operands (SOP2)](#scalar-two-operands-sop2) | 51 | 51 | 0 | 0 | 0 | 0 | 29 | 5 |
-| [Scalar with a constant (SOPK)](#scalar-with-a-constant-sopk) | 27 | 19 | 0 | 5 | 0 | 3 | 11 | 9 |
-| [Scalar, one operand (SOP1)](#scalar-one-operand-sop1) | 65 | 44 | 0 | 2 | 13 | 6 | 24 | 7 |
-| [Scalar compare (SOPC)](#scalar-compare-sopc) | 18 | 16 | 0 | 0 | 2 | 0 | 12 | 2 |
+| [Scalar, two operands (SOP2)](#scalar-two-operands-sop2) | 51 | 51 | 0 | 0 | 0 | 0 | 29 | 0 |
+| [Scalar with a constant (SOPK)](#scalar-with-a-constant-sopk) | 27 | 19 | 0 | 5 | 0 | 3 | 11 | 1 |
+| [Scalar, one operand (SOP1)](#scalar-one-operand-sop1) | 65 | 44 | 0 | 2 | 13 | 6 | 24 | 4 |
+| [Scalar compare (SOPC)](#scalar-compare-sopc) | 18 | 16 | 0 | 0 | 2 | 0 | 12 | 0 |
 | [Program control (SOPP)](#program-control-sopp) | 37 | 11 | 0 | 6 | 1 | 19 | 12 | 1 |
-| [Scalar memory (SMEM)](#scalar-memory-smem) | 20 | 0 | 5 | 5 | 0 | 10 | 9 | 5 |
-| [Vector, two operands (VOP2)](#vector-two-operands-vop2) | 50 | 49 | 0 | 0 | 0 | 1 | 38 | 14 |
-| [Vector, one operand (VOP1)](#vector-one-operand-vop1) | 81 | 72 | 0 | 1 | 0 | 8 | 41 | 21 |
-| [Vector compare (VOPC)](#vector-compare-vopc) | 190 | 190 | 0 | 0 | 0 | 0 | 61 | 34 |
-| [Vector, three operands (VOP3 and VOP3P)](#vector-three-operands-vop3-and-vop3p) | 457 | 421 | 7 | 1 | 1 | 27 | 199 | 94 |
+| [Scalar memory (SMEM)](#scalar-memory-smem) | 20 | 0 | 5 | 5 | 0 | 10 | 9 | 1 |
+| [Vector, two operands (VOP2)](#vector-two-operands-vop2) | 50 | 49 | 0 | 0 | 0 | 1 | 38 | 9 |
+| [Vector, one operand (VOP1)](#vector-one-operand-vop1) | 81 | 72 | 0 | 1 | 0 | 8 | 41 | 10 |
+| [Vector compare (VOPC)](#vector-compare-vopc) | 190 | 190 | 0 | 0 | 0 | 0 | 61 | 16 |
+| [Vector, three operands (VOP3 and VOP3P)](#vector-three-operands-vop3-and-vop3p) | 457 | 421 | 7 | 1 | 1 | 27 | 199 | 51 |
 | [Interpolation (VINTRP)](#interpolation-vintrp) | 3 | 0 | 3 | 0 | 0 | 0 | 3 | 3 |
 | [Group memory (DS)](#group-memory-ds) | 123 | 36 | 0 | 0 | 0 | 87 | 17 | 13 |
 | [Flat, global and scratch memory (FLAT)](#flat-global-and-scratch-memory-flat) | 54 | 0 | 5 | 0 | 0 | 49 | 5 | 5 |
-| [Untyped buffers (MUBUF)](#untyped-buffers-mubuf) | 75 | 2 | 25 | 0 | 48 | 0 | 25 | 20 |
+| [Untyped buffers (MUBUF)](#untyped-buffers-mubuf) | 75 | 2 | 25 | 0 | 48 | 0 | 25 | 15 |
 | [Typed buffers (MTBUF)](#typed-buffers-mtbuf) | 16 | 0 | 4 | 0 | 12 | 0 | 4 | 4 |
 | [Images (MIMG)](#images-mimg) | 130 | 0 | 21 | 0 | 109 | 0 | 21 | 16 |
 | [Export (EXP)](#export-exp) | 1 | 0 | 1 | 0 | 0 | 0 | 1 | 0 |
@@ -41,114 +41,50 @@ Most used first. Each needs a check before it can be trusted.
 | Instruction | Recorded shaders |
 | --- | ---: |
 | `s_inst_prefetch` | 44,348 |
-| `v_mul_legacy_f32` | 42,291 |
-| `v_fmac_f32` | 40,834 |
-| `s_buffer_load_dwordx4` | 38,501 |
-| `s_buffer_load_dwordx2` | 36,397 |
-| `v_cvt_f32_ubyte0` | 30,666 |
-| `v_rsq_f32` | 29,517 |
-| `v_cvt_f32_ubyte1` | 25,905 |
-| `s_buffer_load_dwordx8` | 25,251 |
-| `buffer_load_dwordx2` | 25,203 |
-| `s_buffer_load_dwordx16` | 25,005 |
-| `s_cselect_b64` | 24,269 |
-| `v_cos_f32` | 22,422 |
-| `v_sin_f32` | 21,597 |
-| `v_fract_f32` | 21,273 |
-| `v_cmpx_gt_f32` | 20,029 |
 | `v_fma_mix_f32` | 19,544 |
-| `v_cmpx_lg_f32` | 18,860 |
 | `tbuffer_load_format_xy` | 18,506 |
-| `v_cvt_f32_ubyte2` | 18,394 |
-| `v_cmpx_lt_f32` | 18,177 |
-| `v_exp_f32` | 16,838 |
-| `v_cmpx_gt_i32` | 16,728 |
-| `v_log_f32` | 16,467 |
-| `v_rcp_iflag_f32` | 16,447 |
-| `v_med3_f32` | 16,315 |
-| `v_mad_f32` | 16,229 |
-| `s_addk_i32` | 15,890 |
-| `v_cvt_f32_ubyte3` | 15,414 |
-| `v_perm_b32` | 15,101 |
-| `v_cmp_class_f32` | 14,454 |
-| `v_mac_f32` | 14,311 |
-| `buffer_load_dwordx3` | 13,984 |
 | `v_interp_p1_f32` | 13,513 |
 | `v_interp_p2_f32` | 13,513 |
-| `v_mad_legacy_f32` | 13,466 |
 | `v_cvt_pkrtz_f16_f32` | 12,303 |
 | `tbuffer_load_format_xyzw` | 12,152 |
 | `image_sample_l` | 12,138 |
-| `v_fmaak_f32` | 11,208 |
-| `s_xor_b64` | 11,139 |
-| `v_cmpx_le_f32` | 9,909 |
-| `v_cmpx_ge_f32` | 9,272 |
-| `v_cmpx_lt_i32` | 9,173 |
 | `image_gather4_lz` | 8,973 |
-| `v_madak_f32` | 8,938 |
 | `image_sample_c_lz` | 8,535 |
 | `v_fma_mixlo_f16` | 8,396 |
 | `v_pack_b32_f16` | 7,538 |
-| `s_mulk_i32` | 7,107 |
 | `buffer_store_format_xyzw` | 6,550 |
-| `buffer_load_format_xyz` | 6,430 |
-| `v_cubema_f32` | 6,166 |
-| `v_cubesc_f32` | 6,166 |
-| `v_cubetc_f32` | 6,166 |
-| `v_cubeid_f32` | 6,149 |
-| `v_xad_u32` | 5,445 |
 | `v_interp_p2_f16` | 5,435 |
 | `tbuffer_load_format_xyz` | 5,231 |
 | `s_wqm_b32` | 5,089 |
-| `v_cmpx_eq_f32` | 4,829 |
-| `s_cmpk_lg_i32` | 4,408 |
 | `v_interp_mov_f32` | 4,326 |
-| `buffer_load_format_xy` | 4,272 |
-| `v_bcnt_u32_b32` | 3,605 |
-| `s_cmpk_eq_i32` | 3,397 |
 | `image_sample_d` | 3,149 |
-| `v_cmpx_neq_f32` | 2,895 |
 | `buffer_atomic_umin` | 2,388 |
 | `s_andn2_wrexec_b64` | 2,225 |
-| `s_bitset0_b32` | 2,034 |
 | `v_fma_mixhi_f16` | 1,946 |
-| `s_addc_u32` | 1,787 |
-| `s_bitset1_b32` | 1,591 |
 | `buffer_store_dwordx3` | 1,530 |
 | `image_atomic_or` | 1,094 |
-| `buffer_load_format_xyzw` | 1,075 |
 | `image_atomic_umin` | 1,066 |
 | `buffer_store_dwordx4` | 1,048 |
 | `image_sample_b` | 1,034 |
 | `ds_write2_b32` | 1,018 |
 | `image_atomic_umax` | 1,014 |
-| `s_cmpk_eq_u32` | 1,007 |
 | `ds_read2_b32` | 1,000 |
 | `image_load_mip` | 770 |
-| `v_cmpx_nle_f32` | 762 |
-| `v_bfm_b32` | 732 |
-| `s_lshl_b64` | 712 |
 | `v_cvt_pk_u8_f32` | 686 |
 | `s_swappc_b64` | 679 |
 | `image_get_lod` | 672 |
 | `v_lshlrev_b64` | 602 |
 | `v_cmp_lt_f16` | 588 |
 | `flat_load_dwordx2` | 537 |
-| `v_cmpx_nge_f32` | 519 |
 | `flat_load_dword` | 500 |
 | `image_get_resinfo` | 475 |
 | `buffer_store_dwordx2` | 462 |
-| `s_cmp_eq_u64` | 448 |
 | `v_cmp_ne_u64` | 448 |
 | `v_cmp_eq_u64` | 436 |
 | `v_cmp_gt_f16` | 369 |
-| `s_cmpk_gt_i32` | 354 |
-| `v_cmpx_ngt_f32` | 344 |
-| `v_cmpx_ge_i32` | 339 |
 | `tbuffer_load_format_x` | 316 |
 | `v_cmpx_lt_f16` | 286 |
 | `v_fmac_f16` | 284 |
-| `v_cmpx_le_u32` | 282 |
 | `ds_write2st64_b32` | 268 |
 | `v_fma_f16` | 230 |
 | `v_cmp_neq_f16` | 219 |
@@ -157,16 +93,13 @@ Most used first. Each needs a check before it can be trusted.
 | `ds_read2st64_b32` | 180 |
 | `s_waitcnt_vscnt` | 180 |
 | `v_pk_add_f16` | 174 |
-| `s_cmpk_gt_u32` | 167 |
 | `s_load_dwordx2` | 158 |
 | `v_pk_fma_f16` | 156 |
 | `ds_add_rtn_u32` | 154 |
-| `v_cmpx_le_i32` | 144 |
 | `ds_or_b32` | 142 |
 | `v_pk_mul_f16` | 138 |
 | `buffer_store_format_d16_xyzw` | 132 |
 | `ds_min_u32` | 128 |
-| `v_cmpx_ge_u32` | 124 |
 | `v_movrels_b32` | 118 |
 | `buffer_atomic_cmpswap` | 108 |
 | `v_add_f16` | 108 |
@@ -184,10 +117,8 @@ Most used first. Each needs a check before it can be trusted.
 | `v_cmpx_gt_f16` | 62 |
 | `image_sample_d_cl` | 48 |
 | `buffer_atomic_umax` | 46 |
-| `v_cmpx_nlt_f32` | 46 |
 | `buffer_atomic_smax` | 34 |
 | `ds_write_b16` | 34 |
-| `s_abs_i32` | 34 |
 | `v_cmpx_ge_f16` | 34 |
 | `v_movreld_b32` | 34 |
 | `ds_read_u16` | 32 |
@@ -200,14 +131,11 @@ Most used first. Each needs a check before it can be trusted.
 | `v_med3_f16` | 22 |
 | `flat_load_dwordx4` | 21 |
 | `v_cmp_nlt_f16` | 16 |
-| `s_lshr_b64` | 14 |
 | `v_pk_max_f16` | 14 |
 | `image_gather4_lz_o` | 12 |
-| `s_cmp_lg_u64` | 12 |
 | `v_exp_f16` | 12 |
 | `v_max_f16` | 12 |
 | `v_pk_min_f16` | 10 |
-| `s_cmpk_lt_u32` | 8 |
 | `v_cmp_le_f16` | 8 |
 | `v_sqrt_f16` | 8 |
 | `s_setpc_b64` | 6 |
@@ -233,36 +161,36 @@ Most used first. Each needs a check before it can be trusted.
 | `s_sub_u32` | 0x1 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | — |
 | `s_add_i32` | 0x2 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 37,128 |
 | `s_sub_i32` | 0x3 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 12,875 |
-| `s_addc_u32` | 0x4 | Yes | — | 1,787 |
-| `s_subb_u32` | 0x5 | Yes | — | — |
+| `s_addc_u32` | 0x4 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 1,787 |
+| `s_subb_u32` | 0x5 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | — |
 | `s_min_i32` | 0x6 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 92 |
 | `s_min_u32` | 0x7 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 2,639 |
 | `s_max_i32` | 0x8 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 129 |
 | `s_max_u32` | 0x9 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 166 |
 | `s_cselect_b32` | 0xa | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 25,418 |
-| `s_cselect_b64` | 0xb | Yes | — | 24,269 |
+| `s_cselect_b64` | 0xb | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 24,269 |
 | `s_and_b32` | 0xe | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 36,240 |
 | `s_and_b64` | 0xf | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 26,683 |
 | `s_or_b32` | 0x10 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 30,412 |
 | `s_or_b64` | 0x11 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 13,068 |
 | `s_xor_b32` | 0x12 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 10,635 |
-| `s_xor_b64` | 0x13 | Yes | — | 11,139 |
+| `s_xor_b64` | 0x13 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 11,139 |
 | `s_andn2_b32` | 0x14 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 9,617 |
 | `s_andn2_b64` | 0x15 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 23,336 |
 | `s_orn2_b32` | 0x16 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 8 |
-| `s_orn2_b64` | 0x17 | Yes | — | — |
+| `s_orn2_b64` | 0x17 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | — |
 | `s_nand_b32` | 0x18 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | — |
-| `s_nand_b64` | 0x19 | Yes | — | — |
+| `s_nand_b64` | 0x19 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | — |
 | `s_nor_b32` | 0x1a | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | — |
-| `s_nor_b64` | 0x1b | Yes | — | — |
+| `s_nor_b64` | 0x1b | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | — |
 | `s_xnor_b32` | 0x1c | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | — |
-| `s_xnor_b64` | 0x1d | Yes | — | — |
+| `s_xnor_b64` | 0x1d | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | — |
 | `s_lshl_b32` | 0x1e | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 37,628 |
-| `s_lshl_b64` | 0x1f | Yes | — | 712 |
+| `s_lshl_b64` | 0x1f | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 712 |
 | `s_lshr_b32` | 0x20 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 32,325 |
-| `s_lshr_b64` | 0x21 | Yes | — | 14 |
+| `s_lshr_b64` | 0x21 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 14 |
 | `s_ashr_i32` | 0x22 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 944 |
-| `s_ashr_i64` | 0x23 | Yes | — | — |
+| `s_ashr_i64` | 0x23 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | — |
 | `s_bfm_b32` | 0x24 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 833 |
 | `s_bfm_b64` | 0x25 | Yes | — | — |
 | `s_mul_i32` | 0x26 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 29,832 |
@@ -288,20 +216,20 @@ Most used first. Each needs a check before it can be trusted.
 | `s_movk_i32` | 0x0 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 20,137 |
 | `s_version` | 0x1 | Nothing to emit | — | — |
 | `s_cmovk_i32` | 0x2 | Yes | — | — |
-| `s_cmpk_eq_i32` | 0x3 | Yes | — | 3,397 |
-| `s_cmpk_lg_i32` | 0x4 | Yes | — | 4,408 |
-| `s_cmpk_gt_i32` | 0x5 | Yes | — | 354 |
-| `s_cmpk_ge_i32` | 0x6 | Yes | — | — |
-| `s_cmpk_lt_i32` | 0x7 | Yes | — | — |
-| `s_cmpk_le_i32` | 0x8 | Yes | — | — |
-| `s_cmpk_eq_u32` | 0x9 | Yes | — | 1,007 |
-| `s_cmpk_lg_u32` | 0xa | Yes | — | — |
-| `s_cmpk_gt_u32` | 0xb | Yes | — | 167 |
-| `s_cmpk_ge_u32` | 0xc | Yes | — | — |
-| `s_cmpk_lt_u32` | 0xd | Yes | — | 8 |
-| `s_cmpk_le_u32` | 0xe | Yes | — | — |
-| `s_addk_i32` | 0xf | Yes | — | 15,890 |
-| `s_mulk_i32` | 0x10 | Yes | — | 7,107 |
+| `s_cmpk_eq_i32` | 0x3 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 3,397 |
+| `s_cmpk_lg_i32` | 0x4 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 4,408 |
+| `s_cmpk_gt_i32` | 0x5 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 354 |
+| `s_cmpk_ge_i32` | 0x6 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | — |
+| `s_cmpk_lt_i32` | 0x7 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | — |
+| `s_cmpk_le_i32` | 0x8 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | — |
+| `s_cmpk_eq_u32` | 0x9 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 1,007 |
+| `s_cmpk_lg_u32` | 0xa | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | — |
+| `s_cmpk_gt_u32` | 0xb | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 167 |
+| `s_cmpk_ge_u32` | 0xc | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | — |
+| `s_cmpk_lt_u32` | 0xd | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 8 |
+| `s_cmpk_le_u32` | 0xe | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | — |
+| `s_addk_i32` | 0xf | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 15,890 |
+| `s_mulk_i32` | 0x10 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 7,107 |
 | `s_getreg_b32` | 0x12 | Yes | — | — |
 | `s_setreg_b32` | 0x13 | Yes | — | — |
 | `s_setreg_imm32_b32` | 0x15 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 28,099 |
@@ -341,9 +269,9 @@ Most used first. Each needs a check before it can be trusted.
 | `s_flbit_i32_i64` | 0x18 | Unproven: s_flbit_i32_i64 needs proven ordinary scalar operands (not a wave mask) | — | — |
 | `s_sext_i32_i8` | 0x19 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | — |
 | `s_sext_i32_i16` | 0x1a | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | — |
-| `s_bitset0_b32` | 0x1b | Yes | — | 2,034 |
+| `s_bitset0_b32` | 0x1b | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 2,034 |
 | `s_bitset0_b64` | 0x1c | Unproven: s_bitset0_b64 needs proven ordinary scalar operands (not a wave mask) | — | — |
-| `s_bitset1_b32` | 0x1d | Yes | — | 1,591 |
+| `s_bitset1_b32` | 0x1d | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 1,591 |
 | `s_bitset1_b64` | 0x1e | Unproven: s_bitset1_b64 needs proven ordinary scalar operands (not a wave mask) | — | — |
 | `s_getpc_b64` | 0x1f | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 1,787 |
 | `s_setpc_b64` | 0x20 | Nothing to emit | — | 6 |
@@ -363,7 +291,7 @@ Most used first. Each needs a check before it can be trusted.
 | `s_movrels_b64` | 0x2f | **No** | — | — |
 | `s_movreld_b32` | 0x30 | **No** | — | — |
 | `s_movreld_b64` | 0x31 | **No** | — | — |
-| `s_abs_i32` | 0x34 | Yes | — | 34 |
+| `s_abs_i32` | 0x34 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 34 |
 | `s_andn1_saveexec_b64` | 0x37 | Yes | — | — |
 | `s_orn1_saveexec_b64` | 0x38 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | — |
 | `s_andn1_wrexec_b64` | 0x39 | Yes | — | — |
@@ -403,8 +331,8 @@ Most used first. Each needs a check before it can be trusted.
 | `s_bitcmp1_b32` | 0xd | Yes | — | — |
 | `s_bitcmp0_b64` | 0xe | Unproven: s_bitcmp0_b64 needs proven ordinary scalar operands (not a wave mask) | — | — |
 | `s_bitcmp1_b64` | 0xf | Unproven: s_bitcmp1_b64 needs proven ordinary scalar operands (not a wave mask) | — | — |
-| `s_cmp_eq_u64` | 0x12 | Yes | — | 448 |
-| `s_cmp_lg_u64` | 0x13 | Yes | — | 12 |
+| `s_cmp_eq_u64` | 0x12 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 448 |
+| `s_cmp_lg_u64` | 0x13 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 12 |
 
 ## Program control (SOPP)
 
@@ -461,10 +389,10 @@ Most used first. Each needs a check before it can be trusted.
 | `s_scratch_load_dwordx2` | 0x6 | **No** | — | — |
 | `s_scratch_load_dwordx4` | 0x7 | **No** | — | — |
 | `s_buffer_load_dword` | 0x8 | Yes, in recorded shaders | AMD 1002:13c0, NVIDIA 10de:2705 | 40,775 |
-| `s_buffer_load_dwordx2` | 0x9 | Yes, in recorded shaders | — | 36,397 |
-| `s_buffer_load_dwordx4` | 0xa | Yes, in recorded shaders | — | 38,501 |
-| `s_buffer_load_dwordx8` | 0xb | Yes, in recorded shaders | — | 25,251 |
-| `s_buffer_load_dwordx16` | 0xc | Yes, in recorded shaders | — | 25,005 |
+| `s_buffer_load_dwordx2` | 0x9 | Yes, in recorded shaders | AMD 1002:13c0, NVIDIA 10de:2705 | 36,397 |
+| `s_buffer_load_dwordx4` | 0xa | Yes, in recorded shaders | AMD 1002:13c0, NVIDIA 10de:2705 | 38,501 |
+| `s_buffer_load_dwordx8` | 0xb | Yes, in recorded shaders | AMD 1002:13c0, NVIDIA 10de:2705 | 25,251 |
+| `s_buffer_load_dwordx16` | 0xc | Yes, in recorded shaders | AMD 1002:13c0, NVIDIA 10de:2705 | 25,005 |
 | `s_gl1_inv` | 0x1f | **No** | — | — |
 | `s_dcache_inv` | 0x20 | **No** | — | — |
 | `s_memtime` | 0x24 | **No** | — | — |
@@ -482,8 +410,8 @@ Most used first. Each needs a check before it can be trusted.
 | `v_add_f32` | 0x3 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 39,754 |
 | `v_sub_f32` | 0x4 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 36,106 |
 | `v_subrev_f32` | 0x5 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 23,601 |
-| `v_mac_legacy_f32` | 0x6 | Yes | — | — |
-| `v_mul_legacy_f32` | 0x7 | Yes | — | 42,291 |
+| `v_mac_legacy_f32` | 0x6 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | — |
+| `v_mul_legacy_f32` | 0x7 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 42,291 |
 | `v_mul_f32` | 0x8 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 17,824 |
 | `v_mul_i32_i24` | 0x9 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 12 |
 | `v_mul_hi_i32_i24` | 0xa | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | — |
@@ -503,18 +431,18 @@ Most used first. Each needs a check before it can be trusted.
 | `v_or_b32` | 0x1c | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 18,176 |
 | `v_xor_b32` | 0x1d | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 11,671 |
 | `v_xnor_b32` | 0x1e | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 6 |
-| `v_mac_f32` | 0x1f | Yes | — | 14,311 |
-| `v_madmk_f32` | 0x20 | Yes | — | — |
-| `v_madak_f32` | 0x21 | Yes | — | 8,938 |
+| `v_mac_f32` | 0x1f | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 14,311 |
+| `v_madmk_f32` | 0x20 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | — |
+| `v_madak_f32` | 0x21 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 8,938 |
 | `v_add_nc_u32` | 0x25 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 34,893 |
 | `v_sub_nc_u32` | 0x26 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 17,696 |
 | `v_subrev_nc_u32` | 0x27 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 14,503 |
 | `v_add_co_ci_u32` | 0x28 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 2,782 |
 | `v_sub_co_ci_u32` | 0x29 | Yes | — | 24 |
 | `v_subrev_co_ci_u32` | 0x2a | Yes | — | 96 |
-| `v_fmac_f32` | 0x2b | Yes | — | 40,834 |
+| `v_fmac_f32` | 0x2b | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 40,834 |
 | `v_fmamk_f32` | 0x2c | Yes | — | — |
-| `v_fmaak_f32` | 0x2d | Yes | — | 11,208 |
+| `v_fmaak_f32` | 0x2d | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 11,208 |
 | `v_cvt_pkrtz_f16_f32` | 0x2f | Yes | — | 12,303 |
 | `v_add_f16` | 0x32 | Yes | — | 108 |
 | `v_sub_f16` | 0x33 | Yes | — | 108 |
@@ -548,10 +476,10 @@ Most used first. Each needs a check before it can be trusted.
 | `v_cvt_off_f32_i4` | 0xe | Yes | — | — |
 | `v_cvt_f32_f64` | 0xf | Yes | — | — |
 | `v_cvt_f64_f32` | 0x10 | Yes | — | — |
-| `v_cvt_f32_ubyte0` | 0x11 | Yes | — | 30,666 |
-| `v_cvt_f32_ubyte1` | 0x12 | Yes | — | 25,905 |
-| `v_cvt_f32_ubyte2` | 0x13 | Yes | — | 18,394 |
-| `v_cvt_f32_ubyte3` | 0x14 | Yes | — | 15,414 |
+| `v_cvt_f32_ubyte0` | 0x11 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 30,666 |
+| `v_cvt_f32_ubyte1` | 0x12 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 25,905 |
+| `v_cvt_f32_ubyte2` | 0x13 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 18,394 |
+| `v_cvt_f32_ubyte3` | 0x14 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 15,414 |
 | `v_cvt_u32_f64` | 0x15 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | — |
 | `v_cvt_f64_u32` | 0x16 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | — |
 | `v_trunc_f64` | 0x17 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | — |
@@ -559,22 +487,22 @@ Most used first. Each needs a check before it can be trusted.
 | `v_rndne_f64` | 0x19 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | — |
 | `v_floor_f64` | 0x1a | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | — |
 | `v_pipeflush` | 0x1b | **No** | — | — |
-| `v_fract_f32` | 0x20 | Yes | — | 21,273 |
+| `v_fract_f32` | 0x20 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 21,273 |
 | `v_trunc_f32` | 0x21 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 26,964 |
 | `v_ceil_f32` | 0x22 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 5,487 |
 | `v_rndne_f32` | 0x23 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 11,248 |
 | `v_floor_f32` | 0x24 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 13,260 |
-| `v_exp_f32` | 0x25 | Yes | — | 16,838 |
-| `v_log_f32` | 0x27 | Yes | — | 16,467 |
+| `v_exp_f32` | 0x25 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 16,838 |
+| `v_log_f32` | 0x27 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 16,467 |
 | `v_rcp_f32` | 0x2a | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 30,995 |
-| `v_rcp_iflag_f32` | 0x2b | Yes | — | 16,447 |
-| `v_rsq_f32` | 0x2e | Yes | — | 29,517 |
+| `v_rcp_iflag_f32` | 0x2b | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 16,447 |
+| `v_rsq_f32` | 0x2e | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 29,517 |
 | `v_rcp_f64` | 0x2f | **No** | — | — |
 | `v_rsq_f64` | 0x31 | **No** | — | — |
 | `v_sqrt_f32` | 0x33 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 26,602 |
 | `v_sqrt_f64` | 0x34 | **No** | — | — |
-| `v_sin_f32` | 0x35 | Yes | — | 21,597 |
-| `v_cos_f32` | 0x36 | Yes | — | 22,422 |
+| `v_sin_f32` | 0x35 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 21,597 |
+| `v_cos_f32` | 0x36 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 22,422 |
 | `v_not_b32` | 0x37 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 206 |
 | `v_bfrev_b32` | 0x38 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 4,386 |
 | `v_ffbh_u32` | 0x39 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 112 |
@@ -635,20 +563,20 @@ Most used first. Each needs a check before it can be trusted.
 | `v_cmp_nlt_f32` | 0xe | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 6,606 |
 | `v_cmp_tru_f32` | 0xf | Yes | — | — |
 | `v_cmpx_f_f32` | 0x10 | Yes | — | — |
-| `v_cmpx_lt_f32` | 0x11 | Yes | — | 18,177 |
-| `v_cmpx_eq_f32` | 0x12 | Yes | — | 4,829 |
-| `v_cmpx_le_f32` | 0x13 | Yes | — | 9,909 |
-| `v_cmpx_gt_f32` | 0x14 | Yes | — | 20,029 |
-| `v_cmpx_lg_f32` | 0x15 | Yes | — | 18,860 |
-| `v_cmpx_ge_f32` | 0x16 | Yes | — | 9,272 |
-| `v_cmpx_o_f32` | 0x17 | Yes | — | — |
-| `v_cmpx_u_f32` | 0x18 | Yes | — | — |
-| `v_cmpx_nge_f32` | 0x19 | Yes | — | 519 |
+| `v_cmpx_lt_f32` | 0x11 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 18,177 |
+| `v_cmpx_eq_f32` | 0x12 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 4,829 |
+| `v_cmpx_le_f32` | 0x13 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 9,909 |
+| `v_cmpx_gt_f32` | 0x14 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 20,029 |
+| `v_cmpx_lg_f32` | 0x15 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 18,860 |
+| `v_cmpx_ge_f32` | 0x16 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 9,272 |
+| `v_cmpx_o_f32` | 0x17 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | — |
+| `v_cmpx_u_f32` | 0x18 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | — |
+| `v_cmpx_nge_f32` | 0x19 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 519 |
 | `v_cmpx_nlg_f32` | 0x1a | Yes | — | — |
-| `v_cmpx_ngt_f32` | 0x1b | Yes | — | 344 |
-| `v_cmpx_nle_f32` | 0x1c | Yes | — | 762 |
-| `v_cmpx_neq_f32` | 0x1d | Yes | — | 2,895 |
-| `v_cmpx_nlt_f32` | 0x1e | Yes | — | 46 |
+| `v_cmpx_ngt_f32` | 0x1b | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 344 |
+| `v_cmpx_nle_f32` | 0x1c | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 762 |
+| `v_cmpx_neq_f32` | 0x1d | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 2,895 |
+| `v_cmpx_nlt_f32` | 0x1e | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 46 |
 | `v_cmpx_tru_f32` | 0x1f | Yes | — | — |
 | `v_cmp_f_f64` | 0x20 | Yes | — | — |
 | `v_cmp_lt_f64` | 0x21 | Yes | — | — |
@@ -690,7 +618,7 @@ Most used first. Each needs a check before it can be trusted.
 | `v_cmp_ne_i32` | 0x85 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | — |
 | `v_cmp_ge_i32` | 0x86 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 116 |
 | `v_cmp_t_i32` | 0x87 | Yes | — | — |
-| `v_cmp_class_f32` | 0x88 | Yes | — | 14,454 |
+| `v_cmp_class_f32` | 0x88 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 14,454 |
 | `v_cmp_lt_i16` | 0x89 | Yes | — | — |
 | `v_cmp_eq_i16` | 0x8a | Yes | — | — |
 | `v_cmp_le_i16` | 0x8b | Yes | — | — |
@@ -699,12 +627,12 @@ Most used first. Each needs a check before it can be trusted.
 | `v_cmp_ge_i16` | 0x8e | Yes | — | — |
 | `v_cmp_class_f16` | 0x8f | Yes | — | — |
 | `v_cmpx_f_i32` | 0x90 | Yes | — | — |
-| `v_cmpx_lt_i32` | 0x91 | Yes | — | 9,173 |
+| `v_cmpx_lt_i32` | 0x91 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 9,173 |
 | `v_cmpx_eq_i32` | 0x92 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 692 |
-| `v_cmpx_le_i32` | 0x93 | Yes | — | 144 |
-| `v_cmpx_gt_i32` | 0x94 | Yes | — | 16,728 |
-| `v_cmpx_ne_i32` | 0x95 | Yes | — | — |
-| `v_cmpx_ge_i32` | 0x96 | Yes | — | 339 |
+| `v_cmpx_le_i32` | 0x93 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 144 |
+| `v_cmpx_gt_i32` | 0x94 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 16,728 |
+| `v_cmpx_ne_i32` | 0x95 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | — |
+| `v_cmpx_ge_i32` | 0x96 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 339 |
 | `v_cmpx_t_i32` | 0x97 | Yes | — | — |
 | `v_cmpx_class_f32` | 0x98 | Yes | — | — |
 | `v_cmpx_lt_i16` | 0x99 | Yes | — | — |
@@ -763,10 +691,10 @@ Most used first. Each needs a check before it can be trusted.
 | `v_cmpx_f_u32` | 0xd0 | Yes | — | — |
 | `v_cmpx_lt_u32` | 0xd1 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 5,953 |
 | `v_cmpx_eq_u32` | 0xd2 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 21,175 |
-| `v_cmpx_le_u32` | 0xd3 | Yes | — | 282 |
+| `v_cmpx_le_u32` | 0xd3 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 282 |
 | `v_cmpx_gt_u32` | 0xd4 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 22,295 |
 | `v_cmpx_ne_u32` | 0xd5 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 18,859 |
-| `v_cmpx_ge_u32` | 0xd6 | Yes | — | 124 |
+| `v_cmpx_ge_u32` | 0xd6 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 124 |
 | `v_cmpx_t_u32` | 0xd7 | Yes | — | — |
 | `v_cmpx_f_f16` | 0xd8 | Yes | — | — |
 | `v_cmpx_lt_f16` | 0xd9 | Yes | — | 286 |
@@ -830,20 +758,20 @@ Most used first. Each needs a check before it can be trusted.
 | `v_cmp_nlt_f32` | 0xe | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 6,606 |
 | `v_cmp_tru_f32` | 0xf | Yes | — | — |
 | `v_cmpx_f_f32` | 0x10 | Yes | — | — |
-| `v_cmpx_lt_f32` | 0x11 | Yes | — | 18,177 |
-| `v_cmpx_eq_f32` | 0x12 | Yes | — | 4,829 |
-| `v_cmpx_le_f32` | 0x13 | Yes | — | 9,909 |
-| `v_cmpx_gt_f32` | 0x14 | Yes | — | 20,029 |
-| `v_cmpx_lg_f32` | 0x15 | Yes | — | 18,860 |
-| `v_cmpx_ge_f32` | 0x16 | Yes | — | 9,272 |
-| `v_cmpx_o_f32` | 0x17 | Yes | — | — |
-| `v_cmpx_u_f32` | 0x18 | Yes | — | — |
-| `v_cmpx_nge_f32` | 0x19 | Yes | — | 519 |
+| `v_cmpx_lt_f32` | 0x11 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 18,177 |
+| `v_cmpx_eq_f32` | 0x12 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 4,829 |
+| `v_cmpx_le_f32` | 0x13 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 9,909 |
+| `v_cmpx_gt_f32` | 0x14 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 20,029 |
+| `v_cmpx_lg_f32` | 0x15 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 18,860 |
+| `v_cmpx_ge_f32` | 0x16 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 9,272 |
+| `v_cmpx_o_f32` | 0x17 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | — |
+| `v_cmpx_u_f32` | 0x18 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | — |
+| `v_cmpx_nge_f32` | 0x19 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 519 |
 | `v_cmpx_nlg_f32` | 0x1a | Yes | — | — |
-| `v_cmpx_ngt_f32` | 0x1b | Yes | — | 344 |
-| `v_cmpx_nle_f32` | 0x1c | Yes | — | 762 |
-| `v_cmpx_neq_f32` | 0x1d | Yes | — | 2,895 |
-| `v_cmpx_nlt_f32` | 0x1e | Yes | — | 46 |
+| `v_cmpx_ngt_f32` | 0x1b | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 344 |
+| `v_cmpx_nle_f32` | 0x1c | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 762 |
+| `v_cmpx_neq_f32` | 0x1d | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 2,895 |
+| `v_cmpx_nlt_f32` | 0x1e | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 46 |
 | `v_cmpx_tru_f32` | 0x1f | Yes | — | — |
 | `v_cmp_f_f64` | 0x20 | Yes | — | — |
 | `v_cmp_lt_f64` | 0x21 | Yes | — | — |
@@ -885,7 +813,7 @@ Most used first. Each needs a check before it can be trusted.
 | `v_cmp_ne_i32` | 0x85 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | — |
 | `v_cmp_ge_i32` | 0x86 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 116 |
 | `v_cmp_t_i32` | 0x87 | Yes | — | — |
-| `v_cmp_class_f32` | 0x88 | Yes | — | 14,454 |
+| `v_cmp_class_f32` | 0x88 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 14,454 |
 | `v_cmp_lt_i16` | 0x89 | Yes | — | — |
 | `v_cmp_eq_i16` | 0x8a | Yes | — | — |
 | `v_cmp_le_i16` | 0x8b | Yes | — | — |
@@ -894,12 +822,12 @@ Most used first. Each needs a check before it can be trusted.
 | `v_cmp_ge_i16` | 0x8e | Yes | — | — |
 | `v_cmp_class_f16` | 0x8f | Yes | — | — |
 | `v_cmpx_f_i32` | 0x90 | Yes | — | — |
-| `v_cmpx_lt_i32` | 0x91 | Yes | — | 9,173 |
+| `v_cmpx_lt_i32` | 0x91 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 9,173 |
 | `v_cmpx_eq_i32` | 0x92 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 692 |
-| `v_cmpx_le_i32` | 0x93 | Yes | — | 144 |
-| `v_cmpx_gt_i32` | 0x94 | Yes | — | 16,728 |
-| `v_cmpx_ne_i32` | 0x95 | Yes | — | — |
-| `v_cmpx_ge_i32` | 0x96 | Yes | — | 339 |
+| `v_cmpx_le_i32` | 0x93 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 144 |
+| `v_cmpx_gt_i32` | 0x94 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 16,728 |
+| `v_cmpx_ne_i32` | 0x95 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | — |
+| `v_cmpx_ge_i32` | 0x96 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 339 |
 | `v_cmpx_t_i32` | 0x97 | Yes | — | — |
 | `v_cmpx_class_f32` | 0x98 | Yes | — | — |
 | `v_cmpx_lt_i16` | 0x99 | Yes | — | — |
@@ -958,10 +886,10 @@ Most used first. Each needs a check before it can be trusted.
 | `v_cmpx_f_u32` | 0xd0 | Yes | — | — |
 | `v_cmpx_lt_u32` | 0xd1 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 5,953 |
 | `v_cmpx_eq_u32` | 0xd2 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 21,175 |
-| `v_cmpx_le_u32` | 0xd3 | Yes | — | 282 |
+| `v_cmpx_le_u32` | 0xd3 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 282 |
 | `v_cmpx_gt_u32` | 0xd4 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 22,295 |
 | `v_cmpx_ne_u32` | 0xd5 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 18,859 |
-| `v_cmpx_ge_u32` | 0xd6 | Yes | — | 124 |
+| `v_cmpx_ge_u32` | 0xd6 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 124 |
 | `v_cmpx_t_u32` | 0xd7 | Yes | — | — |
 | `v_cmpx_f_f16` | 0xd8 | Yes | — | — |
 | `v_cmpx_lt_f16` | 0xd9 | Yes | — | 286 |
@@ -1007,8 +935,8 @@ Most used first. Each needs a check before it can be trusted.
 | `v_add_f32` | 0x103 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 39,754 |
 | `v_sub_f32` | 0x104 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 36,106 |
 | `v_subrev_f32` | 0x105 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 23,601 |
-| `v_mac_legacy_f32` | 0x106 | Yes | — | — |
-| `v_mul_legacy_f32` | 0x107 | Yes | — | 42,291 |
+| `v_mac_legacy_f32` | 0x106 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | — |
+| `v_mul_legacy_f32` | 0x107 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 42,291 |
 | `v_mul_f32` | 0x108 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 17,824 |
 | `v_mul_i32_i24` | 0x109 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 12 |
 | `v_mul_hi_i32_i24` | 0x10a | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | — |
@@ -1027,14 +955,14 @@ Most used first. Each needs a check before it can be trusted.
 | `v_or_b32` | 0x11c | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 18,176 |
 | `v_xor_b32` | 0x11d | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 11,671 |
 | `v_xnor_b32` | 0x11e | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 6 |
-| `v_mac_f32` | 0x11f | Yes | — | 14,311 |
+| `v_mac_f32` | 0x11f | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 14,311 |
 | `v_add_nc_u32` | 0x125 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 34,893 |
 | `v_sub_nc_u32` | 0x126 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 17,696 |
 | `v_subrev_nc_u32` | 0x127 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 14,503 |
 | `v_add_co_ci_u32` | 0x128 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 2,782 |
 | `v_sub_co_ci_u32` | 0x129 | Yes | — | 24 |
 | `v_subrev_co_ci_u32` | 0x12a | Yes | — | 96 |
-| `v_fmac_f32` | 0x12b | Yes | — | 40,834 |
+| `v_fmac_f32` | 0x12b | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 40,834 |
 | `v_cvt_pkrtz_f16_f32` | 0x12f | Yes | — | 12,303 |
 | `v_add_f16` | 0x132 | Yes | — | 108 |
 | `v_sub_f16` | 0x133 | Yes | — | 108 |
@@ -1044,14 +972,14 @@ Most used first. Each needs a check before it can be trusted.
 | `v_max_f16` | 0x139 | Yes | — | 12 |
 | `v_min_f16` | 0x13a | Yes | — | 4 |
 | `v_ldexp_f16` | 0x13b | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | — |
-| `v_mad_legacy_f32` | 0x140 | Yes | — | 13,466 |
-| `v_mad_f32` | 0x141 | Yes | — | 16,229 |
+| `v_mad_legacy_f32` | 0x140 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 13,466 |
+| `v_mad_f32` | 0x141 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 16,229 |
 | `v_mad_i32_i24` | 0x142 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 52 |
 | `v_mad_u32_u24` | 0x143 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 24,150 |
-| `v_cubeid_f32` | 0x144 | Yes | — | 6,149 |
-| `v_cubesc_f32` | 0x145 | Yes | — | 6,166 |
-| `v_cubetc_f32` | 0x146 | Yes | — | 6,166 |
-| `v_cubema_f32` | 0x147 | Yes | — | 6,166 |
+| `v_cubeid_f32` | 0x144 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 6,149 |
+| `v_cubesc_f32` | 0x145 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 6,166 |
+| `v_cubetc_f32` | 0x146 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 6,166 |
+| `v_cubema_f32` | 0x147 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 6,166 |
 | `v_bfe_u32` | 0x148 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 26,322 |
 | `v_bfe_i32` | 0x149 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 40 |
 | `v_bfi_b32` | 0x14a | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 6,234 |
@@ -1067,7 +995,7 @@ Most used first. Each needs a check before it can be trusted.
 | `v_max3_f32` | 0x154 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 16,492 |
 | `v_max3_i32` | 0x155 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | — |
 | `v_max3_u32` | 0x156 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 78 |
-| `v_med3_f32` | 0x157 | Yes | — | 16,315 |
+| `v_med3_f32` | 0x157 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 16,315 |
 | `v_med3_i32` | 0x158 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 5,503 |
 | `v_med3_u32` | 0x159 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 174 |
 | `v_sad_u8` | 0x15a | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | — |
@@ -1113,10 +1041,10 @@ Most used first. Each needs a check before it can be trusted.
 | `v_cvt_off_f32_i4` | 0x18e | Yes | — | — |
 | `v_cvt_f32_f64` | 0x18f | Yes | — | — |
 | `v_cvt_f64_f32` | 0x190 | Yes | — | — |
-| `v_cvt_f32_ubyte0` | 0x191 | Yes | — | 30,666 |
-| `v_cvt_f32_ubyte1` | 0x192 | Yes | — | 25,905 |
-| `v_cvt_f32_ubyte2` | 0x193 | Yes | — | 18,394 |
-| `v_cvt_f32_ubyte3` | 0x194 | Yes | — | 15,414 |
+| `v_cvt_f32_ubyte0` | 0x191 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 30,666 |
+| `v_cvt_f32_ubyte1` | 0x192 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 25,905 |
+| `v_cvt_f32_ubyte2` | 0x193 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 18,394 |
+| `v_cvt_f32_ubyte3` | 0x194 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 15,414 |
 | `v_cvt_u32_f64` | 0x195 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | — |
 | `v_cvt_f64_u32` | 0x196 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | — |
 | `v_trunc_f64` | 0x197 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | — |
@@ -1124,22 +1052,22 @@ Most used first. Each needs a check before it can be trusted.
 | `v_rndne_f64` | 0x199 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | — |
 | `v_floor_f64` | 0x19a | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | — |
 | `v_pipeflush` | 0x19b | **No** | — | — |
-| `v_fract_f32` | 0x1a0 | Yes | — | 21,273 |
+| `v_fract_f32` | 0x1a0 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 21,273 |
 | `v_trunc_f32` | 0x1a1 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 26,964 |
 | `v_ceil_f32` | 0x1a2 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 5,487 |
 | `v_rndne_f32` | 0x1a3 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 11,248 |
 | `v_floor_f32` | 0x1a4 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 13,260 |
-| `v_exp_f32` | 0x1a5 | Yes | — | 16,838 |
-| `v_log_f32` | 0x1a7 | Yes | — | 16,467 |
+| `v_exp_f32` | 0x1a5 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 16,838 |
+| `v_log_f32` | 0x1a7 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 16,467 |
 | `v_rcp_f32` | 0x1aa | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 30,995 |
-| `v_rcp_iflag_f32` | 0x1ab | Yes | — | 16,447 |
-| `v_rsq_f32` | 0x1ae | Yes | — | 29,517 |
+| `v_rcp_iflag_f32` | 0x1ab | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 16,447 |
+| `v_rsq_f32` | 0x1ae | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 29,517 |
 | `v_rcp_f64` | 0x1af | **No** | — | — |
 | `v_rsq_f64` | 0x1b1 | **No** | — | — |
 | `v_sqrt_f32` | 0x1b3 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 26,602 |
 | `v_sqrt_f64` | 0x1b4 | **No** | — | — |
-| `v_sin_f32` | 0x1b5 | Yes | — | 21,597 |
-| `v_cos_f32` | 0x1b6 | Yes | — | 22,422 |
+| `v_sin_f32` | 0x1b5 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 21,597 |
+| `v_cos_f32` | 0x1b6 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 22,422 |
 | `v_not_b32` | 0x1b7 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 206 |
 | `v_bfrev_b32` | 0x1b8 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 4,386 |
 | `v_ffbh_u32` | 0x1b9 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 112 |
@@ -1203,8 +1131,8 @@ Most used first. Each needs a check before it can be trusted.
 | `v_mad_u16` | 0x340 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | — |
 | `v_interp_p1ll_f16` | 0x342 | Yes, in recorded shaders | AMD 1002:13c0, NVIDIA 10de:2705 | 5,435 |
 | `v_interp_p1lv_f16` | 0x343 | Unproven: v_interp outside a pixel shader | — | — |
-| `v_perm_b32` | 0x344 | Yes | — | 15,101 |
-| `v_xad_u32` | 0x345 | Yes | — | 5,445 |
+| `v_perm_b32` | 0x344 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 15,101 |
+| `v_xad_u32` | 0x345 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 5,445 |
 | `v_lshl_add_u32` | 0x346 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 29,238 |
 | `v_add_lshl_u32` | 0x347 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 2,703 |
 | `v_fma_f16` | 0x34b | Yes | — | 230 |
@@ -1223,8 +1151,8 @@ Most used first. Each needs a check before it can be trusted.
 | `v_readlane_b32` | 0x360 | Yes, in recorded shaders | AMD 1002:13c0, NVIDIA 10de:2705 | 6,097 |
 | `v_writelane_b32` | 0x361 | Yes, in recorded shaders | AMD 1002:13c0, NVIDIA 10de:2705 | 11 |
 | `v_ldexp_f32` | 0x362 | Yes | — | — |
-| `v_bfm_b32` | 0x363 | Yes | — | 732 |
-| `v_bcnt_u32_b32` | 0x364 | Yes | — | 3,605 |
+| `v_bfm_b32` | 0x363 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 732 |
+| `v_bcnt_u32_b32` | 0x364 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 3,605 |
 | `v_mbcnt_lo_u32_b32` | 0x365 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 14,802 |
 | `v_mbcnt_hi_u32_b32` | 0x366 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | 14,432 |
 | `v_cvt_pknorm_i16_f32` | 0x368 | Yes | AMD 1002:13c0, NVIDIA 10de:2705 | — |
@@ -1471,9 +1399,9 @@ Most used first. Each needs a check before it can be trusted.
 | Instruction | Opcode | Translator | GPU check | Recorded shaders |
 | --- | --- | --- | --- | ---: |
 | `buffer_load_format_x` | 0x0 | Yes, in recorded shaders | AMD 1002:13c0, NVIDIA 10de:2705 | 20,976 |
-| `buffer_load_format_xy` | 0x1 | Yes, in recorded shaders | — | 4,272 |
-| `buffer_load_format_xyz` | 0x2 | Yes, in recorded shaders | — | 6,430 |
-| `buffer_load_format_xyzw` | 0x3 | Yes, in recorded shaders | — | 1,075 |
+| `buffer_load_format_xy` | 0x1 | Yes, in recorded shaders | AMD 1002:13c0, NVIDIA 10de:2705 | 4,272 |
+| `buffer_load_format_xyz` | 0x2 | Yes, in recorded shaders | AMD 1002:13c0, NVIDIA 10de:2705 | 6,430 |
+| `buffer_load_format_xyzw` | 0x3 | Yes, in recorded shaders | AMD 1002:13c0, NVIDIA 10de:2705 | 1,075 |
 | `buffer_store_format_x` | 0x4 | Unproven: mubuf: s8 not a buffer descriptor (None) | — | — |
 | `buffer_store_format_xy` | 0x5 | Unproven: mubuf: s8 not a buffer descriptor (None) | — | — |
 | `buffer_store_format_xyz` | 0x6 | Unproven: mubuf: s8 not a buffer descriptor (None) | — | — |
@@ -1483,9 +1411,9 @@ Most used first. Each needs a check before it can be trusted.
 | `buffer_load_ushort` | 0xa | Unproven: mubuf: s8 not a buffer descriptor (None) | — | — |
 | `buffer_load_sshort` | 0xb | Unproven: mubuf: s8 not a buffer descriptor (None) | — | — |
 | `buffer_load_dword` | 0xc | Yes, in recorded shaders | AMD 1002:13c0, NVIDIA 10de:2705 | 31,035 |
-| `buffer_load_dwordx2` | 0xd | Yes, in recorded shaders | — | 25,203 |
+| `buffer_load_dwordx2` | 0xd | Yes, in recorded shaders | AMD 1002:13c0, NVIDIA 10de:2705 | 25,203 |
 | `buffer_load_dwordx4` | 0xe | Yes, in recorded shaders | AMD 1002:13c0, NVIDIA 10de:2705 | 23,179 |
-| `buffer_load_dwordx3` | 0xf | Yes, in recorded shaders | — | 13,984 |
+| `buffer_load_dwordx3` | 0xf | Yes, in recorded shaders | AMD 1002:13c0, NVIDIA 10de:2705 | 13,984 |
 | `buffer_store_byte` | 0x18 | Unproven: mubuf: s8 not a buffer descriptor (None) | — | — |
 | `buffer_store_byte_d16_hi` | 0x19 | Unproven: mubuf: s8 not a buffer descriptor (None) | — | — |
 | `buffer_store_short` | 0x1a | Unproven: mubuf: s8 not a buffer descriptor (None) | — | — |
