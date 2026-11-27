@@ -17,6 +17,7 @@
 #include "xmem_page_batch.h"
 #include "startup_stubs/local_log.h"
 #include "startup_stubs/logical_view_table.h"
+#include "startup_stubs/manifest_retry.h"
 #include "startup_stubs/list_compute_root.h"
 #include "startup_stubs/overlay_window.h"
 #include "startup_stubs/draw_bmp.h"
@@ -1460,6 +1461,9 @@ std::unordered_map<Wrapper*, TitleAllocator> title_allocators;
 std::unordered_map<Wrapper*, DesktopAllocator*> list_recordings;  // list -> allocator holding its recording
 std::unordered_map<ID3D12CommandQueue*, UploadQueue<ID3D12Fence>> queue_submits;
 std::vector<UploadRingChunk> upload_chunks;  // allocator_lock also protects recording holds and queue fence values
+// X2W_D3D12_RING_RELEASE_AT_SUBMIT=1 (allocator_lock): chunks each closed list released at a fenced submit, until its Reset.
+std::unordered_map<Wrapper*, ReleasedUploadChunks> released_upload_chunks;
+LONG upload_resubmits_refused;  // closed lists submitted again after a released chunk was reused; not executed
 
 LONG allocator_swaps, allocator_creates;
 
@@ -1467,6 +1471,7 @@ void release_upload_recording(Wrapper* list)
 {
     AcquireSRWLockExclusive(&allocator_lock);
     discard_upload_chunks(list->own().upload_chunks, upload_chunks.data());
+    released_upload_chunks.erase(list);
     ReleaseSRWLockExclusive(&allocator_lock);
 }
 
@@ -1677,6 +1682,34 @@ bool submit_fence_fails()
     return on;
 }
 
+// X2W_D3D12_RING_RELEASE_AT_SUBMIT=1 (opt-in): a closed list stops holding its upload ring chunks once its submit is
+// fenced, so the queue fence alone guards them; the ring then grows in 16 MiB chunks up to 512 MiB. A later submit
+// of the same list before its Reset fences its chunks again. One whose chunk was reused meanwhile is refused before
+// ExecuteCommandLists (released_chunks_recycled), so it never reads replaced bytes.
+bool ring_release_at_submit()
+{
+    static const bool on = GetEnvironmentVariableW(L"X2W_D3D12_RING_RELEASE_AT_SUBMIT", nullptr, 0) != 0;
+    return on;
+}
+
+// draw_lock and allocator_lock held, before the queue executes `list`. True when the closed list released its chunks
+// at an earlier fenced submit and one of them was reused since: the submit leaves it out, and it stays refused until
+// its Reset. Counted and logged.
+bool released_chunks_recycled(Wrapper* list)
+{
+    const auto released = released_upload_chunks.find(list);
+    if (released == released_upload_chunks.end()) return false;
+    UploadChunkMask recycled = 0;
+    resubmitted_upload_chunks(released->second, upload_chunks.data(), recycled);
+    if (!recycled) return false;
+    InterlockedIncrement(&upload_resubmits_refused);
+    static LONG logged;
+    if (first_calls(logged, 8))
+        log("x2w-draw upload ring: closed list %p submitted again after its released chunks 0x%x were reused; "
+            "refused, it is not executed", static_cast<void*>(list), static_cast<unsigned>(recycled));
+    return true;
+}
+
 // draw_lock and allocator_lock held, after the lists were executed on queue. Each list's allocator holds a fence value
 // the queue must pass before the allocator can be reset. If that fence cannot be created or
 // signalled, the work is on the GPU all the same: the allocators are marked untracked instead.
@@ -1693,10 +1726,28 @@ void note_submits(ID3D12CommandQueue* queue, const std::vector<Wrapper*>& lists)
         }
     }
     UploadChunkMask chunks = 0;
-    for (auto* list : lists) chunks |= list->own().upload_chunks;
+    for (auto* list : lists) {
+        chunks |= list->own().upload_chunks;
+        const auto released = released_upload_chunks.find(list);
+        if (released == released_upload_chunks.end()) continue;
+        // A list with a reused chunk was refused before the execute, under the same locks: all of them are intact.
+        UploadChunkMask reused = 0;
+        chunks |= resubmitted_upload_chunks(released->second, upload_chunks.data(), reused);
+    }
     const bool signaled = fence && SUCCEEDED(queue->Signal(fence, value + 1));
     if (signaled) ++value;
     submit.submitted(chunks, signaled);
+    if (signaled && ring_release_at_submit()) {
+        for (Wrapper* list : lists) {
+            if (!list->own().upload_chunks) continue;
+            try {
+                release_upload_chunks_at_submit(list->own().upload_chunks, upload_chunks.data(),
+                                                released_upload_chunks[list]);
+            } catch (const std::bad_alloc&) {
+                // Keep the holds: the list then pins its chunks until its Reset, as without the switch.
+            }
+        }
+    }
     if (signaled) {
         for (Wrapper* list : lists) {
             const auto found = list_recordings.find(list);
@@ -1831,6 +1882,7 @@ HRESULT __stdcall list_reset(Wrapper* self, void* allocator)
             on = title.current;
             ++on->lists;
             discard_upload_chunks(state.upload_chunks, upload_chunks.data());
+            released_upload_chunks.erase(self);
             state.list_uploads = nullptr;
             state.list_scratch = nullptr;
             state.list_ready = false;
@@ -2620,7 +2672,8 @@ ID3D12PipelineState* build_stream_pipeline(const D3D12_PIPELINE_STATE_STREAM_DES
 
 // Transient guest data is copied into mapped upload chunks. Chunks grow from
 // 16 MiB up to 256 MiB in total and stay alive for the process. A full chunk can be reused once
-// no recording can submit its bytes and every queue that used it has finished.
+// no recording can submit its bytes and every queue that used it has finished. With
+// X2W_D3D12_RING_RELEASE_AT_SUBMIT=1 every chunk is 16 MiB, up to 512 MiB, and a fenced submit releases its lists.
 
 UploadReservation reserve_upload_ring(Wrapper* list, std::size_t bytes)
 {
@@ -2645,9 +2698,11 @@ UploadReservation reserve_upload_ring(Wrapper* list, std::size_t bytes)
         if (reservation.mapped) return finish(active);
     }
 
-    const u64 remaining = total_bytes < max_upload_ring_bytes ? max_upload_ring_bytes - total_bytes : 0;
+    const bool release_at_submit = ring_release_at_submit();
+    const u64 ring_bytes = release_at_submit ? max_released_upload_ring_bytes : max_upload_ring_bytes;
+    const u64 remaining = total_bytes < ring_bytes ? ring_bytes - total_bytes : 0;
     if (rounded <= remaining) {
-        u64 chunk_bytes = chunks.empty() ? initial_upload_chunk_bytes : chunks.back().capacity * 2;
+        u64 chunk_bytes = chunks.empty() || release_at_submit ? initial_upload_chunk_bytes : chunks.back().capacity * 2;
         if (chunk_bytes < rounded) chunk_bytes = rounded;
         if (chunk_bytes > remaining) chunk_bytes = remaining;
         auto* device = the_device ? device_of(the_device) : nullptr;
@@ -4258,6 +4313,7 @@ void __stdcall queue_execute(Wrapper* self, UINT count, void* const* lists)
         for (UINT i = 0; i < count; ++i) {
             Wrapper* w = as_wrapper(lists[i]);
             if (w && w->own().kind == list_kind && w->own().list_ready) {
+                if (released_chunks_recycled(w)) continue;  // its upload bytes were replaced: it is not executed
                 ready.push_back(static_cast<ID3D12CommandList*>(w->own().real));
                 submitted.push_back(w);
             }
@@ -4740,14 +4796,14 @@ __declspec(noinline) u64 view_slot(Wrapper* self, u64 a, u64 b, u64 c, u64 d)
     };
     const char* skip = nullptr;
     bool default_view = false;
-    bool uav_denied = false;  // a UAV of a resource without unordered access: recorded as not created, as before #2649
+    bool record_refused_uav = false;
     if (N == 17) skip = "constant buffer view (title GPU address)";
     if (N >= 18 && N <= 21 && args[0]) {
         const UINT flags = reinterpret_cast<ID3D12Resource*>(args[0])->GetDesc().Flags;
         if (N == 18 && (flags & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE)) skip = "resource denies shader resource views";
         if (N == 19 && !(flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)) {
             skip = "resource lacks unordered access";
-            uav_denied = true;
+            record_refused_uav = true;
         }
         if (N == 20 && !(flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET)) skip = "resource lacks render target";
         if (N == 21 && !(flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL)) skip = "resource lacks depth stencil";
@@ -4782,6 +4838,20 @@ __declspec(noinline) u64 view_slot(Wrapper* self, u64 a, u64 b, u64 c, u64 d)
                 if (first_calls(mismatched, 6))
                     log("x2w-d3d12 Device::slot%d view dimension %u needs resource dimension %u, resource has %u", N, view_dimension,
                         x2w_view_dimension::needed(N, view_dimension), dimension);
+            } else if constexpr (N == 19) {
+                if (view_dimension == D3D12_UAV_DIMENSION_TEXTURE3D &&
+                    x2w_local::readable(reinterpret_cast<const void*>(described), sizeof(D3D12_UNORDERED_ACCESS_VIEW_DESC))) {
+                    D3D12_UNORDERED_ACCESS_VIEW_DESC view{};
+                    std::memcpy(&view, reinterpret_cast<const void*>(described), sizeof(view));
+                    skip = volume_uav_range_error(resource_desc, view.Texture3D);
+                    record_refused_uav = skip != nullptr;
+                } else if (view_dimension == D3D12_UAV_DIMENSION_TEXTURE1D &&
+                           x2w_local::readable(reinterpret_cast<const void*>(described), sizeof(D3D12_UNORDERED_ACCESS_VIEW_DESC))) {
+                    D3D12_UNORDERED_ACCESS_VIEW_DESC view{};
+                    std::memcpy(&view, reinterpret_cast<const void*>(described), sizeof(view));
+                    if (view.Texture1D.MipSlice >= resource_desc.MipLevels) skip = "an output 1D texture mip is outside the resource";
+                    record_refused_uav = skip != nullptr;
+                }
             }
         }
     }
@@ -4800,7 +4870,7 @@ __declspec(noinline) u64 view_slot(Wrapper* self, u64 a, u64 b, u64 c, u64 d)
         } else if constexpr (N == 19) {
             // A translated compute Dispatch tells this refusal from a descriptor that holds no view by the record.
             // A refused creation leaves a descriptor that still holds a live view as it is.
-            if (uav_denied && !descriptor_has_live_view(args[D], title_dest)) record_view(false);
+            if (record_refused_uav && !descriptor_has_live_view(args[D], title_dest)) record_view(false);
         }
     };
     if (skip) {
