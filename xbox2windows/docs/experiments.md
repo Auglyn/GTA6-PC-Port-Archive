@@ -2,6 +2,23 @@
 
 New notes go in `docs/experiments/<topic>.md` (see [the folder guide](experiments/README.md)); this file keeps the older notes.
 
+## First native graphics draw through the stand-in
+
+Set `X2W_NATIVE_SHADERS` to the desktop DXC directory and `X2W_SHADER_CACHE` to a writable cache.
+The stand-in reads the published graphics request, links the pair, and uses the compiler's persistent
+frontend and bytecode caches. The runtime consumes the same supported binding manifest as the offline
+compiler. The source-built triangle fixture uses one RGBA8 target and checks all 32 pixels in each
+of two processes. A third process supplies an unsupported pixel stage and checks the untouched clear.
+
+```powershell
+cmake --build --preset dev --target startup_stream_consumer d3d12_xs_shim compile_dxil
+ctest --preset dev --no-tests=error -V -R '^startup_native_graphics_draw_(hardware|warp)$'
+```
+
+## Implicit derivatives in direct compute
+
+[Group shapes, lane mapping and readback fixtures](experiments/native-compute-implicit-derivatives.md)
+
 ## Slot 67 wave size in direct compute
 
 State block A bit 20 of dword 4 selects the guest wave size.
@@ -302,6 +319,16 @@ validated GPU copy in the current recording completely supplied the requested vi
 The source is a same-device desktop resource with no title shadow, a unique alias,
 or an already covered range. Later overlapping copies invalidate earlier coverage.
 The recording discards this proof at Close, so another recording needs its own writer.
+
+`X2W_TRANSLATED_TITLE_INPUT_SNAPSHOT=1` lets a translated compute Dispatch read an input that lies in a placed buffer which does
+not alias title memory. That buffer's desktop copy is a committed default buffer that holds zeros, so the bytes the title wrote
+exist only in title memory. The input resolves in this order: a validated GPU copy of the current recording (the proof above,
+which needs `X2W_TRANSLATED_INDIRECT_COPY_RANGES=1`), else a snapshot of the range (at most 16 MiB) taken from title memory
+into the snapshot pool when the Dispatch is recorded, else the refusal `an input is in a placed buffer that does not alias title
+memory`. A guest write after the recording is not seen, and data a GPU pass wrote into such a buffer is not either. The first
+use per pipeline key logs `x2w-draw compute <key> input <n> (...) comes from a GPU copy this list made|a snapshot of title
+memory`, and the render totals line counts both paths. Off by default. To turn it on for a run, set `$env:X2W_TRANSLATED_TITLE_INPUT_SNAPSHOT = "1"` in the PowerShell session before
+starting `tools/startup/run.ps1`, which passes the session's environment on to the run. The snapshots have a pool of their own (128 MiB, chunks of 16 MiB, built like the shared upload ring: a chunk is reused once no recording can submit its bytes and every queue that used it has finished), so draw and texture uploads cannot starve them and a long run is not stopped by a full pool; a reservation it cannot serve logs `x2w-draw snapshot pool reservation refused: no unused capacity`. `startup_compute_dispatch_input` covers it with the `dispatch-input-snapshot` case and, for the recycling, `dispatch-input-snapshot-long` (48 frames of an 8 MiB snapshot, 384 MiB in all).
 
 The source-built fixture reproduces a 68-byte request shape with source offset `0xbfffa0`.
 Its compute writer fills the source with contrasting colours. The consumer reads red
