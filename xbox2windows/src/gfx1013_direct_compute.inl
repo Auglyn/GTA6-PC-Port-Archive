@@ -3001,6 +3001,49 @@ struct DirectCompute {
             vector_write(i.dst, i.clamp ? saturated_add(dot, acc, sign) : ir.binary("add", dot, acc));
             return;
         }
+        if (n == "v_cvt_i32_f64" || n == "v_cvt_u32_f64") {
+            // Exact saturating truncation of binary64 pair S0 to 32-bit signed/unsigned integer (#3370)
+            // using pure 32-bit integer arithmetic (no DoublePrecisionFloatShaderOps, no Int64ShaderOps).
+            if (pixel_stage || graphics_input || i.subword || i.dpp_control || permuted ||
+                i.clamp || i.scale ||
+                (i.wide && ((i.a & 0x7800) || ((i.abs | i.neg) & 6) || i.src[1] || i.src[2])))
+                refuse(i.pc, "unsupported " + string(n) + " stage or operand modifiers");
+            const bool s0_pair = (i.src[0] >= 256 && i.src[0] < 511) || (i.src[0] <= 104 && !(i.src[0] & 1));
+            if (i.dst < 256 || !s0_pair)
+                refuse(i.pc, string(n) + " requires a 64-bit register pair source");
+            const bool is_signed = n == "v_cvt_i32_f64";
+            auto lo = operand32(i, i.src[0]);
+            auto hi = operand32(i, i.src[0] + 1);
+            if (i.abs & 1) hi = ir.binary("and", hi, "2147483647");
+            if (i.neg & 1) hi = ir.binary("xor", hi, "2147483648");
+            auto is_neg = cmp("ne", ir.binary("and", hi, "2147483648"), "0");
+            auto exp = ir.binary("and", ir.binary("lshr", hi, "20"), "2047");
+            auto frac_hi = ir.binary("and", hi, "1048575");
+            auto mant_hi = ir.binary("or", frac_hi, "1048576");
+            auto is_nan = ir.value("and i1 " + cmp("eq", exp, "2047") + ", " +
+                                   ir.value("or i1 " + cmp("ne", frac_hi, "0") + ", " + cmp("ne", lo, "0")));
+            auto small_exp = cmp("ult", exp, "1023");
+            auto e = select(small_exp, "0", ir.binary("sub", exp, "1023"));
+            auto le20 = cmp("ule", e, "20");
+            auto rshift = select(le20, ir.binary("sub", "20", e), "0");
+            auto mag_le20 = ir.binary("lshr", mant_hi, rshift);
+            auto lshift = select(le20, "0", ir.binary("and", ir.binary("sub", e, "20"), "31"));
+            auto lo_rshift = select(le20, "0", ir.binary("and", ir.binary("sub", "52", e), "31"));
+            auto mag_gt20 = ir.binary("or", ir.binary("shl", mant_hi, lshift), ir.binary("lshr", lo, lo_rshift));
+            auto mag = select(small_exp, "0", select(le20, mag_le20, mag_gt20));
+            string res;
+            if (is_signed) {
+                auto ovf = cmp("uge", exp, "1054");
+                auto pos = select(ovf, "2147483647", mag);
+                auto neg = select(ovf, "2147483648", ir.binary("sub", "0", mag));
+                res = select(is_nan, "0", select(is_neg, neg, pos));
+            } else {
+                auto ovf = cmp("uge", exp, "1055");
+                res = select(ir.value("or i1 " + is_nan + ", " + is_neg), "0", select(ovf, "4294967295", mag));
+            }
+            vector_write(i.dst, res);
+            return;
+        }
         if (n == "v_mad_u32_u16" || n == "v_mad_i32_i16") {
             // AMD RDNA 2 ISA, VOP3A opcodes 883/885. Only the two
             // multiplicands are halfwords. The addend and result are dwords.
@@ -3086,6 +3129,37 @@ struct DirectCompute {
             vector_write(i.dst + 1, ir.value("trunc i64 " + ir.value("lshr i64 " + sum + ", 32") + " to i32"));
             if (!sign)
                 write_ballot(sdst, carry);
+            return;
+        }
+        if (n == "v_cvt_f64_i32" || n == "v_cvt_f64_u32") {
+            // Exact binary64 conversion of a 32-bit signed/unsigned integer (#3363) using pure 32-bit integer ops
+            // and FirstbitHi (dx.op.unaryBits.i32 33); needs neither DoublePrecisionFloatShaderOps nor Int64ShaderOps.
+            if (pixel_stage || graphics_input || i.subword || i.dpp_control || permuted ||
+                i.abs || i.neg || i.clamp || i.scale ||
+                (i.wide && ((i.a & 0x7800) || i.src[1] || i.src[2])))
+                refuse(i.pc, "unsupported " + string(n) + " stage or operand modifiers");
+            if (i.dst < 256 || i.dst >= 511)
+                refuse(i.pc, string(n) + " requires a 64-bit VGPR destination pair");
+            if (i.src[0] >= 240 && i.src[0] <= 248)
+                refuse(i.pc, string(n) + " with an inline float source");
+            const bool is_signed = n == "v_cvt_f64_i32";
+            auto x = operand32(i, i.src[0]);
+            auto is_neg = is_signed ? cmp("slt", x, "0") : string();
+            auto mag = is_signed ? select(is_neg, ir.binary("sub", "0", x), x) : x;
+            auto is_zero = cmp("eq", mag, "0");
+            auto lz = ir.invoke("i32", "unaryBits.i32", 33, {{"i32", mag}}, "nounwind readnone");
+            auto safe_lz = select(is_zero, "0", lz);
+            auto msb = ir.binary("sub", "31", safe_lz);
+            auto exp = ir.binary("add", "1023", msb);
+            auto frac = ir.binary("and", ir.binary("shl", mag, safe_lz), "2147483647");
+            auto hi_nz = ir.binary("or", ir.binary("shl", exp, "20"), ir.binary("lshr", frac, "11"));
+            if (is_signed)
+                hi_nz = ir.binary("or", hi_nz, select(is_neg, "2147483648", "0"));
+            auto lo_nz = ir.binary("shl", frac, "21");
+            auto lo = select(is_zero, "0", lo_nz);
+            auto hi = select(is_zero, "0", hi_nz);
+            vector_write(i.dst, lo);
+            vector_write(i.dst + 1, hi);
             return;
         }
         if (auto dst = carry_destination(i)) {
@@ -3508,7 +3582,7 @@ struct DirectCompute {
             return;
         }
         if (compute && n == "s_bfm_b64") {
-            if ((i.dst & 1) || (i.dst > 104 && i.dst != 126))
+            if ((i.dst & 1) || (i.dst > 104 && i.dst != 106 && i.dst != 126))
                 refuse(i.pc, "invalid s_bfm_b64 destination");
             if ((i.src[0] > 105 && !constant32(i, i.src[0])) ||
                 (i.src[1] > 105 && !constant32(i, i.src[1])))
