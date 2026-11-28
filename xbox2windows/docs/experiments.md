@@ -750,6 +750,12 @@ Build outputs and downloaded tool sources live under `out/`. [Microsoft xbdepend
 
 ## Recovering a failed startup command-list recording
 
+The `startup_list_resubmit` fixture also records a translated sampler snapshot and
+submits its list to two queues. The second queue waits on a CPU-released fence.
+Releasing the list and resetting the allocator keeps the snapshot alive while the
+second submission is blocked. Once both tracked queues complete, reusing the first
+allocator releases the snapshot. The untracked-submit case keeps it retained.
+
 The source-built `startup_list_resubmit` fixture keeps a valid compute submission behind a
 queue wait, then calls `RSSetViewports` on a second recording of the same list. Desktop
 `Close` fails and the shim drops that recording. A `Reset` with a direct allocator must
@@ -17952,6 +17958,8 @@ python -B tests/docs_links_check.py
 
 `startup_resource_retire_reasons` drives the `Held` attribution line; `startup_resource_retire_views` proves the
 design-B keep cases (a live slot stays reboundable after final `Release()` and completed fences). The tables above record contributors' local executable runs. The fixtures validate the retention behavior independently. Refs #2379, #2679, #2719, #1199.
+
+See [fixed mesh pipelines through slot 57](experiments/native-fixed-mesh57.md) for the source-built indirect-draw fixtures.
 
 ## Binary16 normalized integer conversions (`v_cvt_norm_i16_f16`, `v_cvt_norm_u16_f16`) across VOP1/VOP3/DPP16/DPP8/SDWA in pixel_aot
 

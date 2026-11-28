@@ -59,6 +59,43 @@ def main(compiler, sdk):
         assert subprocess.run([compiler,*install],capture_output=True).returncode
         batch(requests,base/"retained")
 
+        # Two reflected parameter rows. The fixed PS uses P1/P2 for x
+        # and MOV P0 for y of row zero; hardware only allocates that row.
+        fixed = base / "fixed"
+        fixed.mkdir()
+        vp = [0x7e0002f2, 0xf80008cf, 0, 0xf800020f, 0, 0xf800021f, 0, end]
+        (fixed / "varying.cdxil").write_bytes(vertex(program=vp))
+        def interpolate(attr, channel, op, dst, src):
+            return 0xc8000000 | dst << 18 | op << 16 | attr << 10 | channel << 8 | src
+        template = prefix + [interpolate(0, 0, 0, 4, 0), interpolate(0, 0, 1, 4, 1)]
+        attributes = [(6, row, 15, row, 0, 0, row, 2) for row in range(2)]
+        (fixed / "smooth.cdxil").write_bytes(patched_pixel(
+            len(template), template, input_address=2, attributes=attributes))
+        run("--index-graphics-interfaces", fixed, cache)
+        for attr, count, error in ((0, 1, None), (1, 2, None),
+                                   (1, 1, "interpolation inputs disagree"),
+                                   (0, 3, "captured interpolation count")):
+            code = words(*template, interpolate(attr, 1, 2, 5, 2), 0xf800180f, 0x05040504, end)
+            folder = base / f"fixed-{attr}-{count}"
+            publish(folder, code, words(*vp), root, slot57_inputs=(2, count))
+            batch(folder, base / f"linked-{attr}-{count}", expected=error)
+
+        # The library PS consumes x only. A fixed variant also reads y,
+        # which is valid only when the actual VS exports that channel.
+        narrow = [(6, row, 1, row, 0, 0, row, 2) for row in range(2)]
+        (fixed / "smooth.cdxil").write_bytes(patched_pixel(
+            len(template), template, input_address=2, attributes=narrow))
+        code = words(*template, interpolate(0, 1, 0, 5, 0), interpolate(0, 1, 1, 5, 1),
+                     0xf800180f, 0x05040504, end)
+        for mask in (15, 1):
+            producer = vp.copy()
+            producer[3] = (producer[3] & ~15) | mask
+            (fixed / "varying.cdxil").write_bytes(vertex(program=producer))
+            run("--index-graphics-interfaces", fixed, cache)
+            folder = base / f"raw-channels-{mask}"
+            publish(folder, code, words(*producer), root, slot57_inputs=(2, 1))
+            batch(folder, base / f"raw-linked-{mask}", expected=None if mask == 15 else "graphics stages disagree")
+
         # An exact VS writes a four-component image through the second
         # guest slot. The serialized root covers just the first slot.
         # The FSSM offset, descriptor width, class and SGPR establish the
