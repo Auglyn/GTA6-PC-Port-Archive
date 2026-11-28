@@ -127,7 +127,11 @@ Frosty’s menu material at entry 2 illustrates the overlap with AnyPS5’s inst
 
 ## ProjectScarlett refusals
 
-On November 26, 2026, preparation compiled 36,653 of 41,064 recorded requests and refused 4,411. None failed in DXC or the validator. [Preparation record](../evidence/projectscarlett-shader-preparation.json)
+On November 28, 2026, preparation had versions of 18,858 of the 25,889 programs in the title's shader pack and found 165 unsupported; the other 6,866 had no recorded request. A program counts once, however many requests use it. By request, 42,124 compiled, 133 were cached and 4,042 of 46,299 were unsupported. None failed in DXC or the validator. [Preparation record](../evidence/projectscarlett-shader-preparation.json)
+
+The largest named groups of unsupported requests that day were a mesh request recorded without a root signature (1,567), literal samplers (454), a raw buffer access that needs the console descriptor stride (208), lane reads in non-uniform loops (60), untyped buffer forms (56), descriptor mapping (49) and ray traversal over console structures (40). Another 1,462 fall in no named group.
+
+The table below is from the November 26 preparation, which compiled 36,653 of 41,064 requests:
 
 | Refusal reason | Requests |
 | --- | --- |
@@ -138,7 +142,7 @@ On November 26, 2026, preparation compiled 36,653 of 41,064 recorded requests an
 | Image sample from an unordered-access table the root doesn't describe (`u7`) | 236 |
 | Lane operation with a non-constant lane | 203 |
 
-Translator changes since then have removed many of these. On November 27 the translator alone, without DXC, translated 38,263 of 42,672 recorded requests.
+Translator changes since then have removed many of these.
 
 The counts are per recorded request, so they overstate what a live run loses: a request recorded without its root signature can't be translated offline. Rank failures by the pipelines a run lost with the [pipeline failure record](PROJECTSCARLETT.md#finding-why-pipelines-fail).
 
@@ -146,7 +150,7 @@ The counts are per recorded request, so they overstate what a live run loses: a 
 
 The game traces rays in its own compute programs, as loops over the console's raw acceleration structure nodes, which the translator can't run. Four shadow programs have those loops replaced with native ray queries: the two irradiance cache shadow traces, the sun shadows and the spot lamp shadows ([lowering](../tools/shader-compiler/src/hlsl/scarlett_rays.rs)). Each is matched by name and exact code. A [replay of recorded requests](../tools/check_scarlett_rays.py) matched the expected geometry on an RTX 4070 Ti SUPER and a Radeon iGPU.
 
-In the game these dispatches still do nothing, because its ray tracing scenes aren't built yet. The native query counts every triangle, where the console's sun walk ignores a hit on an object marked with a zero word.
+TuxBox now builds the structures the title makes in its own memory and the ones it rehydrates. What these shadow dispatches draw in the game hasn't been checked. The native query counts every triangle, where the console's sun walk ignores a hit on an object marked with a zero word.
 
 ### Block dispatcher
 
@@ -172,7 +176,7 @@ Most wave reduction refusals come from programs over 6,000 instructions, where t
 
 Ray binning counts the lanes of a wave by a key each lane holds. The console serves one key per pass of a loop: it sums the lanes that hold the first remaining lane's key across the wave, and one of them adds the count to a buffer. The loop ends when a mask of the remaining lanes is empty, which a thread that holds only its own bit can't tell, so these programs were refused. When a loop has exactly that shape, the translator now has every counting lane add 1 at its own key ([rewrite](../tools/shader-compiler/src/hlsl/rewrite/key_counts.rs)). The buffer ends the same, no lane reads another, and the host's wave width doesn't matter. The loop stays as it was if anything reads a register it leaves different, or if another instruction uses the counters, since they pass through values the console's never hold. The rewrite is a last resort: a program the translator handles any other way keeps that translation. A 32-lane program, for example, keeps the wave together for the loop's lane reads ([retry](../tools/shader-compiler/src/hlsl/lockstep.rs)), so it is not rewritten.
 
-On 27,116 recorded ProjectScarlett requests, four more translate, all `CS_ScreenProbes_TraceRays_Fallback`, and every other request gives the same result or the same output byte for byte. A [GPU check](../tools/check_key_counts_gpu.py) compares 12 cases of a synthetic 64-lane loop with a model of the console, for groups of one and two waves. This hasn't been tested in the game.
+On 27,116 recorded ProjectScarlett requests, four more translate, all `CS_ScreenProbes_TraceRays_Fallback`, and every other request gives the same result or the same output byte for byte. A [GPU check](../tools/check_key_counts_gpu.py) compares 12 cases of a synthetic 64-lane loop with a model of the console, for groups of one and two waves. Its output hasn't been verified in a game.
 
 ### 64-lane programs on 32-lane hosts
 
@@ -186,13 +190,13 @@ A lane exchange (`ds_swizzle_b32`) inside a loop, in groups of whole 64-lane wav
 
 A [GPU check](../tools/check_paired_wave64.py) compares 18 synthetic programs with a model of the console, 256 waves each. All match on an RTX 4070 Ti SUPER and on a Radeon 610M forced to 32 lanes. The check covers lane masks and branches, lane reads and counts, DPP and row exchanges, shared memory with barriers, interleaved loops and groups of four waves. It doesn't cover buffers or textures, and it can't detect a missing memory ordering. Console code may also rely on a wave running in step without a barrier, which neither translation guarantees.
 
-On 39,999 recorded ProjectScarlett requests the second translation differs for 133 compute programs: 111 compile with DXC and DXV, and 22 are refused for lane swizzles, relative vector registers, implicit derivatives or one unhandled buffer write. This hasn't been tested in the game.
+On 39,999 recorded ProjectScarlett requests the second translation differs for 133 compute programs: 111 compile with DXC and DXV, and 22 are refused for lane swizzles, relative vector registers, implicit derivatives or one unhandled buffer write. Its output hasn't been verified in a game.
 
 A change to either translation shows in a [recorded set of outputs](../tools/shader-compiler/src/tests/hlsl/host_profiles.txt) that names the host profile affected. When the change is intended, update the record with `TUXBOX_BLESS_PROFILES=1` and `cargo test ... host_profiles`.
 
 ### Earlier survey
 
-Shader preparation reports only how many recorded requests xshader refused. `tools/triage_scarlett_shaders.py` runs the HLSL emitter on each recorded request in the prefix's `projectscarlett/<exe sha256>/requests` directory. It groups the refusal messages with program counters and register numbers masked. It does not run DXC and does not write to the cache. On 9,102 requests recorded through player selection, xshader translated 4,383 and refused 4,719. The largest groups were `s_load` with a dynamic SOFFSET (29%), sampler descriptors resolved from an inline word (19%), and wave reductions in divergent control flow (13%).
+Shader preparation reports only how many recorded requests xshader refused. `tools/triage_scarlett_shaders.py` runs the HLSL emitter on each recorded request in the prefix's `projectscarlett/<exe sha256>/requests` directory. It groups the refusal messages with program counters and register numbers masked, and excludes refused requests whose program translated via a sibling request (the provider tries several roots for one pipeline, so a refusal is often a discarded attempt rather than a lost program). It does not run DXC and does not write to the cache. On 9,102 requests recorded through player selection, xshader translated 4,383 and refused 4,719. The largest groups were `s_load` with a dynamic SOFFSET (29%), sampler descriptors resolved from an inline word (19%), and wave reductions in divergent control flow (13%).
 
 ## Reusing compiled shaders during play
 

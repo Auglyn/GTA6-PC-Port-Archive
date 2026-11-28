@@ -340,6 +340,14 @@ impl Recording {
         self.written_ranges.record(address, bytes);
     }
 
+    /// Note a fence label write this list makes once a queue runs it. Until
+    /// then a queue waiting on the label holds for it.
+    pub(super) fn label_written(&mut self, address: u64, value: u64) {
+        self.labels.push(memory_wait::Label::write(address, value));
+        let list = self.label_writes.get_or_insert_with(Default::default);
+        memory_wait::note_recorded_write(list, address, value);
+    }
+
     pub(super) fn record_unknown_write(&mut self) {
         self.active.indirect.written();
         self.written_ranges.record_unknown();
@@ -462,8 +470,10 @@ impl Recording {
         self.record_unknown_write();
         let null_usage = self.bindings.null_usage.clone();
         let native = self.active.native.clone();
+        let trace_name = self.bindings.trace_name.clone();
+        let owner = core::ptr::from_ref(list).addr();
         let dispatch = move || {
-            dispatch(&native);
+            crate::diagnostics::gpu_trace::around(&native, owner, "dispatch", trace_name.as_ref(), || dispatch(&native));
             if let Some(tag) = &null_usage {
                 crate::diagnostics::display::record_null(tag, false);
             }
@@ -595,8 +605,10 @@ impl Recording {
         let null_usage = self.bindings.null_usage.clone();
         let display_bound = self.display_bound;
         let native = self.active.native.clone();
+        let trace_name = self.bindings.trace_name.clone();
+        let owner = core::ptr::from_ref(list).addr();
         let draw = move || {
-            draw(&native);
+            crate::diagnostics::gpu_trace::around(&native, owner, "draw", trace_name.as_ref(), || draw(&native));
             if rasterizes {
                 crate::diagnostics::display::draw(display_bound, null_usage.is_some());
                 if let Some(tag) = &null_usage {

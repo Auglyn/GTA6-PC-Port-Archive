@@ -31,10 +31,11 @@ BASE_SUITES = ("cpu", "xmem", "xapu", "xgameruntime", "xcrdapi", "graphics", "gr
 OPTIONAL_PROVIDERS = {"dxc-utils": "dxc-utils/dxcompiler.dll", "xg": "xg/xg_xs.dll"}
 SUITES = (*BASE_SUITES, "d3d12-mesh", *OPTIONAL_PROVIDERS)
 # The scenarios of `lanes.exe --selftest`, one gate each.
-LANES_SCENARIOS = ("labels", "cross-queue", "compute-frame", "skipped-command", "copy-memory", "shared-texture",
+LANES_SCENARIOS = ("labels", "cross-queue", "cross-queue-late", "compute-frame", "skipped-command", "copy-memory", "shared-texture",
                    "indirect-dispatch", "gpu-indirect-dispatch", "gpu-indirect-order", "mesh-signature",
                    "dispatch-wait", "direct-copy-wait", "texture-readback", "texture-publication",
-                   "ray-tracing-builder", "thread-dimensions",
+                   "ray-tracing-builder", "ray-tracing-guest-memory", "ray-tracing-rehydrate",
+                   "thread-dimensions",
                    "descriptor-reclaim", "unwritten-descriptors")
 
 
@@ -1337,9 +1338,19 @@ def verify(host, output, adapter, selected=None, samples=1):
                       providers={"lanes/xmem.dll": memory_symbols, "lanes/GameInput.dll": ("#1",),
                                  "lanes/d3d12_xs.dll": ("D3D12XboxCreateDevice",)},
                       config="lanes/MicrosoftGame.config", device_factory="xbox",
-                      dependencies=("lanes/XboxBvhBuilder.dll",) if scenario == "ray-tracing-builder" else ())
-            # A card with mesh shaders also takes the refusal a card without them gets.
+                      dependencies=("lanes/XboxBvhBuilder.dll",) if scenario.startswith("ray-tracing-") else ())
             saved_profile = host.env.get("TUXBOX_HOST_PROFILE")
+            # A driver can refuse one CPU view heap as large as the guest heap, and
+            # none reports the size it takes. Refuse what an Intel UHD refuses, so
+            # every card keeps the guest heap in smaller CPU heaps.
+            host.env["TUXBOX_HOST_PROFILE"] = "cpu-view-heap=1048576"
+            check("lanes-selftest-descriptor-reclaim-split", "lanes/lanes.exe",
+                  ["--selftest", "descriptor-reclaim", *gpu_args, "--report"],
+                  rf"lanes-selftest PASS pci={pci} scenario=descriptor-reclaim passed=1",
+                  providers={"lanes/xmem.dll": memory_symbols, "lanes/GameInput.dll": ("#1",),
+                             "lanes/d3d12_xs.dll": ("D3D12XboxCreateDevice",)},
+                  config="lanes/MicrosoftGame.config", device_factory="xbox")
+            # A card with mesh shaders also takes the refusal a card without them gets.
             host.env["TUXBOX_HOST_PROFILE"] = "mesh=none"
             # The scenario itself requires no mesh shaders and a refused signature.
             check("lanes-selftest-mesh-signature-none", "lanes/lanes.exe",
@@ -1491,6 +1502,7 @@ GATE_LABELS = {
     "lanes-overlay": "TuxBox's performance panel on screen over Lanes",
     "lanes-selftest-labels": "Bottom-of-pipe label writes with and without a flush",
     "lanes-selftest-cross-queue": "Compute and direct queues waiting on each other's labels",
+    "lanes-selftest-cross-queue-late": "A compute queue held for a label whose recorded write is submitted six seconds later",
     "lanes-selftest-compute-frame": "Compute queue frame submission",
     "lanes-selftest-skipped-command": "A skipped command leaving its list and fence write intact",
     "lanes-selftest-copy-memory": "CopyMemoryToMemoryX direction and contents",
@@ -1500,12 +1512,15 @@ GATE_LABELS = {
     "lanes-selftest-gpu-indirect-dispatch": "GPU-written arguments controlling an indirect dispatch",
     "lanes-selftest-gpu-indirect-order": "Indirect arguments and counts read after the dispatch that wrote them",
     "lanes-selftest-mesh-signature": "A mesh dispatch signature made only when the device reports mesh shaders",
+    "lanes-selftest-descriptor-reclaim-split": "Descriptor slot reclamation with the guest heap kept in several CPU heaps, as when a host refuses one heap that large",
     "lanes-selftest-mesh-signature-none": "A mesh dispatch signature refused when the host profile takes mesh shaders away",
     "lanes-selftest-dispatch-wait": "A memory wait before and after a compute dispatch",
     "lanes-selftest-texture-readback": "A guest texture copied back to title memory",
     "lanes-selftest-texture-publication": "GPU texture writes published to title memory, leaving padding, closed pages and memory past the texture alone",
     "lanes-benchmark": "Lanes frame, submission, fence handover, copy and pipeline timings",
     "lanes-selftest-ray-tracing-builder": "Single, copied and batched builds through XboxBvhBuilder",
+    "lanes-selftest-ray-tracing-guest-memory": "A structure, its copy and a scene built in title memory that no resource names",
+    "lanes-selftest-ray-tracing-rehydrate": "Console structures rehydrated in title memory as host builds of their coded geometry, traced through a scene",
     "lanes-selftest-thread-dimensions": "Slot 80 thread-dimension dispatch converted using the bound PSO group size",
     "lanes-selftest-descriptor-reclaim": "Shader-visible descriptor slot reclamation across completed, in-flight, ClearState, and OOM lists",
     "lanes-selftest-unwritten-descriptors": "A descriptor table with slots the title never wrote, in a heap whose title memory held leftover bytes",

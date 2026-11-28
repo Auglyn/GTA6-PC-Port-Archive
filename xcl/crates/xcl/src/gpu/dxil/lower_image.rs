@@ -1657,6 +1657,7 @@ impl Lw {
                 let dims = lw.s.get_dimensions(tex.handle, None);
                 let count = lw.s.m.extract(dims, 3);
                 let loads_block = lw.block(Some(1));
+                lw.s.m.preserve_block_boundary(loads_block);
                 lw.br(loads_block);
                 lw.s.m.set_block(loads_block);
                 let inside: Vec<Value> = samples.iter().map(|&sv| lw.cmp(Pred::ULt, sv, count)).collect();

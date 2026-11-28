@@ -40,6 +40,7 @@ The game also imports Windows core API sets for services such as files, timing a
 | --- | --- |
 | `labels` | `Write32BitValueBottomOfPipeX` and `Write64BitValueBottomOfPipeX`, with and without a flush |
 | `cross-queue` | The compute queue waits for a direct-queue label, writes a 64-bit payload and signals a reply. The direct queue waits for the reply and copies the payload for CPU readback. |
+| `cross-queue-late` | The compute queue waits for a label whose write the direct queue has recorded and submits six seconds later. The compute queue must not run before that write. |
 | `compute-frame` | `ExecuteCommandListsX` on a compute queue |
 | `skipped-command` | A command that cannot be recorded leaves its list, and the list's fence write, intact |
 | `copy-memory` | `CopyMemoryToMemoryX` copies from the source to the destination |
@@ -54,8 +55,10 @@ The game also imports Windows core API sets for services such as files, timing a
 | `texture-readback` | `CopyMemoryToMemoryX` reads a guest texture into title memory |
 | `texture-publication` | The GPU writes a tiled guest texture several times while a compute queue waits for the last write's label. Title memory then holds each texel in its console position. The padding between texels, a page the title closed and write-watched memory past the texture are untouched. |
 | `ray-tracing-builder` | `XboxBvhBuilder` builds a structure with a size report, copies it and builds it again in a batch (needs ray tracing) |
+| `ray-tracing-guest-memory` | `XboxBvhBuilder` builds a structure and a scene in title memory that no resource names, with vertices, instance record and scratch there too, then copies the structure (needs ray tracing) |
+| `ray-tracing-rehydrate` | `XboxBvhBuilder` rehydrates two console structures 256 bytes apart in title memory. Each becomes a host build of the geometry its call names, in the console's meshlet-coded index and quantized position formats, one of them written only after the call, all named by an address mapped for the GPU before the data was written. Rays through a scene of both report the expected instance, geometry and primitive (needs ray tracing) |
 | `thread-dimensions` | Slot 80 `USE_THREAD_DIMENSIONS` (`0x20`) converts thread counts using the bound PSO's `[numthreads]` and fails closed without one |
-| `descriptor-reclaim` | Shader-visible descriptor heap reclamation across completed batches, overlapping in-flight `Reset()`, `ClearState`, evicted-slot rebinding, and unsubmitted pin exhaustion |
+| `descriptor-reclaim` | Shader-visible descriptor heap reclamation across completed batches, overlapping in-flight `Reset()`, `ClearState`, evicted-slot rebinding, and unsubmitted pin exhaustion. The check runs it again under `TUXBOX_HOST_PROFILE=cpu-view-heap=1048576`, which splits the guest heap across CPU heaps |
 | `unwritten-descriptors` | A heap whose title memory held leftover bytes, bound as a table whose root declares slots the title never writes. The dispatch must run and store its word. |
 | `xbox-shader` | A console shader's pipeline and dispatch ([shader cache](#shader-cache)) |
 | `bindless-compute`, `bindless-sampler` | Direct-indexed console compute programs through the paged resource index map ([compute roots](#compute-roots)); not part of `all` |
